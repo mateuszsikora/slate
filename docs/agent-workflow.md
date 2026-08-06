@@ -16,16 +16,26 @@ At minimum: `README.md`, `docs/design.md` (the full design — architecture deci
 
 ## 2. Pick an issue
 
+Several agents may be working the backlog at the same time. The `in-progress` label is what keeps two of them off the same issue, so read it before picking and set it as soon as you have picked.
+
 ```bash
-gh issue list --state open --milestone M0
+gh issue list --state open --milestone M0 --search "-label:in-progress"
 ```
 
 Rules:
 
 - Work the **lowest open milestone first**. M0 spikes gate the partition table and the runtime architecture; M1 gates everything that follows. Do not start M3 work while an M1 issue it depends on is open.
-- Skip issues already assigned or with an open linked PR.
+- **Never pick an issue labelled `in-progress`** — another agent has already claimed it. Same for issues already assigned or with an open linked PR.
 - One issue per PR. If an issue turns out to contain two independent pieces of work, say so and propose splitting it rather than shipping a double-sized PR.
-- Assign yourself and comment on the issue that you are starting.
+- Claim the issue before doing anything else: add the `in-progress` label, assign yourself, and comment that you are starting.
+
+  ```bash
+  gh issue edit <issue-number> --add-label in-progress
+  ```
+
+  Re-check the issue right after claiming it (`gh issue view <issue-number>`). If someone else labelled or assigned it in the meantime, drop your claim (`gh issue edit <issue-number> --remove-label in-progress`) and pick another issue.
+
+- Remove the label if you stop working on the issue without opening a PR — when you are blocked on a question, hand the work back so it does not sit claimed by nobody. Say so in the comment you leave. Once the PR is merged the issue closes and the label goes with it.
 
 ## 3. Analyse before implementing
 
@@ -36,7 +46,7 @@ Write a short plan as a comment on the issue:
 - How you will verify the "Done when" criteria — concretely, on hardware where the issue implies hardware.
 - Anything in the issue that is ambiguous or that you believe is wrong.
 
-**Ask questions when you need them.** Post them as an issue comment and stop. Do not guess on:
+**Ask questions when you need them.** Post them as an issue comment, remove the `in-progress` label so another agent can pick the issue up once it is answered, and stop. Do not guess on:
 
 - pin assignments, partition sizes, or anything that forces a serial reflash to change later;
 - the shape of a public API response — `docs/design.md` §4 is a contract, and changing it later breaks clients;
@@ -101,6 +111,7 @@ Then report back: the PR URL, a one-paragraph summary, and any question still bl
 ## What not to do
 
 - Do not close an issue without a merged PR.
+- Do not start work on an issue labelled `in-progress`, and do not leave the label on an issue you have abandoned.
 - Do not push to `main`.
 - Do not widen scope mid-PR — open a follow-up issue instead.
 - Do not mark hardware behaviour as verified from a successful build alone.
