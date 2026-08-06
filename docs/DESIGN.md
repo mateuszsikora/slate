@@ -241,7 +241,7 @@ This handles device discovery and authorization in a single step. Because the st
 
 ### 5.1 Connection
 
-Home Assistant's WebSocket API at `/api/websocket`, authenticated with a long-lived access token from the user profile. A dedicated account with limited privileges is recommended.
+Home Assistant's WebSocket API at `/api/websocket`, authenticated with a long-lived access token from the user profile. The token should belong to a dedicated account in the `system-users` group — see §12, which says why that group specifically and not the read-only one.
 
 Reconnect with exponential backoff: 1 s → 2 → 4 → 8 → 15 → 30 s (ceiling).
 
@@ -253,9 +253,23 @@ Re-subscription follows any `PUT /config` that changes the entity set.
 
 ### 5.3 Entity picker
 
-`GET /entities` requires the registries: `config/entity_registry/list` and `config/area_registry/list`. These require an administrator account. If the token lacks the privilege, the picker degrades to a flat list derived from `subscribe_entities` with no area grouping. This path must be implemented, not assumed away.
+`GET /entities` requires the registries: `config/entity_registry/list` and `config/area_registry/list`. Neither needs an administrator — S-4 measured both from a `system-users` and a `system-read-only` token and got payloads byte-identical to the administrator's, and no release checked, back to 2020.12.0, admin-gates a registry `list`. Only the mutating commands are gated.
 
-Registries are fetched once per connection and cached in RAM, not NVS.
+The picker therefore degrades on **failure, not on privilege**: firmware issues the command and falls back if it fails, for whatever reason — an older or unusual instance, a transport error, a future Home Assistant that tightens this. It does not predict a permission in advance and it does not check one. The fallback is a flat list derived from `subscribe_entities` with no area grouping, which yields every field of §4.1 except `area`.
+
+This path must be implemented, not assumed away — and it is needed more often than that reads. On the instance S-4 measured, 63 % of registry entries resolve to no area at all, so the flat ungrouped list is what the picker shows for the majority of a real installation regardless of permissions. It is a first-class presentation, not an error state, and the editor (§10) must make it look deliberate.
+
+`area` resolves through the **device**, not the entity:
+
+```
+entity_registry.area_id
+  ?? device_registry[entity.device_id].area_id
+  → area_registry[area_id].name
+```
+
+Zero of 1 045 entities on the measured instance carried `area_id` directly; all 387 area assignments came from the device. A `GET /entities` that reads only the entity registry returns a null `area` for every entity and looks like a bug, so `config/device_registry/list` is a third mandatory fetch.
+
+Registries are fetched once per connection and cached in RAM, not NVS. That RAM is PSRAM: the registry, device and state payloads together are hundreds of kilobytes on the wire and several times that once parsed, which does not fit internal RAM.
 
 ### 5.4 Service calls
 
@@ -503,7 +517,7 @@ Minimal by design — the device sits on a LAN, not on the internet.
 
 - The Home Assistant token lives only in NVS and is never returned by the API (masked in `GET /status`). It is the one secret that genuinely matters.
 - The device token guards write endpoints.
-- Documentation states plainly that a long-lived HA token carries full account privileges, and recommends a dedicated restricted account.
+- Documentation states plainly that a long-lived HA token carries full account privileges, and recommends a dedicated account in Home Assistant's **`system-users`** group. Not `system-admin`, which grants more than Slate needs, and explicitly **not `system-read-only`**, which does not work: S-4 measured that group reading every registry Slate needs while being refused `call_service`, so the panel renders a perfect dashboard on which nothing responds to a tap. The group has to be named, because "restricted" reads like "read-only" to anyone skimming. The failure is also quiet: a denied service call comes back as `home_assistant_error`, not `unauthorized`, so firmware matching on the error code classifies a permission problem as a transient fault and reverts the optimistic update (§5.4) on every tap, forever, with no hint that the account is the cause.
 - No HTTPS on the device. A deliberate trade-off: a self-signed certificate on an ESP32 is a worse experience than its absence on a local network.
 
 Rate limiting and origin allow-lists will be added if a concrete scenario requires them.
@@ -534,7 +548,7 @@ Answered in `docs/spikes/s3.md`: 1 409 680 B release, 1 547 600 B development, w
 
 Call `config/entity_registry/list` and `config/area_registry/list` with a non-admin token.
 
-Determines: whether the area-aware entity picker is a primary or a degraded feature.
+Answered in `docs/spikes/s4.md`: the area-aware picker is a primary feature. A `system-users` and a `system-read-only` token both read both registries in full, returning payloads byte-identical to an administrator's, and no release checked back to 2020.12.0 admin-gates a registry `list`. §5.3 and §12 are corrected accordingly. Two findings outrank the one the spike was asked for: `area` resolves entity → device → area, so `config/device_registry/list` is mandatory, and `system-read-only` cannot call services, which disqualifies it as the recommended account.
 
 ## 14. Milestones
 
