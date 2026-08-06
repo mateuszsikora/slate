@@ -33,11 +33,25 @@ Rules:
   gh issue edit <issue-number> --add-label in-progress
   ```
 
-  Re-check the issue right after claiming it (`gh issue view <issue-number>`). If someone else labelled or assigned it in the meantime, drop your claim (`gh issue edit <issue-number> --remove-label in-progress`) and pick another issue.
+  Re-check the issue right after claiming it (`gh issue view <issue-number> --comments`). If someone else labelled or assigned it in the meantime, drop your claim (`gh issue edit <issue-number> --remove-label in-progress`) and pick another issue.
 
 - Remove the label if you stop working on the issue without opening a PR — when you are blocked on a question, hand the work back so it does not sit claimed by nobody. Say so in the comment you leave. Once the PR is merged the issue closes and the label goes with it.
 
-## 3. Analyse before implementing
+## 3. Read the whole issue
+
+The issue body is only half of it. Decisions get made in the comments — a pin gets fixed, a scope gets cut, a question gets answered — and the body is rarely edited to match. Read everything before you plan:
+
+```bash
+gh issue view <issue-number> --comments
+```
+
+- Read **every comment, oldest to newest**, including ones left by other agents on an earlier claim of the same issue.
+- Where comments contradict the body, the **latest comment from the maintainer wins**. Say in your plan which part of the body you are overriding and why.
+- Follow the trail: referenced issues (`#12`), linked PRs, and the `docs/design.md` sections the issue names. A closed linked PR usually explains why a first attempt was abandoned.
+- If the issue was previously claimed and handed back, find the question that blocked it and check whether it has been answered. If it has not, do not re-claim the issue.
+- Note any comment that answers a question you would otherwise have had to ask — quote it in your plan so a reviewer can see where the decision came from.
+
+## 4. Analyse before implementing
 
 Write a short plan as a comment on the issue:
 
@@ -54,7 +68,7 @@ Write a short plan as a comment on the issue:
 
 Proceed without asking when the design document already answers the question.
 
-## 4. Implement
+## 5. Implement
 
 - Branch from `main`: `git checkout -b <type>/<issue-number>-<short-slug>`, e.g. `feat/12-dev-ota-upload`.
 - Match the surrounding code: same naming, same error handling, same comment density. Where there is no surrounding code yet, follow ESP-IDF conventions for firmware and standard React/TypeScript conventions for the editor.
@@ -62,7 +76,7 @@ Proceed without asking when the design document already answers the question.
 - Keep the diff scoped to the issue. Unrelated cleanups belong in a separate issue.
 - Do not commit secrets. Tokens live in NVS on the device, never in the repository.
 
-## 5. Verify
+## 6. Verify
 
 Do not open a PR on unverified work.
 
@@ -70,7 +84,7 @@ Do not open a PR on unverified work.
 - Exercise the change the way the issue's "Done when" describes it. For firmware that means flashing (over `curl` once development OTA exists) and observing real behaviour on the panel — not just a successful compile.
 - If you cannot verify because the hardware is not reachable, say so explicitly in the PR body. Do not describe unverified work as working.
 
-## 6. Commit
+## 7. Commit
 
 **Commits must be signed.** Signing is preconfigured (`commit.gpgsign=true`, GPG smartcard); the key may need a physical touch. Verify before pushing:
 
@@ -92,7 +106,7 @@ Refs #<issue-number>
 
 Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `spike`.
 
-## 7. Open a pull request
+## 8. Open a pull request
 
 ```bash
 gh pr create --base main --title "<type>: <summary>" --body "..."
@@ -111,6 +125,7 @@ Then report back: the PR URL, a one-paragraph summary, and any question still bl
 ## What not to do
 
 - Do not close an issue without a merged PR.
+- Do not start implementing from the issue body alone — the comments are part of the issue.
 - Do not start work on an issue labelled `in-progress`, and do not leave the label on an issue you have abandoned.
 - Do not push to `main`.
 - Do not widen scope mid-PR — open a follow-up issue instead.
