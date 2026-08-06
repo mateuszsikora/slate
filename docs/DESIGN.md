@@ -285,7 +285,28 @@ All LVGL access happens on one task; API handlers and the HA client post work to
 
 ### 6.3 Partition table
 
-The N8R8 variant has 8 MB of flash. Two ~3 MB application partitions for OTA, plus NVS, LittleFS and a coredump partition, fit but leave little margin. If the image with LVGL, TLS and fonts exceeds 3 MB, the 16 MB variant becomes a hardware requirement. Spike S-3 settles this before any code is written, because changing the layout later forces a full serial flash.
+The target module is the **ESP32-S3-WROOM-1-N16R8**: 16 MB of quad flash and 8 MB of octal PSRAM. That is what the board reads out of the silicon — flash JEDEC device id `0x4018` — rather than what the vendor documentation describes, which claims N8R8. Boards with 8 MB of flash are welcome to work, but they are not a goal and the table below does not fit one.
+
+The layout lives in `firmware/partitions.csv`:
+
+| Partition  | Type / subtype         | Offset   | Size |
+|------------|------------------------|---------:|-----:|
+| `nvs`      | data / nvs             | 0x9000   | 80 KB |
+| `otadata`  | data / ota             | 0x1D000  | 8 KB |
+| `phy_init` | data / phy             | 0x1F000  | 4 KB |
+| `ota_0`    | app                    | 0x20000  | 6 MB |
+| `ota_1`    | app                    | 0x620000 | 6 MB |
+| `littlefs` | data / littlefs (0x83) | 0xC20000 | 3.75 MB |
+| `coredump` | data / coredump        | 0xFE0000 | 128 KB |
+
+The sizes follow measurements rather than round numbers:
+
+- **6 MB per application slot.** S-3 measured the skeleton at 1.34 MiB release and 1.48 MiB development (`-Og`), and §11.1 makes the development image the one that travels over the wire daily. That figure is a lower bound — no UI runtime, no component library, no Home Assistant client, no configuration parser — so the slot is sized for growth rather than for today's image.
+- **3.75 MB of LittleFS.** The editor bundle (§10) targets under 400 KB gzipped and a configuration is capped at 64 KB (§3.1). The remainder is room for the deferred asset manager (§15), which would otherwise arrive as a reflash.
+- **128 KB of coredump.** An ELF dump of a twelve-task image resembling M1's — WiFi, lwIP, HTTP server, plus the LVGL and Home Assistant tasks — measures 21 KB. A dump stores each task's *used* stack, so the ceiling is the sum of the allocated ones: around 50 KB for that task set, and still inside 128 KB once M1 fills them. §11.3 depends on the dump surviving a panic, and a partition that truncates it is worse than no partition at all.
+- **`phy_init` is kept** even though `CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION` is off by default. Four kilobytes now cost nothing; enabling that option later without the partition costs a serial flash.
+
+NVS and LittleFS sit outside the application slots, so configuration and tokens survive an update (§11.4). Changing any of this later forces a full serial flash, which is why the table is settled before firmware code is written.
 
 ### 6.4 UI lifecycle
 
@@ -505,9 +526,9 @@ Pass: no visible stutter when switching pages. Determines: the maximum tile coun
 
 ### S-3 — Flash budget
 
-Build a skeleton with LVGL, WebSocket, TLS, two fonts and the icon set. Measure image size.
+Build a skeleton with LVGL, WebSocket, TLS, the three type steps of §8, the second icon size §7.1 needs, and the icon set — five faces, not two. Measure image size.
 
-Pass: fits in a 3 MB OTA partition on 8 MB flash. If it fails: the 16 MB board variant becomes a documented hardware requirement.
+Answered in `docs/spikes/s3.md`: 1 409 680 B release, 1 547 600 B development, which is 22.4 % and 24.6 % of the 6 MB application slot in §6.3. The original criterion was a 3 MB slot on 8 MB flash; the board turned out to have 16 MB, so the criterion is recorded as met rather than binding.
 
 ### S-4 — Home Assistant registry permissions
 
