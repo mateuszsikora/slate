@@ -1,0 +1,106 @@
+# Material Design Icons compiled into the Slate icon font.
+#
+# One MDI icon name per line, resolved to a codepoint by generate.sh against the
+# pinned MDI release. Comments and blank lines are ignored.
+#
+# Selection rule: an icon earns its place by being reachable from the component
+# set in design.md §7 or from a state those components must render. Nothing here
+# is speculative — design.md §8 budgets 60–80 glyphs and every one of them costs
+# flash at every size the font is rendered in.
+
+# --- System bar and connection state (design.md §3.2, §6.5) ---
+wifi
+wifi-off
+wifi-strength-1
+wifi-strength-2
+wifi-strength-3
+wifi-strength-4
+alert-circle-outline
+check-circle-outline
+clock-outline
+cog-outline
+home-outline
+pencil-outline
+refresh
+
+# --- light (design.md §7.1) ---
+lightbulb
+lightbulb-outline
+lightbulb-on
+lightbulb-on-outline
+lightbulb-group
+lightbulb-group-outline
+ceiling-light
+floor-lamp
+lamp
+track-light
+brightness-5
+brightness-6
+white-balance-sunny
+white-balance-incandescent
+palette
+
+# --- cover (design.md §7.2) ---
+window-shutter
+window-shutter-open
+window-shutter-alert
+blinds
+blinds-open
+curtains
+curtains-closed
+roller-shade
+roller-shade-closed
+garage
+garage-open
+window-closed-variant
+window-open-variant
+arrow-up
+arrow-down
+stop
+
+# --- sensor (design.md §7.3) — device_class selects the icon ---
+thermometer
+thermometer-low
+thermometer-high
+water-percent
+gauge
+weather-sunny
+weather-night
+weather-cloudy
+weather-rainy
+weather-windy
+molecule-co2
+air-filter
+lightning-bolt
+power-plug
+water
+fire
+volume-high
+battery
+battery-50
+battery-outline
+speedometer
+motion-sensor
+door-open
+door-closed
+lock
+lock-open-variant
+leaf
+
+# --- scene (design.md §7.4) ---
+movie-open-outline
+sofa-outline
+silverware-fork-knife
+party-popper
+playlist-play
+star-outline
+exit-run
+sleep
+coffee-outline
+briefcase-outline
+
+# --- Fallbacks (design.md §3.1, §7.5) ---
+# An unknown component type and a missing entity must render something, never
+# crash and never leave an empty tile.
+help-circle-outline
+image-broken-variant

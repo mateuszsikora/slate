@@ -1,0 +1,18 @@
+# ESP-IDF build output
+firmware/build/
+firmware/build-*/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
+
+# Generated LVGL fonts. The sources of truth are tools/fonts/icons.txt and
+# tools/fonts/generate.sh; the .c files are build output and would otherwise
+# add ~1.1 MB of unreviewable hex to every glyph-list change, permanently.
+# Run tools/fonts/generate.sh before building the firmware.
+firmware/main/assets/*.c
+
+# Font generation scratch — upstream TTFs are fetched, not vendored
+tools/fonts/.work/
+
+.DS_Store
