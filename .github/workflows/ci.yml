@@ -1,0 +1,235 @@
+# Slate CI — the build gate docs/agent-workflow.md §6 asks for and nothing enforced.
+#
+# This checks compilation and nothing else. §6 of that document is explicit that a
+# successful compile is not verification of firmware behaviour, so a green check here
+# does not satisfy any issue's "Done when" — the panel is still verified by flashing
+# it. What CI buys is that a broken build arrives before review rather than after
+# somebody pulls.
+#
+# It does catch one class of failure that nobody can catch locally. firmware/sdkconfig
+# is gitignored and every developer has one, and ESP-IDF consults SDKCONFIG_DEFAULTS
+# only when no sdkconfig exists (docs/spikes/s3.md, which lost two measurements to
+# exactly this). A change that builds on one machine purely because of an untracked
+# local configuration builds nowhere else. CI is the only place that ever builds from
+# what is actually committed.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# There are deliberately no path filters. The repository is documentation-heavy and
+# skipping the build on a docs-only pull request is tempting, but paths-ignore leaves
+# a required check pending forever rather than reporting success, which blocks the
+# merge it was supposed to speed up. With ccache the build is short enough not to care.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The generated LVGL fonts are build output (.gitignore) and nothing links them yet
+  # — that is #21. The job earns its place before then anyway: generate.sh fails hard
+  # when icons.txt names an icon the pinned MDI release does not carry, and that is a
+  # component rendering a blank box at runtime, caught here without flashing anything.
+  fonts:
+    name: fonts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Keyed on the two files that decide the output, so a normal pull request
+      # touches the network not at all, and any change to the glyph list or the
+      # script misses the cache and re-runs the resolution above.
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            firmware/main/assets
+            tools/fonts/.work
+          key: fonts-${{ hashFiles('tools/fonts/generate.sh', 'tools/fonts/icons.txt') }}
+
+      - name: Generate
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: tools/fonts/generate.sh
+
+      # Sizes are of the C sources, not of flash. The flash figures in
+      # docs/spikes/s3.md come from the map file and only become comparable once #21
+      # links the fonts into the image; quoting these against those would be wrong.
+      - name: Report
+        run: |
+          {
+            echo '### Fonts'
+            echo
+            echo '| Source | Bytes |'
+            echo '|--------|------:|'
+            for f in firmware/main/assets/*.c; do
+              echo "| \`$(basename "$f")\` | $(stat -c %s "$f") |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fonts
+          path: firmware/main/assets/*.c
+          retention-days: 14
+
+  firmware:
+    name: firmware (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    needs: fonts
+    # Pinned to the toolchain docs/spikes/s3.md measured every number on and
+    # firmware/dependencies.lock records, so a size reported here is comparable with
+    # the spike rather than only with itself.
+    container: espressif/idf:v5.5.5
+    defaults:
+      run:
+        working-directory: firmware
+    strategy:
+      # Both variants report. One failing tells you less than which one failed.
+      fail-fast: false
+      matrix:
+        include:
+          # §11.1 makes development OTA the daily workflow, so the -Og image is the
+          # one that actually travels over the wire and the one that has to fit. It
+          # is what sdkconfig.defaults produces on its own — ESP-IDF optimises for
+          # debugging unless told otherwise.
+          - variant: development
+            sdkconfig_defaults: sdkconfig.defaults
+          - variant: release
+            sdkconfig_defaults: sdkconfig.defaults;../.github/sdkconfig.ci-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        working-directory: .
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: fonts
+          path: firmware/main/assets
+
+      - uses: actions/cache@v4
+        with:
+          # ccache 4 uses the XDG path on a clean Linux home. ~/.ccache is only
+          # selected when that legacy directory already exists, which a fresh
+          # Actions container does not have.
+          path: ~/.cache/ccache
+          key: ccache-${{ matrix.variant }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.variant }}-
+
+      # Keyed on the lock file, which is committed precisely so that a build resolves
+      # the same components twice. A cache hit here also means the build does not
+      # depend on the component registry being up.
+      - uses: actions/cache@v4
+        with:
+          path: firmware/managed_components
+          key: components-${{ hashFiles('firmware/dependencies.lock') }}
+
+      # Separate build directory and an explicit -DSDKCONFIG per variant. The two
+      # legs run on separate machines and could not collide here, but the same
+      # commands run locally would, in the way docs/spikes/s3.md documents: a second
+      # variant silently rebuilding the first one's configuration and reporting its
+      # size as a new measurement.
+      - name: Build
+        env:
+          IDF_CCACHE_ENABLE: '1'
+          # Keep the writer and actions/cache pointed at the same, explicit path.
+          CCACHE_DIR: /github/home/.cache/ccache
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          idf.py -B "build-${{ matrix.variant }}" \
+                 -DSDKCONFIG="build-${{ matrix.variant }}/sdkconfig" \
+                 -DSDKCONFIG_DEFAULTS="${{ matrix.sdkconfig_defaults }}" \
+                 build
+
+      # Component Manager re-solves dependencies and rewrites dependencies.lock
+      # when an idf_component.yml changes. A successful compile must not hide that
+      # generated change: the committed lock is what makes the next clean build use
+      # the same component sources as this one.
+      - name: Check the dependency lock is current
+        run: |
+          if ! git ls-files --error-unmatch dependencies.lock >/dev/null 2>&1; then
+            echo '::error::firmware/dependencies.lock must be committed'
+            exit 1
+          fi
+          if ! git diff --quiet -- dependencies.lock; then
+            echo '::error::firmware/dependencies.lock changed during the build; regenerate and commit it'
+            git diff -- dependencies.lock
+            exit 1
+          fi
+
+      # Verify the variant is the one it claims to be. This is the other half of the
+      # s3.md trap: a build that silently used the wrong defaults still succeeds, and
+      # the size it reports is then a plausible number about the wrong image.
+      - name: Check the configuration is the intended one
+        run: |
+          conf="build-${{ matrix.variant }}/sdkconfig"
+          case "${{ matrix.variant }}" in
+            release)     want=CONFIG_COMPILER_OPTIMIZATION_SIZE=y ;;
+            development) want=CONFIG_COMPILER_OPTIMIZATION_DEBUG=y ;;
+          esac
+          grep -qx "$want" "$conf" || {
+            echo "::error::$conf does not contain $want"
+            grep -E '^CONFIG_COMPILER_OPTIMIZATION_[A-Z]+=y' "$conf"
+            exit 1
+          }
+
+      # The build already fails when the image does not fit, so this is not a gate —
+      # it is the number itself, in the pull request, so that growth against S-3's
+      # 22.4 % release / 24.6 % development is visible without anyone going looking.
+      - name: Report size
+        run: |
+          bin="build-${{ matrix.variant }}/slate.bin"
+          bytes=$(stat -c %s "$bin")
+          # Read the slot out of the same partitions.csv the build validated, so the
+          # percentage cannot drift from the table §6.3 settled.
+          slot=$(python3 -c "import csv; print(next(int(r[4], 0) for r in csv.reader(open('partitions.csv')) if r and r[0].strip() == 'ota_0'))")
+          {
+            echo "### firmware (${{ matrix.variant }})"
+            echo
+            echo "\`slate.bin\` — **$bytes B**, $(python3 -c "print(f'{$bytes / $slot * 100:.1f}')") % of the $slot B application slot"
+            echo
+            echo '<details><summary>idf.py size</summary>'
+            echo
+            echo '```'
+            . "$IDF_PATH/export.sh" >/dev/null
+            idf.py -B "build-${{ matrix.variant }}" size
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # §11.1's host-side OTA is a `curl --data-binary @build/slate.bin`, so this is a
+      # pull request's build being flashable to the panel from any machine with no
+      # ESP-IDF on it. The .elf and .map are what a core dump (§11.3) and a size
+      # regression are read against, and both are useless once the runner is gone.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slate-${{ matrix.variant }}
+          path: |
+            firmware/build-${{ matrix.variant }}/slate.bin
+            firmware/build-${{ matrix.variant }}/slate.elf
+            firmware/build-${{ matrix.variant }}/slate.map
+          retention-days: 14
+
+  # Require this one in branch protection, not the jobs above. Matrix leg names change
+  # whenever the matrix does, and a required check that no longer exists blocks every
+  # merge until someone edits the repository settings.
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    needs: [fonts, firmware]
+    if: always()
+    steps:
+      - name: Gate
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

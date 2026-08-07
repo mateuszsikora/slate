@@ -1,0 +1,14 @@
+# Overlay for the release image CI measures, applied on top of
+# firmware/sdkconfig.defaults.
+#
+# It lives here rather than in firmware/ on purpose. §11.1 and docs/spikes/s3.md both
+# describe two images — a release build and the -Og development build that travels
+# over the wire daily — but no firmware issue has yet decided what the shipped image
+# is compiled at, and #56 deliberately left the optimisation level alone. Putting this
+# under firmware/ would take that decision in a CI change.
+#
+# So this file says what CI builds, not what Slate ships. When an issue settles the
+# shipped optimisation level it moves into firmware/sdkconfig.defaults and the release
+# leg of the matrix drops the overlay.
+
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
