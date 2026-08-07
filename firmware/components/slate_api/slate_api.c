@@ -249,6 +249,38 @@ static bool add_string_or_null(cJSON *object, const char *name, const char *valu
     return cJSON_AddNullToObject(object, name) != NULL;
 }
 
+typedef struct {
+    bool up;
+    esp_netif_ip_info_t ip;
+} setup_ap_snapshot_t;
+
+/**
+ * Read the setup interface without letting its pointer escape the TCP/IP task.
+ *
+ * esp_netif_get_handle_from_ifkey() only serialises the lookup. The returned
+ * pointer is not retained, so the setup task can destroy it before a caller's
+ * following esp_netif_is_netif_up() or esp_netif_get_ip_info(). Iterating and
+ * copying the two values inside esp_netif_tcpip_exec() makes the whole read one
+ * operation with respect to esp_netif_destroy().
+ */
+static esp_err_t setup_ap_snapshot(void *ctx)
+{
+    setup_ap_snapshot_t *snapshot = ctx;
+
+    for (esp_netif_t *netif = esp_netif_next_unsafe(NULL); netif != NULL;
+         netif = esp_netif_next_unsafe(netif)) {
+        const char *key = esp_netif_get_ifkey(netif);
+        if (key == NULL || strcmp(key, "WIFI_AP_DEF") != 0) {
+            continue;
+        }
+
+        snapshot->up = esp_netif_is_netif_up(netif);
+        return snapshot->up ? esp_netif_get_ip_info(netif, &snapshot->ip) : ESP_OK;
+    }
+
+    return ESP_ERR_NOT_FOUND;
+}
+
 static cJSON *network_json(const slate_wifi_status_t *status)
 {
     cJSON *network = cJSON_CreateObject();
@@ -269,13 +301,13 @@ static cJSON *network_json(const slate_wifi_status_t *status)
      * device is currently on or offering", and a panel that is on one is not
      * offering one for much longer.
      */
-    esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    bool on_setup_ap = !status->connected && ap != NULL && esp_netif_is_netif_up(ap);
+    setup_ap_snapshot_t ap = {0};
+    esp_err_t ap_err = esp_netif_tcpip_exec(setup_ap_snapshot, &ap);
+    bool on_setup_ap = !status->connected && ap_err == ESP_OK && ap.up;
 
     char ap_address[16] = {0};
-    esp_netif_ip_info_t ip = {0};
-    if (on_setup_ap && esp_netif_get_ip_info(ap, &ip) == ESP_OK) {
-        esp_ip4addr_ntoa(&ip.ip, ap_address, sizeof(ap_address));
+    if (on_setup_ap) {
+        esp_ip4addr_ntoa(&ap.ip.ip, ap_address, sizeof(ap_address));
     }
 
     /* §9.2 and §4.3 make the access point's SSID the device name — "so one panel

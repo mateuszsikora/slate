@@ -277,6 +277,23 @@ static const char *string_field(const cJSON *object, const char *name)
     return cJSON_IsString(item) ? item->valuestring : NULL;
 }
 
+/** An optional string distinguishes absence/null from a present value of the wrong type. */
+static bool optional_string_field(const cJSON *object, const char *name, const char **out)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, name);
+    *out = NULL;
+
+    if (item == NULL || cJSON_IsNull(item)) {
+        return true;
+    }
+    if (!cJSON_IsString(item)) {
+        return false;
+    }
+
+    *out = item->valuestring;
+    return true;
+}
+
 /**
  * Validate §4.1's `ipv4` object and report the mode it asks for.
  *
@@ -312,8 +329,14 @@ static const char *validate_ipv4(const cJSON *ipv4, bool *is_static)
         *is_static = strcmp(mode, "static") == 0;
     }
 
-    const char *address_text = string_field(ipv4, "address");
-    const char *gateway_text = string_field(ipv4, "gateway");
+    const char *address_text = NULL;
+    const char *gateway_text = NULL;
+    if (!optional_string_field(ipv4, "address", &address_text)) {
+        return "bad_address";
+    }
+    if (!optional_string_field(ipv4, "gateway", &gateway_text)) {
+        return "bad_gateway";
+    }
 
     if (*is_static && (address_text == NULL || gateway_text == NULL)) {
         /* A static configuration without both of these is not one. #63 resolves
@@ -395,6 +418,7 @@ static const char *read_body(httpd_req_t *req, char *buffer, size_t size)
 static esp_err_t wifi_set_handler(httpd_req_t *req)
 {
     char body[BODY_MAX];
+    char accepted_ssid[SLATE_WIFI_SSID_BUF_LEN] = {0};
     const char *problem = read_body(req, body, sizeof(body));
     if (problem != NULL) {
         /* Nothing was read, or not all of it was, so the connection goes with
@@ -415,7 +439,7 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
     }
 
     const char *ssid = string_field(root, "ssid");
-    const char *password = string_field(root, "password");
+    const char *password = NULL;
     const char *error = NULL;
     bool is_static = false;
 
@@ -423,6 +447,8 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
         error = "ssid_required";
     } else if (strlen(ssid) >= SLATE_WIFI_SSID_BUF_LEN) {
         error = "ssid_too_long";
+    } else if (!optional_string_field(root, "password", &password)) {
+        error = "invalid_json";
     } else if (password != NULL && strlen(password) >= SLATE_WIFI_PASSWORD_BUF_LEN) {
         error = "password_too_long";
     }
@@ -447,6 +473,10 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
 
     esp_err_t err = ESP_OK;
     if (error == NULL) {
+        /* `ssid` belongs to `root`, which is deleted before the response is
+         * built. Keep the accepted value rather than borrowing freed cJSON
+         * storage on the success path. */
+        strlcpy(accepted_ssid, ssid, sizeof(accepted_ssid));
         err = slate_wifi_connect(ssid, password);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "storing credentials for \"%s\": %s", ssid, esp_err_to_name(err));
@@ -480,7 +510,7 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
     cJSON *response = cJSON_CreateObject();
     cJSON *ipv4 = cJSON_AddObjectToObject(response, "ipv4");
     bool ok = ipv4 != NULL && cJSON_AddStringToObject(ipv4, "mode", "dhcp") != NULL &&
-              cJSON_AddStringToObject(response, "ssid", ssid) != NULL;
+              cJSON_AddStringToObject(response, "ssid", accepted_ssid) != NULL;
     if (!ok) {
         cJSON_Delete(response);
         response = NULL;
@@ -723,14 +753,20 @@ esp_err_t slate_setup_selftest(void)
     static const char PROBE[] = "GET /hotspot-detect.html HTTP/1.0\r\nHost: captive.apple.com"
                                 "\r\nConnection: close\r\n\r\n";
 
-    /* Both of these are refusals, so nothing here can change what network the
-     * panel is trying to join. */
+    /* Every body below is a refusal, so nothing here can change what network
+     * the panel is trying to join. */
     static const char STATIC_COHERENT[] =
         "{\"ssid\":\"selftest\",\"password\":\"selftest\",\"ipv4\":{\"mode\":\"static\","
         "\"address\":\"192.168.1.42/24\",\"gateway\":\"192.168.1.1\"}}";
     static const char STATIC_BAD_GATEWAY[] =
         "{\"ssid\":\"selftest\",\"password\":\"selftest\",\"ipv4\":{\"mode\":\"static\","
         "\"address\":\"192.168.1.42/24\",\"gateway\":\"10.0.0.1\"}}";
+    static const char BAD_PASSWORD_TYPE[] =
+        "{\"ssid\":\"selftest\",\"password\":false}";
+    static const char BAD_ADDRESS_TYPE[] =
+        "{\"ssid\":\"selftest\",\"ipv4\":{\"mode\":\"dhcp\",\"address\":42}}";
+    static const char BAD_GATEWAY_TYPE[] =
+        "{\"ssid\":\"selftest\",\"ipv4\":{\"mode\":\"dhcp\",\"gateway\":false}}";
 
     int failures = 0;
 
@@ -743,6 +779,13 @@ esp_err_t slate_setup_selftest(void)
                              STATIC_COHERENT, 400, "\"error\":\"static_unsupported\"");
     failures += !expect_post("a bad gateway is named before the mode", SLATE_SETUP_AP_ADDRESS,
                              STATIC_BAD_GATEWAY, 400, "\"error\":\"bad_gateway\"");
+    failures += !expect_post("a non-string password is not treated as absent",
+                             SLATE_SETUP_AP_ADDRESS, BAD_PASSWORD_TYPE, 400,
+                             "\"error\":\"invalid_json\"");
+    failures += !expect_post("a non-string address is refused", SLATE_SETUP_AP_ADDRESS,
+                             BAD_ADDRESS_TYPE, 400, "\"error\":\"bad_address\"");
+    failures += !expect_post("a non-string gateway is refused", SLATE_SETUP_AP_ADDRESS,
+                             BAD_GATEWAY_TYPE, 400, "\"error\":\"bad_gateway\"");
 
     /* And nothing else. §12: "a panel moved to a hostile network still holds
      * every secret behind a token that only the screen has shown." */

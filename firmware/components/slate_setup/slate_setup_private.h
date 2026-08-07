@@ -95,7 +95,7 @@ void slate_setup_dns_stop(void);
  * verifiable on hardware without a phone in the loop.
  *
  * Logs PASS/FAIL per case and returns ESP_FAIL if any case failed. It never
- * stores credentials: the one `POST /wifi` it makes is a refusal.
+ * stores credentials: every `POST /wifi` it makes is a refusal.
  */
 esp_err_t slate_setup_selftest(void);
 
