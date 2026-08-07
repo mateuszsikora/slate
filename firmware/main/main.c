@@ -2,8 +2,8 @@
  * Slate — firmware entry point.
  *
  * At this point in M1 the application is the store, the WiFi station and the
- * clock. The display (#6), the setup access point (#55), the HTTP API (#10)
- * and OTA (#11, #12) each attach here as they land, in that order, because
+ * clock and the HTTP API. The display (#6), setup access point (#55) and OTA
+ * (#11, #12) each attach here as they land, in that order, because
  * each one depends on the one before it having somewhere to keep its state.
  *
  * The boot report below is the only user interface the firmware currently has.
@@ -25,6 +25,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 
+#include "slate_api.h"
 #include "slate_store.h"
 #include "slate_time.h"
 #include "slate_wifi.h"
@@ -238,6 +239,23 @@ static void start_network(void)
 #endif
 }
 
+static void start_api(void)
+{
+    /* An API failure is not made recoverable by rebooting into the same
+     * allocation failure. Keep the device alive so #55's screen can report it
+     * and the station can still reconnect; remote management is degraded for
+     * this boot and the error remains on serial. */
+    esp_err_t err = slate_api_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP API degraded: %s — continuing", esp_err_to_name(err));
+        return;
+    }
+
+#ifdef SLATE_API_SELFTEST
+    slate_api_selftest();
+#endif
+}
+
 void app_main(void)
 {
     /*
@@ -287,4 +305,5 @@ void app_main(void)
 
     provision_wifi();
     start_network();
+    start_api();
 }
