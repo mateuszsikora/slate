@@ -87,6 +87,12 @@ extern "C" {
 #define SLATE_HA_TOKEN_MAX_LEN 512
 #define SLATE_HA_URL_MAX_LEN   128
 
+/* 802.11: an SSID is at most 32 bytes and a WPA2 passphrase at most 63. Both
+ * buffers include the terminator, so they are what `esp_wifi`'s own
+ * wifi_sta_config_t fields hold. */
+#define SLATE_WIFI_SSID_BUF_LEN     33
+#define SLATE_WIFI_PASSWORD_BUF_LEN 64
+
 /*
  * NVS keys live in one namespace and are listed here rather than spelled at
  * each call site, because a typo in a key name is a silent "not configured"
@@ -95,12 +101,12 @@ extern "C" {
  *
  * NVS keys are limited to 15 characters; every name below is inside that.
  *
- * One key is deliberately absent: the Home Assistant token. §12 makes it the
- * value that must not reach an API response, and a key constant a serialiser
- * can name is a key constant a serialiser can read — so it is private to this
- * component and reachable only through slate_store_ha_token_get().
- * slate_store_str_get() refuses it by name. The WiFi passphrase §12 protects
- * the same way will want the same treatment when #55 writes it.
+ * Two keys are deliberately absent: the Home Assistant token and the WiFi
+ * passphrase. §12 makes both values that must not reach an API response, and a
+ * key constant a serialiser can name is a key constant a serialiser can read —
+ * so they are private to this component and reachable only through
+ * slate_store_ha_token_get() and slate_store_wifi_password_get().
+ * slate_store_str_get() refuses them by name.
  */
 #define SLATE_NVS_NAMESPACE "slate"
 
@@ -279,6 +285,59 @@ esp_err_t slate_store_ha_token_get(char *out, size_t out_len);
 
 /** @brief Forget the Home Assistant URL and token. */
 esp_err_t slate_store_ha_clear(void);
+
+/* --- Station credentials (§12) ------------------------------------------ */
+
+/**
+ * @brief Persist the station SSID and passphrase together.
+ *
+ * `POST /wifi` (#55) writes them; #8's state machine reads them at boot and
+ * after a change. One NVS commit, for the reason slate_store_ha_set() gives:
+ * a power cut must not leave an SSID with a stale passphrase, which is a
+ * configured-looking panel that reports `bad_password` forever.
+ *
+ * `password` may be NULL or empty for an open network — the distinction the
+ * store keeps is "configured or not", and that is the SSID's job alone.
+ *
+ * ESP_ERR_INVALID_SIZE if either value exceeds what 802.11 allows; the caller
+ * validates shape, not this.
+ */
+esp_err_t slate_store_wifi_set(const char *ssid, const char *password);
+
+/**
+ * @brief Read the configured station SSID. ESP_ERR_NOT_FOUND if unconfigured.
+ *
+ * `out_len` should be SLATE_WIFI_SSID_BUF_LEN. This is `sta_ssid` in
+ * §4.1's `/info.network`, which exists even while the access point is up.
+ */
+esp_err_t slate_store_wifi_ssid_get(char *out, size_t out_len);
+
+/**
+ * @brief Whether station credentials are stored.
+ *
+ * §9.4's cold-boot branch turns on exactly this: no credentials raises the
+ * setup access point immediately, credentials mean three association attempts
+ * first. Cached, so the state machine does not read flash to make the
+ * decision.
+ */
+bool slate_store_wifi_is_configured(void);
+
+/**
+ * @brief Read the station passphrase.
+ *
+ * For the WiFi station and nothing else — §12 keeps this out of the API and
+ * out of the configuration document. slate_store_str_get() refuses the key, so
+ * this is the only way to it. ESP_ERR_NOT_FOUND if the network is open.
+ */
+esp_err_t slate_store_wifi_password_get(char *out, size_t out_len);
+
+/**
+ * @brief Forget the station credentials — `DELETE /wifi` (§9.5).
+ *
+ * The passphrase is erased first, so an interrupted clear cannot leave the
+ * secret behind an SSID that is already gone.
+ */
+esp_err_t slate_store_wifi_clear(void);
 
 /* --- Settings ----------------------------------------------------------- */
 

@@ -1,29 +1,33 @@
 /*
  * Slate — firmware entry point.
  *
- * At this point in M1 the application is the store and nothing else. The
- * display (#6), WiFi and the setup access point (#8, #55), the HTTP API (#10)
- * and OTA (#11, #12) each attach here as they land, in that order, because each
- * one depends on the one before it having somewhere to keep its state.
+ * At this point in M1 the application is the store, the WiFi station and the
+ * clock. The display (#6), the setup access point (#55), the HTTP API (#10)
+ * and OTA (#11, #12) each attach here as they land, in that order, because
+ * each one depends on the one before it having somewhere to keep its state.
  *
  * The boot report below is the only user interface the firmware currently has.
- * It exists to answer the question this issue is judged on — is the device
- * token the same one as before the reboot — and it answers it with a
- * fingerprint rather than the token. The token itself belongs in exactly one
- * place, §4.3's pairing QR on the screen; a serial log is a thing people paste
- * into issues.
+ * It exists to answer the questions the landed issues are judged on — is the
+ * device token the same one as before the reboot, did the station come back on
+ * its own — and it answers the first with a fingerprint rather than the token.
+ * The token itself belongs in exactly one place, §4.3's pairing QR on the
+ * screen; a serial log is a thing people paste into issues.
  */
 
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_err.h"
+#include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_system.h"
 
 #include "slate_store.h"
+#include "slate_time.h"
+#include "slate_wifi.h"
 
 static const char *TAG = "slate";
 
@@ -118,6 +122,122 @@ static void store_selftest(void)
 }
 #endif
 
+/*
+ * The hand-off #55 and #6 will subscribe to, printed until they exist.
+ *
+ * It is here rather than inside slate_wifi so the component has at least one
+ * external subscriber from the day it lands: an event nobody listens to is an
+ * event whose payload is wrong in a way nothing notices.
+ */
+static void network_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void) arg;
+    (void) base;
+
+    switch ((slate_wifi_event_id_t) id) {
+    case SLATE_WIFI_EVENT_CONNECTED: {
+        const slate_wifi_status_t *status = data;
+        ESP_LOGI(TAG, "network: on \"%s\" at %s, rssi %d dBm", status->sta_ssid, status->ip,
+                 status->rssi);
+        break;
+    }
+
+    case SLATE_WIFI_EVENT_DISCONNECTED: {
+        const slate_wifi_status_t *status = data;
+        ESP_LOGW(TAG, "network: down after %u attempt(s), last_error %s", status->attempts,
+                 slate_wifi_error_str(status->last_error));
+        break;
+    }
+
+    case SLATE_WIFI_EVENT_SETUP_REQUESTED: {
+        const slate_wifi_setup_reason_t *reason = data;
+        static const char *WHY[] = {"no credentials", "could not connect", "station lost"};
+        ESP_LOGW(TAG, "network: setup access point wanted — %s (#55 raises it)", WHY[*reason]);
+        break;
+    }
+
+    case SLATE_WIFI_EVENT_SETUP_RELEASED:
+        ESP_LOGI(TAG, "network: setup access point no longer needed (#55 tears it down)");
+        break;
+    }
+}
+
+/*
+ * Credentials from the build, until #55's `POST /wifi` exists.
+ *
+ *     idf.py -DSLATE_WIFI_SSID='"my-network"' -DSLATE_WIFI_PASSWORD='"secret"' \
+ *            build flash monitor
+ *
+ * Written only when they differ from what is stored, so a boot without the
+ * knobs does not undo a `DELETE /wifi`, and so the §9.4 paths that depend on
+ * NVS surviving a reboot can be exercised. `idf.py erase-flash` is how to get
+ * back to a device with no credentials at all.
+ *
+ * This is a development knob and comes out with #55. It is also the reason the
+ * repository must not carry a default: a passphrase in a build file is a
+ * passphrase in git history (§12).
+ */
+static void provision_wifi(void)
+{
+#ifdef SLATE_WIFI_SSID
+#ifndef SLATE_WIFI_PASSWORD
+#define SLATE_WIFI_PASSWORD NULL
+#endif
+    char stored[SLATE_WIFI_SSID_BUF_LEN];
+    if (slate_store_wifi_ssid_get(stored, sizeof(stored)) == ESP_OK &&
+        strcmp(stored, SLATE_WIFI_SSID) == 0) {
+        return;
+    }
+
+    esp_err_t err = slate_store_wifi_set(SLATE_WIFI_SSID, SLATE_WIFI_PASSWORD);
+    ESP_LOGW(TAG, "provisioned \"%s\" from the build: %s", SLATE_WIFI_SSID,
+             esp_err_to_name(err));
+#endif
+}
+
+static void start_network(void)
+{
+    esp_err_t err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "event loop: %s — no network this boot", esp_err_to_name(err));
+        return;
+    }
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(SLATE_WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                                        network_event, NULL, NULL));
+
+    /*
+     * Not ESP_ERROR_CHECK, for the reason slate_store_init() is not: §9 has no
+     * state in which a powered panel is unreachable, and a radio that would
+     * not start is not made reachable by rebooting into the same failure.
+     */
+    err = slate_wifi_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "wifi degraded: %s — continuing", esp_err_to_name(err));
+        return;
+    }
+
+    /*
+     * The number #55 asks for. S-2 measured 104 167 B of internal DMA-capable
+     * memory free with the station alone (§6.2), and the setup access point's
+     * second interface has to come out of what is left after this line — so it
+     * is printed on every boot rather than measured once and written down.
+     */
+    ESP_LOGI(TAG, "free internal DMA-capable memory with the station up: %u B",
+             (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+
+    err = slate_time_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "clock degraded: %s — continuing", esp_err_to_name(err));
+        return;
+    }
+
+#ifdef SLATE_TIMEZONE
+    /* §3.3 puts this in the configuration document, which #19 parses. The knob
+     * stands in until it does, and goes away with it. */
+    slate_time_set_timezone(SLATE_TIMEZONE);
+#endif
+}
+
 void app_main(void)
 {
     /*
@@ -164,4 +284,7 @@ void app_main(void)
 #ifdef SLATE_STORE_SELFTEST
     store_selftest();
 #endif
+
+    provision_wifi();
+    start_network();
 }

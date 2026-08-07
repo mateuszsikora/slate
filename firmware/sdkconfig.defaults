@@ -46,6 +46,15 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # that justifies it. It is not inherited from the spikes: neither S-2 nor S-3
 # records a tick rate.
 
+# --- Clock (§6.1) ---
+# The router's own NTP server arrives with the DHCP lease and is preferred over
+# the compiled-in pool, which is what makes the clock work on a LAN with no
+# route to the internet — the topology of §2 needs nothing else from outside.
+# Two server slots because the DHCP one takes slot 0 and the fallback moves to
+# slot 1; see slate_time.c, which spells the same arrangement in code.
+CONFIG_LWIP_DHCP_GET_NTP_SRV=y
+CONFIG_LWIP_SNTP_MAX_SERVERS=2
+
 # --- LittleFS geometry ---
 # Pinned rather than left at the component's defaults, because these values
 # are the on-disk format. littlefs stores the name length in the superblock and
