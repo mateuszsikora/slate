@@ -1,0 +1,5 @@
+dependencies:
+  idf: ">=5.5"
+  # LittleFS is not in ESP-IDF. This is the component the `littlefs` partition
+  # subtype (0x83) in firmware/partitions.csv is written for.
+  joltwallet/littlefs: "^1.16.4"
