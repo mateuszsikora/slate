@@ -1,0 +1,393 @@
+/*
+ * Slate — development OTA. See include/slate_ota.h for what this is and is not.
+ *
+ * design.md §11.1, §4.1, §4.3.
+ */
+
+#include "slate_ota.h"
+
+#include <inttypes.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "esp_app_desc.h"
+#include "esp_app_format.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "esp_system.h"
+#include "esp_timer.h"
+
+#include "slate_api.h"
+
+static const char *TAG = "ota";
+
+/*
+ * Out of PSRAM rather than the HTTP task's 4 KB stack, and large enough that a
+ * 1.2 MB image is not a hundred thousand flash calls. PSRAM because the buffer
+ * only ever reaches httpd_req_recv() and esp_ota_write(), neither of which
+ * needs DMA or internal memory — and §6.2's internal budget is the one #55's
+ * access point has to fit into.
+ */
+#define CHUNK_BYTES 4096
+
+/*
+ * What has to be in hand before esp_ota_begin() is allowed to erase anything:
+ * the image header, the first segment header, and the application description
+ * that ESP-IDF places immediately after them.
+ */
+#define IMAGE_PREFIX_BYTES \
+    (sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t))
+
+_Static_assert(CHUNK_BYTES >= IMAGE_PREFIX_BYTES,
+               "the first read must be able to hold the whole image prefix");
+
+/* Long enough for the response to leave the socket, short enough that the
+ * uploader does not wonder whether anything happened. */
+#define REBOOT_DELAY_MS 500
+
+/*
+ * Two wall-clock bounds, because the upload holds the only HTTP task and a
+ * counter of consecutive timeouts is not a bound at all: any single byte
+ * resets it, so a client sending one byte inside every 5 s receive window
+ * would own the server forever and hold an OTA handle open over an erased
+ * partition while it did.
+ *
+ * STALL is silence — nothing arrived, the client is gone, give up quickly.
+ * BUDGET is the whole request, and it is what makes a trickle terminate. It is
+ * generous on purpose: it has to cover a 6 MB slot over bad WiFi, and it is
+ * the same 300 s tools/ota/upload.sh gives curl.
+ */
+#define UPLOAD_STALL_US  (30 * 1000000LL)
+#define UPLOAD_BUDGET_US (300 * 1000000LL)
+
+/* --- Reboot ------------------------------------------------------------- */
+
+static void reboot_timer(void *arg)
+{
+    (void) arg;
+    ESP_LOGW(TAG, "rebooting into the uploaded image");
+    esp_restart();
+}
+
+/*
+ * The reboot is deferred rather than immediate because the success response is
+ * the only report the uploader gets — §11.1's flash has no serial console
+ * attached by definition, and a device that reboots inside its own reply looks
+ * from the desk exactly like one that crashed on the image it was given.
+ */
+static void reboot_after_response(void)
+{
+    const esp_timer_create_args_t args = {
+        .callback = reboot_timer,
+        .name = "ota_reboot",
+    };
+
+    esp_timer_handle_t timer = NULL;
+    if (esp_timer_create(&args, &timer) == ESP_OK &&
+        esp_timer_start_once(timer, REBOOT_DELAY_MS * 1000) == ESP_OK) {
+        return;
+    }
+
+    ESP_LOGE(TAG, "no reboot timer — restarting now, the response may be lost");
+    esp_restart();
+}
+
+/* --- Refusals ----------------------------------------------------------- */
+
+/*
+ * Every refusal closes the connection, and that is not politeness.
+ *
+ * A body refused on its first bytes is still in flight, and esp_http_server
+ * drains whatever a handler did not read before it serves anyone else — in
+ * CONFIG_HTTPD_PURGE_BUF_LEN chunks, which is 32 bytes. A refused 40 MB file
+ * would be over a million recv() calls on the one HTTP task, and the purge
+ * loop ends only when a read returns nothing, so a client that keeps trickling
+ * holds the whole API there for as long as it feels like it. Returning
+ * ESP_FAIL after the answer makes the server drop the socket instead, which is
+ * the only bound that does not depend on the client cooperating.
+ *
+ * The answer itself is already on the wire when this returns, so the uploader
+ * still gets its §4 `{"error": ...}` rather than a bare disconnect.
+ */
+static esp_err_t refuse(httpd_req_t *req, const char *status, const char *error)
+{
+    slate_api_send_error(req, status, error);
+    return ESP_FAIL;
+}
+
+/* One spelling of "the device is out of heap" for the whole API: #10's helper
+ * answers 500 `out_of_memory`, and an OTA that invented its own status for the
+ * same condition would make a client's retry rule depend on the route. */
+static esp_err_t refuse_out_of_memory(httpd_req_t *req)
+{
+    slate_api_send_json(req, NULL);
+    return ESP_FAIL;
+}
+
+/*
+ * One place where an esp_ota_* failure becomes an HTTP answer, so the two
+ * cases a caller can do something about are named and the rest are honestly
+ * one word. Anything that reaches `ota_failed` is a device-side fault, not a
+ * bad request.
+ */
+static esp_err_t refuse_ota_error(httpd_req_t *req, const char *what, esp_err_t err)
+{
+    ESP_LOGE(TAG, "%s: %s", what, esp_err_to_name(err));
+
+    switch (err) {
+    case ESP_ERR_OTA_VALIDATE_FAILED:
+        return refuse(req, "400 Bad Request", "invalid_image");
+
+    case ESP_ERR_OTA_ROLLBACK_INVALID_STATE:
+        /* Reachable once #12 enables rollback: ESP-IDF refuses to write a new
+         * image while the running one is still pending verification. Named so
+         * the answer says what to wait for instead of looking like a fault. */
+        return refuse(req, "409 Conflict", "pending_verify");
+
+    case ESP_ERR_NO_MEM:
+        return refuse_out_of_memory(req);
+
+    default:
+        return refuse(req, "500 Internal Server Error", "ota_failed");
+    }
+}
+
+/* --- Upload ------------------------------------------------------------- */
+
+/** Read what is available, retrying the timeout a merely slow client produces. */
+static int receive_some(httpd_req_t *req, char *buffer, size_t len, int64_t budget_ends)
+{
+    int64_t stall_ends = esp_timer_get_time() + UPLOAD_STALL_US;
+    int64_t deadline = stall_ends < budget_ends ? stall_ends : budget_ends;
+
+    while (esp_timer_get_time() < deadline) {
+        int received = httpd_req_recv(req, buffer, len);
+        if (received > 0) {
+            return received;
+        }
+        if (received != HTTPD_SOCK_ERR_TIMEOUT) {
+            return -1;
+        }
+    }
+    return -1;
+}
+
+/** How much of the body to ask for next, never past the end of it. */
+static size_t chunk_want(size_t total, size_t received)
+{
+    size_t remaining = total - received;
+    return remaining < CHUNK_BYTES ? remaining : CHUNK_BYTES;
+}
+
+/*
+ * The image is inspected before a sector is erased. esp_ota_end() would reject
+ * a body that is not firmware anyway, but only after the target partition has
+ * been erased and rewritten — so the panel that was told "wrong file" would
+ * have lost the image it could have rolled back to. Checking first also makes
+ * the log line say which version is arriving over which, which is the question
+ * being asked when someone flashes twice in a minute and wonders which one is
+ * running.
+ */
+static const esp_app_desc_t *image_prefix_description(const char *prefix)
+{
+    const esp_image_header_t *header = (const esp_image_header_t *) prefix;
+    const esp_app_desc_t *description =
+        (const esp_app_desc_t *) (prefix + sizeof(esp_image_header_t) +
+                                  sizeof(esp_image_segment_header_t));
+
+    if (header->magic != ESP_IMAGE_HEADER_MAGIC) {
+        return NULL;
+    }
+    /* An ESP32 image on an ESP32-S3 is a boot loop, and it is a plain mistake
+     * to make with two boards on one desk. */
+    if (header->chip_id != CONFIG_IDF_FIRMWARE_CHIP_ID) {
+        return NULL;
+    }
+    if (description->magic_word != ESP_APP_DESC_MAGIC_WORD) {
+        return NULL;
+    }
+    return description;
+}
+
+static esp_err_t upload_handler(httpd_req_t *req)
+{
+    const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
+    if (target == NULL) {
+        ESP_LOGE(TAG, "no second application partition to write to");
+        return refuse(req, "500 Internal Server Error", "no_ota_partition");
+    }
+
+    /*
+     * §6.3 gives the image a known size, and esp_ota_begin() is given it: with
+     * OTA_SIZE_UNKNOWN it erases the whole 6 MB slot before the first byte
+     * lands, which is several seconds of nothing on every development flash.
+     * A body without a Content-Length — and a chunked one, which
+     * esp_http_server does not decode — arrives here as zero and is refused.
+     */
+    size_t total = req->content_len;
+    if (total == 0) {
+        ESP_LOGW(TAG, "upload with no body");
+        return refuse(req, "400 Bad Request", "empty_body");
+    }
+    if (total > target->size) {
+        ESP_LOGW(TAG, "upload of %u B does not fit %s (%" PRIu32 " B)", (unsigned) total,
+                 target->label, target->size);
+        return refuse(req, "413 Payload Too Large", "too_large");
+    }
+
+    char *buffer = heap_caps_malloc(CHUNK_BYTES, MALLOC_CAP_SPIRAM);
+    if (buffer == NULL) {
+        buffer = malloc(CHUNK_BYTES);
+    }
+    if (buffer == NULL) {
+        return refuse_out_of_memory(req);
+    }
+
+    const int64_t budget_ends = esp_timer_get_time() + UPLOAD_BUDGET_US;
+    size_t received = 0;
+    bool truncated = false;
+    while (received < IMAGE_PREFIX_BYTES && received < total) {
+        int chunk = receive_some(req, buffer + received, chunk_want(total, received), budget_ends);
+        if (chunk < 0) {
+            truncated = true;
+            break;
+        }
+        received += chunk;
+    }
+
+    if (truncated) {
+        ESP_LOGW(TAG, "upload stopped after %u of %u B", (unsigned) received, (unsigned) total);
+        free(buffer);
+        return refuse(req, "400 Bad Request", "truncated");
+    }
+
+    const esp_app_desc_t *incoming =
+        received < IMAGE_PREFIX_BYTES ? NULL : image_prefix_description(buffer);
+    if (incoming == NULL) {
+        ESP_LOGW(TAG, "body is not an %s application image", CONFIG_IDF_TARGET);
+        free(buffer);
+        return refuse(req, "400 Bad Request", "not_an_image");
+    }
+
+    /* Copied out before the buffer is reused, and by length: esp_app_desc_t's
+     * fields are fixed-size arrays that need not be NUL-terminated. */
+    char version[sizeof(incoming->version) + 1];
+    memcpy(version, incoming->version, sizeof(incoming->version));
+    version[sizeof(incoming->version)] = '\0';
+
+    const esp_app_desc_t *running = esp_app_get_description();
+    ESP_LOGI(TAG, "receiving \"%s\" (%u B) into %s, over the running \"%s\"", version,
+             (unsigned) total, target->label, running->version);
+
+    esp_ota_handle_t handle = 0;
+    esp_err_t err = esp_ota_begin(target, total, &handle);
+    if (err != ESP_OK) {
+        free(buffer);
+        return refuse_ota_error(req, "esp_ota_begin", err);
+    }
+
+    /*
+     * Past this line the target slot is erased, so every failure below costs
+     * the image that was in it — which is what slate_ota.h and §11.1 say, and
+     * what #12's rollback has to know about an interrupted flash.
+     */
+    err = esp_ota_write(handle, buffer, received);
+    while (err == ESP_OK && received < total) {
+        int chunk = receive_some(req, buffer, chunk_want(total, received), budget_ends);
+        if (chunk < 0) {
+            truncated = true;
+            break;
+        }
+        err = esp_ota_write(handle, buffer, chunk);
+        received += chunk;
+    }
+    free(buffer);
+
+    if (truncated) {
+        esp_ota_abort(handle);
+        ESP_LOGW(TAG, "upload stopped after %u of %u B, %s is now blank", (unsigned) received,
+                 (unsigned) total, target->label);
+        return refuse(req, "400 Bad Request", "truncated");
+    }
+    if (err != ESP_OK) {
+        esp_ota_abort(handle);
+        return refuse_ota_error(req, "esp_ota_write", err);
+    }
+
+    /* esp_ota_end() consumes the handle whether or not it succeeds, so there
+     * is nothing left to abort below this line. */
+    err = esp_ota_end(handle);
+    if (err != ESP_OK) {
+        return refuse_ota_error(req, "esp_ota_end", err);
+    }
+
+    err = esp_ota_set_boot_partition(target);
+    if (err != ESP_OK) {
+        return refuse_ota_error(req, "esp_ota_set_boot_partition", err);
+    }
+
+    /*
+     * 200 is what says the image was accepted and is about to boot; the body
+     * carries only what the status cannot. There is deliberately no "status":
+     * "ok" field duplicating the code — a client given two ways to ask the
+     * same question ends up matching on the wrong one — and no announced
+     * reboot delay, because REBOOT_DELAY_MS is this firmware's constant rather
+     * than a schedule the device can promise: a timer that could not be
+     * created restarts it immediately.
+     */
+    cJSON *root = cJSON_CreateObject();
+    if (root != NULL) {
+        bool ok = cJSON_AddStringToObject(root, "partition", target->label) != NULL &&
+                  cJSON_AddNumberToObject(root, "bytes", total) != NULL &&
+                  cJSON_AddStringToObject(root, "version", version) != NULL;
+        if (!ok) {
+            cJSON_Delete(root);
+            root = NULL;
+        }
+    }
+
+    esp_err_t sent;
+    if (root != NULL) {
+        sent = slate_api_send_json(req, root);
+    } else {
+        /*
+         * The boot partition has already moved, so the one thing this must not
+         * do is report a failure. slate_api_send_json(req, NULL) would answer
+         * 500 `out_of_memory` — "nothing happened" everywhere else in the API
+         * — about a device that is a moment away from booting the image it was
+         * just given. An empty object keeps the 200 that carries the outcome
+         * and drops the three fields that were only ever detail.
+         */
+        httpd_resp_set_type(req, "application/json");
+        sent = httpd_resp_sendstr(req, "{}");
+    }
+
+    /*
+     * The reboot happens even if the response did not: the boot partition has
+     * already moved, and leaving the device running the previous image while
+     * the flash says otherwise is the one outcome nobody could reason about.
+     */
+    ESP_LOGI(TAG, "%s written, booting it in %d ms", target->label, REBOOT_DELAY_MS);
+    reboot_after_response();
+    return sent;
+}
+
+esp_err_t slate_ota_init(void)
+{
+    /* §4.3 and §14: development OTA is a write, so it carries the token from
+     * the first day it exists. The check is #10's wrapper, not a copy here. */
+    static const httpd_uri_t upload = {
+        .uri = SLATE_API_BASE_PATH "/ota/upload",
+        .method = HTTP_POST,
+        .handler = upload_handler,
+    };
+
+    esp_err_t err = slate_api_register_uri(&upload, SLATE_API_AUTH_DEVICE_TOKEN);
+    if (err == ESP_OK) {
+        const esp_partition_t *running = esp_ota_get_running_partition();
+        ESP_LOGI(TAG, "development OTA ready — running from %s", running->label);
+    }
+    return err;
+}

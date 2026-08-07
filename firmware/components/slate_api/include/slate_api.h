@@ -5,13 +5,14 @@
  *
  * The server and the authentication policy live in one component. Later
  * components register their routes through slate_api_register_uri() rather
- * than reaching into esp_http_server directly, so #11's OTA upload cannot
+ * than reaching into esp_http_server directly, so §11.1's OTA upload cannot
  * accidentally forget the token and #55's setup exception cannot grow beyond
  * the three routes §4.3 names.
  */
 
 #pragma once
 
+#include "cJSON.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
 
@@ -49,6 +50,25 @@ esp_err_t slate_api_init(void);
  * contract. The wrapped handler receives its original user_ctx unchanged.
  */
 esp_err_t slate_api_register_uri(const httpd_uri_t *uri, slate_api_auth_t auth);
+
+/**
+ * @brief Send `root` as the response body, and delete it.
+ *
+ * Ownership of `root` is taken whatever happens — including when it is NULL,
+ * which is how a component reports an allocation that failed part-way through
+ * building a document, and which answers 500 `out_of_memory`.
+ */
+esp_err_t slate_api_send_json(httpd_req_t *req, cJSON *root);
+
+/**
+ * @brief Answer `{"error": "<error>"}` with the given HTTP status line.
+ *
+ * The failure shape is contract (§4, ADR-4), so it is spelled here rather than
+ * in each component that registers a route: a client matches on `error` across
+ * the whole API instead of on one component's idea of what a failure looks
+ * like. `status` is an esp_http_server status line, e.g. "400 Bad Request".
+ */
+esp_err_t slate_api_send_error(httpd_req_t *req, const char *status, const char *error);
 
 #ifdef SLATE_API_SELFTEST
 
