@@ -1,0 +1,63 @@
+# Slate firmware — build configuration.
+#
+# The board half is taken from the configuration S-3 verified by booting it and
+# S-2 measured against (docs/spikes/s3.md appendix, docs/spikes/s2.md), so the
+# firmware runs the same silicon settings the spikes reported numbers for.
+#
+# Everything here is deliberately about the board and the flash layout. Display,
+# LVGL, rollback and core dump each belong to the issue that turns them on —
+# #6, #12 and #14 — because each of them comes with a measurement that should be
+# taken in the same change that enables the option.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- Flash and PSRAM ---
+# ESP32-S3-WROOM-1-N16R8, as read out of the silicon in #3 rather than as the
+# vendor documentation describes it (§6.3).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# SPIRAM_FETCH_INSTRUCTIONS and SPIRAM_RODATA stay off. S-3 enabled them to
+# measure flash and S-2 disabled them to measure frame time, noting that they
+# put code and constants on the same bus the framebuffer is scanned out over.
+# That is a display decision on display evidence, so it is #6's to make.
+
+# --- Partition table ---
+# Settled in #5 against S-3, documented in §6.3. NVS and LittleFS sit outside
+# the two application slots, which is the whole reason this issue can promise
+# that an OTA does not take the configuration and the tokens with it.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- Tasks ---
+# app_main brings the store up and will bring the display, WiFi and the HTTP
+# server up as those land. The default 3584 B is not enough headroom for that.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# CONFIG_FREERTOS_HZ is deliberately left alone. The argument for raising it is
+# that LVGL's timer and the §6.2 VSYNC gate resolve in single-digit
+# milliseconds, which the default 100 Hz quantises — and that is a display
+# argument, on display evidence, so it belongs to #6 along with the measurement
+# that justifies it. It is not inherited from the spikes: neither S-2 nor S-3
+# records a tick rate.
+
+# --- LittleFS geometry ---
+# Pinned rather than left at the component's defaults, because these values
+# are the on-disk format. littlefs stores the name length in the superblock and
+# validates it at mount, and the read/write/page sizes decide the layout — so a
+# component upgrade that shifts a default turns a mount into a reformat, which
+# with format_if_mount_failed is a configuration erased on the first boot after
+# an OTA. Written here so the values live in the repository rather than only in
+# the gitignored sdkconfig.
+CONFIG_LITTLEFS_PAGE_SIZE=256
+CONFIG_LITTLEFS_OBJ_NAME_LEN=64
+CONFIG_LITTLEFS_READ_SIZE=128
+CONFIG_LITTLEFS_WRITE_SIZE=128
+CONFIG_LITTLEFS_LOOKAHEAD_SIZE=128
+CONFIG_LITTLEFS_CACHE_SIZE=512
+CONFIG_LITTLEFS_BLOCK_CYCLES=512
