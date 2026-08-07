@@ -1,0 +1,19 @@
+# Overlay: LVGL refresh period 10 ms instead of the 33 ms default.
+#
+# Build with:
+#   idf.py -B build-refr10 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.refr10" build
+#
+# Why this is a separate measurement rather than a setting: the default caps
+# LVGL at 30.3 Hz while this panel scans at 37.8 Hz, and the two rates beat
+# against each other. Every rendered frame is then held for either one or two
+# panel refreshes in an irregular pattern, which is invisible on a changing
+# digit and obvious on continuously moving content — the §7.5 marquee label is
+# the most sensitive thing on the screen. The measurement above the fold is that
+# the frame interval sits at exactly 33 001 us: the frame rate is set by this
+# constant, not by how long a frame takes to draw.
+#
+# 10 ms rather than 26 ms (the panel period): LVGL's refresh timer is not phase
+# locked to VSYNC, so asking for exactly one frame per refresh still lands
+# wherever the two clocks happen to be. Rendering faster than the panel scans
+# lets every scan-out pick up the most recent content instead.
+CONFIG_LV_DEF_REFR_PERIOD=10

@@ -1,0 +1,68 @@
+# Spike S-2 — render performance (design.md §13, §6.2).
+#
+# Base is the configuration S-3 verified by booting it (docs/spikes/s3.md,
+# appendix), so the two spikes stay comparable. The differences are all about
+# not deflating a frame-time measurement, and each is commented below.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- Flash and PSRAM ---
+# ESP32-S3-WROOM-1-N16R8 as read out of the silicon in #3.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# S-3 enabled SPIRAM_FETCH_INSTRUCTIONS and SPIRAM_RODATA; this spike does not,
+# and the difference matters. Those options move code and constants into PSRAM,
+# which then competes for the same bus the framebuffer is scanned out over. That
+# is a sensible trade when measuring flash size and a bad one when measuring
+# frame time — it would make the panel look slower than the shipping firmware
+# needs to be. The real firmware should decide this on M1's evidence, not here.
+
+# The RGB framebuffer is read continuously over the PSRAM bus, so the cache
+# configuration is not a detail: a 64 B line with a 64 KB data cache is what the
+# esp_lcd RGB driver documentation calls for on this part.
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# --- Partition table ---
+# The table settled in #5. Reusing it here rather than inventing one means this
+# spike also boots the real layout on the real board.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="../../firmware/partitions.csv"
+
+# --- Optimisation ---
+# -Os, matching the release image S-3 measured. §11.1 makes the -Og development
+# image the one that travels over the wire daily, but the frame time that
+# matters to a user is the shipping one.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# --- Timing ---
+# 1 kHz tick. At the default 100 Hz every frame time is quantised to 10 ms,
+# which is a third of this panel's frame period — the measurement would be
+# mostly scheduler artefact.
+CONFIG_FREERTOS_HZ=1000
+
+# --- LVGL (design.md §6.2) ---
+# 2 MB heap from PSRAM via LV_MEM_POOL_ALLOC; see CMakeLists.txt. The built-in
+# allocator is what lv_mem_monitor() reports on, and this spike reports heap
+# alongside frame time so the two spikes' numbers can be compared.
+CONFIG_LV_USE_BUILTIN_MALLOC=y
+CONFIG_LV_MEM_SIZE_KILOBYTES=2048
+CONFIG_LV_COLOR_DEPTH_16=y
+CONFIG_LV_USE_ASSERT_MALLOC=y
+
+# No built-in fonts: the §8 type scale and the §7.1 icon sizes are the real
+# bpp:4 faces from tools/fonts/generate.sh. Leaving Montserrat linked would
+# only add flash, but it would also make it possible to render a stand-in by
+# accident and never notice.
+CONFIG_LV_FONT_MONTSERRAT_14=n
+
+# --- Task stack ---
+# LVGL runs on its own task here (§6.1), sized in the xTaskCreate call. This
+# only covers app_main, which does the board bring-up.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
