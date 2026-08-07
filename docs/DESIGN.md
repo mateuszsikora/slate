@@ -116,6 +116,8 @@ Permitted tile sizes: 1×1, 2×1, 1×2, 2×2, 4×1.
 
 Position is `[column, row]`. Pixel coordinates do not exist in the format.
 
+Twelve cells is also the performance answer, not only a layout choice: S-2 measured a saturated page at 66 % of the frame budget at p95, and the same scene on a 5 × 4 grid at 98 % at the worst frame. Widening the grid would therefore spend what is left of the budget as well as invalidating every existing configuration.
+
 ### 3.3 Schema
 
 ```json
@@ -290,9 +292,10 @@ All LVGL access happens on one task; API handlers and the HA client post work to
 
 ### 6.2 Memory budget
 
-- Framebuffer 800×480 RGB565 = 750 KB in PSRAM. Whether one framebuffer suffices or tearing forces a second (another 750 KB — affordable on 8 MB PSRAM) is measured in spike S-2, not guessed.
-- Bounce buffer in internal SRAM — required, otherwise WiFi activity causes visible artifacts.
-- LVGL draw buffer: ~1/10 screen, internal SRAM.
+- Framebuffer 800×480 RGB565 = 750 KB in PSRAM. **Two of them**, in LVGL's direct render mode, measured in S-2. The deciding figure is not tearing but internal SRAM: rendering straight into the PSRAM framebuffers needs no internal draw buffer, which returns **77 832 B** of the scarce memory in exchange for 750 KB of the abundant kind. Tearing with a single framebuffer was measurable at 5.8–11.2 torn frames per second and never visible on the panel, so it is not what buys the second buffer.
+- The flush waits for VSYNC. Not an optimisation: without it the panel flickers visibly on anything that moves, because the RGB driver applies a framebuffer switch only at a frame boundary, and rendering faster than the panel scans then discards frames. Gating produces exactly one rendered frame per scan-out.
+- Bounce buffer in internal SRAM — required, otherwise WiFi activity causes visible artifacts. The artifact is worth naming, because no counter on the CPU side shows it: the picture rolls vertically, with the bottom of the screen appearing at the top. That is the DMA losing its race to read the framebuffer out of PSRAM while the radio and the renderer compete for the same bus. S-2 measured frames as 4 % *cheaper* without the bounce buffer, and the display unusable.
+- LVGL draw buffer: ~1/10 screen, internal SRAM — but only in a single-framebuffer configuration, which is not the one above. LVGL wants two such buffers so rendering and flushing overlap, and 2 × 76 800 B does not fit: S-2 measured 104 167 B of internal DMA-capable memory free once WiFi is up. Size any internal draw buffer from what is actually free after `esp_wifi_start()`, not from the screen.
 - LVGL heap: 2 MB in PSRAM — the entire widget tree budget.
 - State store: sized from the configuration, ~256 B per entity. Even a config saturating the 64 KB limit stays in the tens of KB.
 - Configuration: ≤64 KB, parsed into structs then freed.
@@ -534,9 +537,13 @@ Pass: free heap returns to its starting value within 1%, with no downward trend.
 
 ### S-2 — Render performance
 
-20 tiles including 4 animated, with 10 entity updates per second. Measure frame time and scrolling smoothness.
+A saturated page with 4 animated tiles, driven at 10 entity updates per second. Measure frame time and scrolling smoothness.
 
 Pass: no visible stutter when switching pages. Determines: the maximum tile count per page — which cannot be changed later without invalidating existing configurations — and whether a single framebuffer is enough or tearing demands a second one (section 6.2).
+
+Answered in `docs/spikes/s2.md`: **the maximum tile count is the grid**. Twelve tiles — §3.2 saturated — cost 17 443 µs at p95 against a 26 441 µs frame budget, with no frame over budget and nothing visible on the panel. **Two framebuffers**, for the reason recorded in §6.2. The original brief asked for 20 tiles, which §3.2 cannot express, so 20 was measured as an overload on a relaxed 5 × 4 grid rather than reported as a maximum; it reaches 98 % of the budget at the worst frame.
+
+Two findings outrank the ones the spike was asked for, both in §6.2: the draw buffer specified there does not fit once WiFi is running, and LVGL's default 33 ms refresh period beats against this panel's 37.8 Hz and visibly judders — the frame rate has to be set by VSYNC, not by LVGL's timer.
 
 ### S-3 — Flash budget
 
