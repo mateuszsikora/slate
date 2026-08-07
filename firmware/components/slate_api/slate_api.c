@@ -55,7 +55,11 @@ esp_err_t slate_api_send_error(httpd_req_t *req, const char *status, const char 
     char body[64];
     int len = snprintf(body, sizeof(body), "{\"error\":\"%s\"}", error);
     if (len < 0 || (size_t) len >= sizeof(body)) {
-        return ESP_FAIL;
+        /* §4 promises every failure carries the same shape, so an error string
+         * that does not fit degrades to a generic one rather than to a socket
+         * that closes with no response at all. */
+        ESP_LOGE(TAG, "error string does not fit the response buffer: %s", error);
+        len = snprintf(body, sizeof(body), "{\"error\":\"internal\"}");
     }
 
     httpd_resp_set_status(req, status);
@@ -111,7 +115,20 @@ static esp_err_t dispatch(httpd_req_t *req)
                    bearer_token_matches(req);
     if (!allowed) {
         httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer");
-        return slate_api_send_error(req, "401 Unauthorized", "unauthorized");
+        slate_api_send_error(req, "401 Unauthorized", "unauthorized");
+
+        /*
+         * A rejected request whose body was never read leaves esp_http_server
+         * to drain it before it serves anyone else, in CONFIG_HTTPD_PURGE_BUF_LEN
+         * chunks of 32 bytes, and that loop ends only when a read returns
+         * nothing. An unauthenticated client announcing a huge Content-Length
+         * and then trickling would hold the one HTTP task there indefinitely,
+         * so a 401 with a body closes the socket: it is the only bound that
+         * does not depend on the caller cooperating. A body-less 401 keeps the
+         * connection, because there is nothing to drain and a browser polling
+         * /info should not pay for a reconnect.
+         */
+        return req->content_len > 0 ? ESP_FAIL : ESP_OK;
     }
 
     /* Preserve the handler contract: the wrapper's context is private, and

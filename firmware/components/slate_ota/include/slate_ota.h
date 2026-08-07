@@ -25,9 +25,24 @@
  * meant to send arrive", which is the question a development flash asks.
  *
  * Failures answer §4's `{"error": "..."}` with one of `empty_body`,
- * `too_large`, `not_an_image`, `truncated`, `invalid_image`, `no_ota_partition`
- * or `ota_failed`, and — apart from the last two — change nothing on the
- * device: the running partition still boots.
+ * `too_large`, `not_an_image`, `truncated`, `invalid_image`, `pending_verify`,
+ * `no_ota_partition`, `ota_failed` or `out_of_memory`. None of them changes
+ * what the device boots — `esp_ota_set_boot_partition()` is the last call
+ * before the success answer, so any failure leaves the running partition
+ * running.
+ *
+ * What a failure can cost is the OTHER slot, and the line is exactly
+ * `esp_ota_begin()`. Refused before it, and nothing on the device is touched:
+ * `empty_body`, `too_large`, `not_an_image`, `no_ota_partition`, and a
+ * `truncated` that arrives inside the first 288 bytes. After it — a
+ * `truncated` mid-upload, an `invalid_image` out of `esp_ota_end()` — the
+ * target slot has already been erased and partly rewritten, because
+ * `esp_ota_begin()` is given the Content-Length and erases that much up front.
+ * #12 needs to know this: an interrupted flash is not a spare image to fall
+ * back to.
+ *
+ * `pending_verify` is unreachable until #12 turns rollback on, and is then
+ * what an upload gets while the running image is still unverified.
  *
  *
  * WHAT IT DELIBERATELY DOES NOT DO
@@ -50,6 +65,12 @@
  * accepted rather than worked around: an upload is tens of seconds of a
  * development cycle, and a second worker would cost more DIRAM than #55 can
  * spare for its access point (§6.2).
+ *
+ * Accepted, but bounded — otherwise "does not answer for a while" is a client
+ * away from "does not answer". Two wall-clock deadlines run over the request:
+ * 30 s of silence, and 300 s for the whole body. The second one is what makes
+ * a client that trickles a byte at a time terminate; a counter of consecutive
+ * timeouts would not, because any single byte resets it.
  */
 
 #pragma once
