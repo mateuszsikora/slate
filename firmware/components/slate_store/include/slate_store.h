@@ -115,6 +115,19 @@ extern "C" {
 #define SLATE_KEY_WIFI_SSID    "wifi_ssid"  /* #8/#55, POST /wifi */
 #define SLATE_KEY_BOOT_COUNT   "boot_count" /* #10, GET /status */
 
+/*
+ * §9.2's optional WPA2 passphrase for the setup access point. Not one of the two
+ * secret keys above it, and the difference is deliberate: this value is *printed
+ * on the setup screen* next to the SSID (§9.2, §12), so a component that can
+ * read it is not a leak — the screen is showing it to the room already. It is
+ * still never serialised into an API response, for the reason §12 gives about
+ * the station passphrase: the panel's own network is not something a client has
+ * a use for.
+ *
+ * Absent means the access point is open, which is §9.2's default.
+ */
+#define SLATE_KEY_SETUP_AP_PASS "setup_ap_pass" /* #55, the setup access point */
+
 /* --- Lifecycle ---------------------------------------------------------- */
 
 /**

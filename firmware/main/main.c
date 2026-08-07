@@ -2,10 +2,10 @@
  * Slate — firmware entry point.
  *
  * At this point in M1 the application is the store, the WiFi station and the
- * clock, the HTTP API and development OTA. The display (#6), setup access
- * point (#55) and OTA rollback (#12) each attach here as they land, in that
- * order, because each one depends on the one before it having somewhere to
- * keep its state.
+ * clock, the HTTP API, development OTA and the setup access point. The display
+ * (#6) and OTA rollback (#12) each attach here as they land, in that order,
+ * because each one depends on the one before it having somewhere to keep its
+ * state.
  *
  * The boot report below is the only user interface the firmware currently has.
  * It exists to answer the questions the landed issues are judged on — is the
@@ -28,6 +28,7 @@
 
 #include "slate_api.h"
 #include "slate_ota.h"
+#include "slate_setup.h"
 #include "slate_store.h"
 #include "slate_time.h"
 #include "slate_wifi.h"
@@ -126,11 +127,11 @@ static void store_selftest(void)
 #endif
 
 /*
- * The hand-off #55 and #6 will subscribe to, printed until they exist.
- *
- * It is here rather than inside slate_wifi so the component has at least one
- * external subscriber from the day it lands: an event nobody listens to is an
- * event whose payload is wrong in a way nothing notices.
+ * The boot report's network half. slate_setup now acts on two of these four and
+ * prints §6.5's setup card itself; this stays because it is the only place the
+ * two sides of the hand-off are visible in one log — an address arriving and an
+ * access point going away, in the order they happened, which is the question
+ * asked of every §9.4 test until #6 has a screen to answer it on.
  */
 static void network_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -155,46 +156,48 @@ static void network_event(void *arg, esp_event_base_t base, int32_t id, void *da
     case SLATE_WIFI_EVENT_SETUP_REQUESTED: {
         const slate_wifi_setup_reason_t *reason = data;
         static const char *WHY[] = {"no credentials", "could not connect", "station lost"};
-        ESP_LOGW(TAG, "network: setup access point wanted — %s (#55 raises it)", WHY[*reason]);
+        ESP_LOGW(TAG, "network: setup access point wanted — %s", WHY[*reason]);
         break;
     }
 
     case SLATE_WIFI_EVENT_SETUP_RELEASED:
-        ESP_LOGI(TAG, "network: setup access point no longer needed (#55 tears it down)");
+        ESP_LOGI(TAG, "network: setup access point no longer needed");
         break;
     }
 }
 
 /*
- * Credentials from the build, until #55's `POST /wifi` exists.
+ * §9.2's optional WPA2 passphrase for the setup access point, from the build:
  *
- *     idf.py -DSLATE_WIFI_SSID='"my-network"' -DSLATE_WIFI_PASSWORD='"secret"' \
- *            build flash monitor
+ *     idf.py -DSLATE_SETUP_AP_PASSWORD='"a good long one"' build flash
  *
- * Written only when they differ from what is stored, so a boot without the
- * knobs does not undo a `DELETE /wifi`, and so the §9.4 paths that depend on
- * NVS surviving a reboot can be exercised. `idf.py erase-flash` is how to get
- * back to a device with no credentials at all.
+ * The station credentials no longer arrive this way — `POST /wifi` is what does
+ * that from #55 onwards, which is the whole point of the milestone. This one
+ * knob remains because §9.2 puts the value in NVS and nothing in M1's scope
+ * writes it: the setup page grows that field in #35, and until it does a knob is
+ * the difference between a path that is exercised and a path that is asserted.
  *
- * This is a development knob and comes out with #55. It is also the reason the
- * repository must not carry a default: a passphrase in a build file is a
- * passphrase in git history (§12).
+ * Written only when it differs from what is stored, so a boot without the knob
+ * does not undo it. Pass an empty string to go back to an open access point.
+ * Never given a default: a passphrase in a build file is a passphrase in git
+ * history (§12).
  */
-static void provision_wifi(void)
+static void provision_setup_ap(void)
 {
-#ifdef SLATE_WIFI_SSID
-#ifndef SLATE_WIFI_PASSWORD
-#define SLATE_WIFI_PASSWORD NULL
-#endif
-    char stored[SLATE_WIFI_SSID_BUF_LEN];
-    if (slate_store_wifi_ssid_get(stored, sizeof(stored)) == ESP_OK &&
-        strcmp(stored, SLATE_WIFI_SSID) == 0) {
+#ifdef SLATE_SETUP_AP_PASSWORD
+    char stored[SLATE_WIFI_PASSWORD_BUF_LEN] = {0};
+    slate_store_str_get(SLATE_KEY_SETUP_AP_PASS, stored, sizeof(stored));
+    if (strcmp(stored, SLATE_SETUP_AP_PASSWORD) == 0) {
+        memset(stored, 0, sizeof(stored));
         return;
     }
+    memset(stored, 0, sizeof(stored));
 
-    esp_err_t err = slate_store_wifi_set(SLATE_WIFI_SSID, SLATE_WIFI_PASSWORD);
-    ESP_LOGW(TAG, "provisioned \"%s\" from the build: %s", SLATE_WIFI_SSID,
-             esp_err_to_name(err));
+    esp_err_t err = SLATE_SETUP_AP_PASSWORD[0] == '\0'
+                        ? slate_store_erase(SLATE_KEY_SETUP_AP_PASS)
+                        : slate_store_str_set(SLATE_KEY_SETUP_AP_PASS, SLATE_SETUP_AP_PASSWORD);
+    ESP_LOGW(TAG, "setup access point passphrase %s from the build: %s",
+             SLATE_SETUP_AP_PASSWORD[0] == '\0' ? "cleared" : "set", esp_err_to_name(err));
 #endif
 }
 
@@ -244,7 +247,7 @@ static void start_network(void)
 static void start_api(void)
 {
     /* An API failure is not made recoverable by rebooting into the same
-     * allocation failure. Keep the device alive so #55's screen can report it
+     * allocation failure. Keep the device alive so #6's screen can report it
      * and the station can still reconnect; remote management is degraded for
      * this boot and the error remains on serial. */
     esp_err_t err = slate_api_init();
@@ -264,6 +267,20 @@ static void start_api(void)
     err = slate_ota_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "development OTA unavailable: %s — continuing", esp_err_to_name(err));
+    }
+
+    /*
+     * §9's promise — no powered panel is unreachable — and the routes that carry
+     * it, registered on the same server for the same reason. Before the station,
+     * not after: the hand-off that raises the access point is posted once, within
+     * milliseconds of the station finding NVS empty, and a subscriber that
+     * arrives after it is a factory-fresh panel with no way in at all.
+     */
+    err = slate_setup_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "setup access point unavailable: %s — a panel that cannot join a network "
+                      "will need a cable",
+                 esp_err_to_name(err));
     }
 }
 
@@ -314,7 +331,11 @@ void app_main(void)
     store_selftest();
 #endif
 
-    provision_wifi();
-    start_network();
+    provision_setup_ap();
+
+    /* The API and the setup portal come up before the radio, so that the setup
+     * access point has a page to serve and a subscriber in place by the time the
+     * station has an opinion about whether one is needed. */
     start_api();
+    start_network();
 }

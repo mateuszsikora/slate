@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<!--
+  Slate — the setup page of design.md §9.1, steps 3 to 5.
+
+  One file, no external references, gzipped into the firmware (§9.2). The colours
+  are §8's Midnight tokens, spelled here rather than fetched, because this page
+  runs on a device that may have no filesystem and certainly has no internet.
+
+  Two rules this page must not break, both from §9.3:
+
+  1. It does not poll for the outcome of a submission. There is one radio; the
+     access point follows the station's channel, so at the instant the station
+     associates this browser is dropped. The panel reports the result, not this
+     page. The message after submitting says to look at the panel because that
+     is genuinely where the answer appears.
+
+  2. It does not sweep the band per view. `GET /wifi/scan` serves a cache and the
+     refresh button says what it costs before it is pressed.
+
+  From M1 it carries the WiFi form and nothing else. §9.1 grows it into the
+  editor's pairing view rather than replacing it, and §55 keeps addressing out of
+  it — the static half is #63, and it arrives behind a disclosure triangle.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Slate setup</title>
+<style>
+:root {
+  --bg: #101114; --surface: #1a1c21; --surface-alt: #22252b;
+  --text-hi: #f2f5f9; --text-lo: #8a94a6; --accent: #6c8cff; --warn: #f5a524;
+  --radius: 18px;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--text-hi);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+main { max-width: 34rem; margin: 0 auto; }
+h1 { font-size: 1.5rem; margin: 0 0 4px; }
+h2 { font-size: 1rem; margin: 28px 0 10px; color: var(--text-lo); font-weight: 600; }
+p { margin: 0 0 12px; }
+.sub { color: var(--text-lo); margin-bottom: 24px; }
+.card { background: var(--surface); border-radius: var(--radius); padding: 16px; }
+.note {
+  border-left: 3px solid var(--warn); background: var(--surface); border-radius: 8px;
+  padding: 12px 14px; margin-bottom: 20px;
+}
+.note b { color: var(--warn); }
+ul { list-style: none; margin: 0; padding: 0; }
+li + li { border-top: 1px solid var(--surface-alt); }
+.net {
+  display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px;
+  padding: 8px 4px; background: none; border: 0; color: inherit; font: inherit;
+  text-align: left; cursor: pointer; border-radius: 10px;
+}
+.net:hover, .net:focus-visible { background: var(--surface-alt); outline: none; }
+.net[aria-pressed="true"] { background: var(--surface-alt); }
+.net .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.net .meta { color: var(--text-lo); font-size: .85rem; white-space: nowrap; }
+.bars { display: inline-flex; align-items: flex-end; gap: 2px; height: 16px; width: 18px; }
+.bars i { flex: 1; background: var(--surface-alt); border-radius: 1px; }
+.bars i.on { background: var(--accent); }
+.bars i:nth-child(1) { height: 30%; } .bars i:nth-child(2) { height: 55%; }
+.bars i:nth-child(3) { height: 78%; } .bars i:nth-child(4) { height: 100%; }
+label { display: block; margin: 16px 0 6px; color: var(--text-lo); font-size: .9rem; }
+input {
+  width: 100%; min-height: 48px; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--surface-alt); background: var(--bg); color: var(--text-hi);
+  font: inherit;
+}
+input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+button.action {
+  min-height: 48px; padding: 12px 18px; border: 0; border-radius: 12px; font: inherit;
+  font-weight: 600; cursor: pointer; background: var(--accent); color: #0b0d12;
+}
+button.action[disabled] { opacity: .5; cursor: default; }
+button.link {
+  background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer;
+  padding: 10px 0; min-height: 44px;
+}
+.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.hint { color: var(--text-lo); font-size: .85rem; }
+.done { border-left-color: var(--accent); }
+.done b { color: var(--accent); }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="name">Slate</h1>
+  <p class="sub">Choose the network this panel should join.</p>
+
+  <div id="last" class="note" hidden></div>
+
+  <section id="pick">
+    <h2>Networks</h2>
+    <div class="card">
+      <ul id="list"></ul>
+      <p id="empty" class="hint" hidden></p>
+      <div class="row">
+        <button class="link" id="manual" type="button">Enter a name manually</button>
+        <button class="link" id="rescan" type="button">Scan again</button>
+      </div>
+      <p class="hint" id="age"></p>
+    </div>
+
+    <form id="form" hidden>
+      <div class="card" style="margin-top:16px">
+        <div id="chosen"></div>
+        <label for="ssid" id="ssidLabel" hidden>Network name</label>
+        <input id="ssid" name="ssid" autocapitalize="none" autocomplete="off" spellcheck="false"
+               maxlength="32" hidden>
+        <label for="password" id="passwordLabel">Password</label>
+        <input id="password" name="password" type="password" autocomplete="off" maxlength="63">
+        <p class="hint" id="formError" style="color:var(--warn)" hidden></p>
+        <p style="margin:20px 0 0"><button class="action" id="submit" type="submit">Join network</button></p>
+      </div>
+    </form>
+  </section>
+
+  <section id="sent" hidden>
+    <div class="note done">
+      <p><b>Look at the panel.</b></p>
+      <p id="sentDetail"></p>
+      <p class="hint">
+        This page cannot report the result: the panel has one radio, and it leaves
+        this network the moment it joins the other one.
+      </p>
+    </div>
+    <button class="link" id="again" type="button">Choose a different network</button>
+  </section>
+</main>
+<script>
+"use strict";
+var api = "/api/v1";
+var chosen = null;          /* the selected scan row, or null for a typed name */
+var el = function (id) { return document.getElementById(id); };
+
+/* §9.3's vocabulary, which is also `/info.network.last_error`. One table, so the
+   page and the panel cannot word the same failure differently. */
+var ERRORS = {
+  bad_password: function (n) { return "Wrong password for " + n + "."; },
+  not_found: function (n) { return n + " is not in range."; },
+  no_ip: function (n) { return "Joined " + n + " but the router gave no address."; },
+  auth_timeout: function (n) { return n + " did not answer."; },
+  gateway_unreachable: function (n) { return "Joined " + n + " but the gateway did not answer."; },
+  address_in_use: function (n) { return "That address is already taken on " + n + "."; }
+};
+
+/* What `POST /wifi` can refuse with. */
+var REFUSALS = {
+  ssid_required: "Enter a network name.",
+  ssid_too_long: "That name is longer than a network name can be.",
+  password_too_long: "That password is longer than WPA2 allows.",
+  static_unsupported: "This firmware cannot use a fixed address yet.",
+  bad_ipv4: "The addressing in that request is not valid.",
+  bad_ipv4_mode: "The addressing in that request is not valid.",
+  bad_address: "That address is not a host address on its own subnet.",
+  bad_gateway: "That gateway is not on the same subnet as the address.",
+  bad_dns: "One of those DNS servers is not an address.",
+  empty_body: "Nothing was sent. Try again.",
+  invalid_json: "Nothing was sent. Try again.",
+  truncated: "The request did not arrive in one piece. Try again.",
+  too_large: "That request is too large.",
+  store_failed: "The panel could not save the credentials.",
+  unauthorized: "This panel wants a token for that. Open the page over the setup network."
+};
+
+function text(node, value) { node.textContent = value; }
+
+function get(path) {
+  return fetch(api + path, {headers: {"Accept": "application/json"}}).then(function (r) {
+    if (!r.ok) { throw new Error(String(r.status)); }
+    return r.json();
+  });
+}
+
+function bars(rssi) {
+  /* Four buckets from dBm. The thresholds are the conventional ones; the point
+     of the drawing is "will this work", not a measurement. */
+  var level = rssi >= -55 ? 4 : rssi >= -67 ? 3 : rssi >= -78 ? 2 : 1;
+  var out = '<span class="bars" aria-hidden="true">';
+  for (var i = 1; i <= 4; i++) { out += '<i class="' + (i <= level ? "on" : "") + '"></i>'; }
+  return out + "</span>";
+}
+
+/* An SSID is somebody else's string and may contain anything at all, so every
+   one of them reaches the document through textContent. The only innerHTML in
+   this file writes markup this file wrote. */
+function showLast(network) {
+  var name = network.sta_ssid || network.ssid;
+  var say = ERRORS[network.last_error];
+  if (!say || !name) { return; }
+
+  var box = el("last");
+  box.innerHTML = "<p><b></b></p>" +
+    '<p class="hint">The password is still stored, so correcting it is one field.</p>';
+  text(box.querySelector("b"), say(name));
+  box.hidden = false;
+}
+
+function renderNetworks(data) {
+  var list = el("list");
+  list.innerHTML = "";
+  (data.networks || []).forEach(function (net) {
+    var item = document.createElement("li");
+    var button = document.createElement("button");
+    button.type = "button";
+    button.className = "net";
+    button.setAttribute("aria-pressed", "false");
+    button.innerHTML = bars(net.rssi) + '<span class="name"></span><span class="meta"></span>';
+    text(button.querySelector(".name"), net.ssid);
+    text(button.querySelector(".meta"), net.auth === "open" ? "open" : net.auth);
+    button.onclick = function () { choose(net, button); };
+    item.appendChild(button);
+    list.appendChild(item);
+  });
+
+  var none = !data.networks || data.networks.length === 0;
+  el("empty").hidden = !none;
+  text(el("empty"), data.age_s === null
+    ? "The panel has not swept the band yet."
+    : "No networks found. Enter a name manually, or scan again.");
+  text(el("age"), data.age_s === null ? "" :
+    "Seen " + (data.age_s < 60 ? "just now" : Math.round(data.age_s / 60) + " min ago") + ".");
+}
+
+function choose(net, button) {
+  chosen = net;
+  Array.prototype.forEach.call(document.querySelectorAll(".net"), function (other) {
+    other.setAttribute("aria-pressed", String(other === button));
+  });
+
+  el("form").hidden = false;
+  el("ssid").hidden = true;
+  el("ssidLabel").hidden = true;
+  el("chosen").innerHTML = "<p>Joining <b></b></p>";
+  el("chosen").querySelector("b").textContent = net.ssid;
+
+  var open = net.auth === "open";
+  el("password").hidden = open;
+  el("passwordLabel").hidden = open;
+  el("formError").hidden = true;
+  if (!open) { el("password").focus(); }
+}
+
+function manual() {
+  chosen = null;
+  el("form").hidden = false;
+  el("chosen").innerHTML = "";
+  el("ssid").hidden = false;
+  el("ssidLabel").hidden = false;
+  el("password").hidden = false;
+  el("passwordLabel").hidden = false;
+  el("formError").hidden = true;
+  el("ssid").focus();
+}
+
+function rescan() {
+  var button = el("rescan");
+  button.disabled = true;
+  text(button, "Scanning, a few seconds…");
+  get("/wifi/scan?rescan=1").then(renderNetworks).catch(function () {
+    text(el("empty"), "The panel did not answer the scan. Enter a name manually.");
+    el("empty").hidden = false;
+  }).then(function () {
+    button.disabled = false;
+    text(button, "Scan again");
+  });
+}
+
+function submit(event) {
+  event.preventDefault();
+  var ssid = chosen ? chosen.ssid : el("ssid").value.trim();
+  if (!ssid) { return fail("ssid_required"); }
+
+  var body = {ssid: ssid, ipv4: {mode: "dhcp"}};
+  if (!el("password").hidden && el("password").value) { body.password = el("password").value; }
+
+  el("submit").disabled = true;
+  text(el("submit"), "Sending…");
+
+  fetch(api + "/wifi", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body)
+  }).then(function (response) {
+    return response.json().catch(function () { return {}; }).then(function (data) {
+      if (!response.ok) { throw new Error(data.error || String(response.status)); }
+      /* Accepted, and that is all it can mean — the panel is trying now and the
+         answer appears there. Nothing here polls for it. */
+      el("pick").hidden = true;
+      el("last").hidden = true;
+      el("sent").hidden = false;
+      text(el("sentDetail"), "The panel is joining " + ssid +
+        ". It shows the address to open when it succeeds, and the reason if it does not.");
+    });
+  }).catch(function (error) {
+    fail(error.message);
+  }).then(function () {
+    el("submit").disabled = false;
+    text(el("submit"), "Join network");
+  });
+}
+
+function fail(code) {
+  text(el("formError"), REFUSALS[code] || "The panel refused that (" + code + ").");
+  el("formError").hidden = false;
+}
+
+el("manual").onclick = manual;
+el("rescan").onclick = rescan;
+el("form").onsubmit = submit;
+el("again").onclick = function () {
+  el("sent").hidden = true;
+  el("pick").hidden = false;
+};
+
+get("/info").then(function (info) {
+  text(el("name"), info.name || "Slate");
+  document.title = (info.name || "Slate") + " setup";
+  if (info.network) { showLast(info.network); }
+}).catch(function () {});
+
+get("/wifi/scan").then(renderNetworks).catch(function () {
+  text(el("empty"), "The panel did not answer the scan. Enter a name manually.");
+  el("empty").hidden = false;
+});
+</script>
+</body>
+</html>
