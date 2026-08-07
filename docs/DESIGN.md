@@ -217,6 +217,41 @@ Network state appears in `/info` as well as `/status`, because a browser that ha
 
 `mode` is `sta` or `ap`; `ssid` is the network the device is currently on or offering; `sta_ssid` is the configured station network, which exists even while the access point is up. `last_error` is the reason the station is not connected, and it is the same string the setup screen prints — one vocabulary, so a report from the panel and a report from the API cannot disagree.
 
+The complete M1 response shapes are:
+
+```json
+{
+  "model": "waveshare-s3-touch-7",
+  "firmware_version": "1.0.0",
+  "schema_max": 1,
+  "name": "slate-a1b2c3",
+  "themes": [],
+  "pairing": "ready",
+  "network": {"mode": "sta", "ssid": "home", "ip": "192.168.1.42", "sta_ssid": "home", "last_error": null}
+}
+```
+
+`themes` is empty until #21 adds the first theme; it lists capabilities present in this firmware rather than work planned for a later milestone. `pairing` is `ready` when a usable device token is available and `degraded` when one is not. It does not mean that a particular browser has stored the token — the device cannot observe browser `localStorage` and does not invent a second pairing database to pretend otherwise.
+
+```json
+{
+  "network": {"mode": "sta", "ssid": "home", "ip": "192.168.1.42", "sta_ssid": "home", "last_error": null},
+  "ha": "unconfigured",
+  "rssi": -54,
+  "uptime_s": 120,
+  "heap_free": 294631,
+  "lvgl_heap_free": null,
+  "lvgl_heap_total": null,
+  "lvgl_frag_pct": null,
+  "reset_reason": "power_on",
+  "reboot_count": 3,
+  "entity_count": 0,
+  "storage_reset": false
+}
+```
+
+`ha` is `unconfigured`, `disconnected` or `connected`. The three LVGL values are numbers once the LVGL allocator exists and `null` before display bring-up or when it is unavailable; reporting zero would look like a completely exhausted allocator. `reset_reason` uses stable lowercase names rather than exposing ESP-IDF enum values. `storage_reset` says that boot recovery erased corrupt NVS or reformatted LittleFS, which is different from a factory-fresh empty store even though both may have no configuration.
+
 ### 4.2 WebSocket `/api/v1/ws`
 
 Event channel for the editor and for remote diagnostics. Token sent in the first frame.
