@@ -120,7 +120,10 @@ jobs:
 
       - uses: actions/cache@v4
         with:
-          path: ~/.ccache
+          # ccache 4 uses the XDG path on a clean Linux home. ~/.ccache is only
+          # selected when that legacy directory already exists, which a fresh
+          # Actions container does not have.
+          path: ~/.cache/ccache
           key: ccache-${{ matrix.variant }}-${{ github.sha }}
           restore-keys: ccache-${{ matrix.variant }}-
 
@@ -140,12 +143,30 @@ jobs:
       - name: Build
         env:
           IDF_CCACHE_ENABLE: '1'
+          # Keep the writer and actions/cache pointed at the same, explicit path.
+          CCACHE_DIR: /github/home/.cache/ccache
         run: |
           . "$IDF_PATH/export.sh" >/dev/null
           idf.py -B "build-${{ matrix.variant }}" \
                  -DSDKCONFIG="build-${{ matrix.variant }}/sdkconfig" \
                  -DSDKCONFIG_DEFAULTS="${{ matrix.sdkconfig_defaults }}" \
                  build
+
+      # Component Manager re-solves dependencies and rewrites dependencies.lock
+      # when an idf_component.yml changes. A successful compile must not hide that
+      # generated change: the committed lock is what makes the next clean build use
+      # the same component sources as this one.
+      - name: Check the dependency lock is current
+        run: |
+          if ! git ls-files --error-unmatch dependencies.lock >/dev/null 2>&1; then
+            echo '::error::firmware/dependencies.lock must be committed'
+            exit 1
+          fi
+          if ! git diff --quiet -- dependencies.lock; then
+            echo '::error::firmware/dependencies.lock changed during the build; regenerate and commit it'
+            git diff -- dependencies.lock
+            exit 1
+          fi
 
       # Verify the variant is the one it claims to be. This is the other half of the
       # s3.md trap: a build that silently used the wrong defaults still succeeds, and
