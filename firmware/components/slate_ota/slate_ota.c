@@ -328,13 +328,20 @@ static esp_err_t upload_handler(httpd_req_t *req)
         return refuse_ota_error(req, "esp_ota_set_boot_partition", err);
     }
 
+    /*
+     * 200 is what says the image was accepted and is about to boot; the body
+     * carries only what the status cannot. There is deliberately no "status":
+     * "ok" field duplicating the code — a client given two ways to ask the
+     * same question ends up matching on the wrong one — and no announced
+     * reboot delay, because REBOOT_DELAY_MS is this firmware's constant rather
+     * than a schedule the device can promise: a timer that could not be
+     * created restarts it immediately.
+     */
     cJSON *root = cJSON_CreateObject();
     if (root != NULL) {
-        bool ok = cJSON_AddStringToObject(root, "status", "ok") != NULL &&
-                  cJSON_AddStringToObject(root, "partition", target->label) != NULL &&
+        bool ok = cJSON_AddStringToObject(root, "partition", target->label) != NULL &&
                   cJSON_AddNumberToObject(root, "bytes", total) != NULL &&
-                  cJSON_AddStringToObject(root, "version", version) != NULL &&
-                  cJSON_AddNumberToObject(root, "reboot_in_ms", REBOOT_DELAY_MS) != NULL;
+                  cJSON_AddStringToObject(root, "version", version) != NULL;
         if (!ok) {
             cJSON_Delete(root);
             root = NULL;
@@ -350,10 +357,11 @@ static esp_err_t upload_handler(httpd_req_t *req)
          * do is report a failure. slate_api_send_json(req, NULL) would answer
          * 500 `out_of_memory` — "nothing happened" everywhere else in the API
          * — about a device that is a moment away from booting the image it was
-         * just given. The uploader loses the detail, not the outcome.
+         * just given. An empty object keeps the 200 that carries the outcome
+         * and drops the three fields that were only ever detail.
          */
         httpd_resp_set_type(req, "application/json");
-        sent = httpd_resp_sendstr(req, "{\"status\":\"ok\"}");
+        sent = httpd_resp_sendstr(req, "{}");
     }
 
     /*

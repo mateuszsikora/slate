@@ -598,11 +598,10 @@ POST /api/v1/ota/upload    body: raw .bin
 The answer comes before the reboot, because after it there is nobody left to answer:
 
 ```json
-{"status": "ok", "partition": "ota_1", "bytes": 927040,
- "version": "1.0.0-3-gd81fdc4", "reboot_in_ms": 500}
+{"partition": "ota_1", "bytes": 927040, "version": "1.0.0-3-gd81fdc4"}
 ```
 
-`version` is read out of the image that has just been written, not the one that is running — "did the file I meant to send arrive" is the question a development flash asks, and the panel is the only party that can answer it. Failures are §4's `{"error": "..."}` with `empty_body`, `too_large`, `not_an_image`, `pending_verify` (§11.2), `no_ota_partition`, `out_of_memory`, `truncated` or `invalid_image`. No failure changes what the device boots. What a failure can cost is the *other* slot, and the line is `esp_ota_begin`: the first five are refused before it, so a wrong file costs nothing but the upload — the image header is read first, and `Content-Length` is what `esp_ota_begin` erases against rather than the whole slot. `truncated` mid-upload and `invalid_image` come after it, with the target slot already erased. §11.2 depends on that distinction: an interrupted flash leaves no spare image behind it.
+The 200 is what says the image was accepted and is about to boot; the body carries only what the status cannot, and degrades to `{}` if it cannot be built. There is deliberately no `status` field duplicating the code, and no announced reboot delay — the delay is a constant of the firmware, not a schedule the device can promise. `version` is read out of the image that has just been written, not the one that is running — "did the file I meant to send arrive" is the question a development flash asks, and the panel is the only party that can answer it. `partition` is the slot it went into, which is the only handle a client has on which of the two it is looking at. Failures are §4's `{"error": "..."}` with `empty_body`, `too_large`, `not_an_image`, `pending_verify` (§11.2), `no_ota_partition`, `out_of_memory`, `truncated` or `invalid_image`. No failure changes what the device boots. What a failure can cost is the *other* slot, and the line is `esp_ota_begin`: the first five are refused before it, so a wrong file costs nothing but the upload — the image header is read first, and `Content-Length` is what `esp_ota_begin` erases against rather than the whole slot. `truncated` mid-upload and `invalid_image` come after it, with the target slot already erased. §11.2 depends on that distinction: an interrupted flash leaves no spare image behind it.
 
 From this point the board can hang on a wall while development continues from a desk.
 

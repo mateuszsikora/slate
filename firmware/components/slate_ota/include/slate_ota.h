@@ -17,12 +17,17 @@
  * is switched, and the device reboots. Success answers before the reboot,
  * because after it there is nobody left to answer:
  *
- *     {"status": "ok", "partition": "ota_1", "bytes": 1157296,
- *      "version": "1.0.0-3-gd81fdc4", "reboot_in_ms": 500}
+ *     200 {"partition": "ota_1", "bytes": 1157296, "version": "1.0.0-3-gd81fdc4"}
  *
- * `version` is the description read out of the image that has just been
- * written, not the one that is running — it is the answer to "did the file I
- * meant to send arrive", which is the question a development flash asks.
+ * The 200 is what says the image was accepted and is about to boot; the body
+ * carries only what the status cannot. `version` is the description read out
+ * of the image that has just been written, not the one that is running — it is
+ * the answer to "did the file I meant to send arrive", which is the question a
+ * development flash asks. `partition` is the slot it went into, which is the
+ * only handle a client has on which of the two it is looking at, and #12 will
+ * want it. On an allocation failure the body degrades to `{}` rather than to
+ * an error, because the outcome is in the status and the device is booting
+ * either way.
  *
  * Failures answer §4's `{"error": "..."}` with one of `empty_body`,
  * `too_large`, `not_an_image`, `truncated`, `invalid_image`, `pending_verify`,

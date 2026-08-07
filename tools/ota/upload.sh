@@ -143,9 +143,16 @@ if [[ "${status}" != "200" ]]; then
 fi
 
 uploaded="$(json_field version < "${body}")"
-echo "accepted into $(json_field partition < "${body}"): ${uploaded} — waiting for the reboot"
+partition="$(json_field partition < "${body}")"
+echo "accepted${partition:+ into ${partition}}${uploaded:+: ${uploaded}} — waiting for the reboot"
 
-if [[ -n "${before}" && "${before}" == "${uploaded}" ]]; then
+# The 200 is the outcome; the body is detail the device drops when it cannot
+# allocate it. Say which question the wait can still answer rather than
+# comparing against an empty string and calling the result a rollback.
+if [[ -z "${uploaded}" ]]; then
+    echo "note: the panel accepted the image but did not report its version," \
+         "so what follows confirms it came back, not which image booted." >&2
+elif [[ -n "${before}" && "${before}" == "${uploaded}" ]]; then
     echo "note: the uploaded image reports the same version as the one it replaced," \
          "so what follows confirms the panel came back, not which image booted." \
          "Commit, or set PROJECT_VER, to tell two builds apart." >&2
@@ -161,7 +168,7 @@ while [[ ${SECONDS} -lt ${deadline} ]]; do
         json_field firmware_version || true)"
     [[ -n "${running}" ]] || continue
 
-    if [[ "${running}" == "${uploaded}" ]]; then
+    if [[ -z "${uploaded}" || "${running}" == "${uploaded}" ]]; then
         echo "panel is running ${running}"
         exit 0
     fi
