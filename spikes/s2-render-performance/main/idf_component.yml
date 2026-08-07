@@ -1,8 +1,0 @@
-dependencies:
-  idf: ">=5.5"
-  # Versions pinned to the set S-3 resolved and booted together
-  # (docs/spikes/s3.md, appendix).
-  lvgl/lvgl: "9.5.0"
-  # CH422G lives here — there is no espressif/esp_io_expander_ch422g component,
-  # and this one's API forces the legacy I2C driver for the whole bus. See #7.
-  espressif/esp32_io_expander: "1.1.1"
