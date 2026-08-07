@@ -200,7 +200,7 @@ Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: B
 | GET    | `/areas`           | areas from HA |
 | POST   | `/ha`              | set HA URL and token; connection is tested before saving |
 | GET    | `/wifi/scan`       | nearby networks: `ssid`, `rssi`, `channel`, `auth`. Cached — see section 9.2 |
-| POST   | `/wifi`            | set station credentials, persist, then apply. Answers before the result is known (section 9.3) |
+| POST   | `/wifi`            | set station credentials and, optionally, the IPv4 addressing; persist, then apply. Answers before the result is known (section 9.3) |
 | DELETE | `/wifi`            | forget the credentials and raise the setup access point |
 | GET    | `/status`          | network state, HA state, RSSI, uptime, free heap, reset reason, reboot counter, entity count |
 | POST   | `/mode`            | `{"mode": "normal"\|"edit"}` |
@@ -212,10 +212,25 @@ Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: B
 Network state appears in `/info` as well as `/status`, because a browser that has just joined the setup access point has no token and still has to know what it is looking at:
 
 ```json
-{"network": {"mode": "ap", "ssid": "slate-a1b2c3", "ip": "192.168.4.1", "sta_ssid": null, "last_error": "bad_password"}}
+{"network": {"mode": "ap", "ssid": "slate-a1b2c3", "ip": "192.168.4.1", "sta_ssid": null,
+             "ipv4": {"mode": "dhcp"}, "last_error": "bad_password"}}
 ```
 
 `mode` is `sta` or `ap`; `ssid` is the network the device is currently on or offering; `sta_ssid` is the configured station network, which exists even while the access point is up. `last_error` is the reason the station is not connected, and it is the same string the setup screen prints — one vocabulary, so a report from the panel and a report from the API cannot disagree.
+
+`ipv4` is where the station's address came from, and it is reported rather than echoed: after a static configuration fails and the device falls back (section 9.6) the mode here is `dhcp`, because that is what the address on the screen actually is. A field that repeated the request instead would make the setup page show a number meaning two different things.
+
+The same object is what `POST /wifi` accepts:
+
+```json
+{"ssid": "home", "password": "...", "ipv4": {"mode": "dhcp"}}
+
+{"ssid": "home", "password": "...",
+ "ipv4": {"mode": "static", "address": "192.168.1.42/24",
+          "gateway": "192.168.1.1", "dns": ["192.168.1.1"]}}
+```
+
+An absent `ipv4` means `dhcp`. That default is what makes the field addable without a version — section 3.1's rule that unknown fields are ignored points the same way for a client written against a firmware that predates it — and it is why the shape is settled here rather than when the feature is built. M1 accepts `dhcp` and refuses `static` with a named error, for the reason section 9.6 gives.
 
 The complete M1 response shapes are:
 
@@ -235,7 +250,8 @@ The complete M1 response shapes are:
 
 ```json
 {
-  "network": {"mode": "sta", "ssid": "home", "ip": "192.168.1.42", "sta_ssid": "home", "last_error": null},
+  "network": {"mode": "sta", "ssid": "home", "ip": "192.168.1.42", "sta_ssid": "home",
+              "ipv4": {"mode": "dhcp"}, "last_error": null},
   "ha": "unconfigured",
   "rssi": -54,
   "uptime_s": 120,
@@ -531,6 +547,10 @@ Failures are named, not generic, and the vocabulary is shared with `/info.networ
 | `not_found`    | `<ssid>` is not in range |
 | `no_ip`        | Joined `<ssid>` but the router gave no address |
 | `auth_timeout` | `<ssid>` did not answer |
+| `gateway_unreachable` | Joined `<ssid>` but `192.168.1.1` did not answer |
+| `address_in_use` | `192.168.1.42` is already taken on `<ssid>` |
+
+The last two only arise with a static address and are what section 9.6 is for. With DHCP a router that refuses to lease is `no_ip`, and there is no gateway to be wrong about.
 
 After three failed attempts the access point returns on the same SSID with the reason on screen and the credentials still in NVS, so a corrected password is one field, not a re-entry of everything.
 
@@ -565,6 +585,25 @@ Two further consequences that are easy to miss:
 ### 9.5 Getting back to setup
 
 `DELETE /api/v1/wifi` forgets the credentials and raises the access point. `POST /factory_reset` does the same and takes the tokens and the configuration with it. From the panel itself: a 10-second press anywhere on the screen. Changing a router must never require reflashing, and after M1 it never requires a cable either.
+
+### 9.6 A static address proves itself before it is kept
+
+Nothing above needs a static address, and most networks never will — a DHCP reservation on the router pins an address without any firmware. A segment without a DHCP server is the case that has no answer at all, and `no_ip` being terminal is that gap showing.
+
+Closing it introduces the one setting that can make a panel unreachable while everything reports success. Association is layer 2 and knows nothing about the address: with a static configuration `IP_EVENT_STA_GOT_IP` fires as soon as the address is assigned, because nothing was asked of the network. The attempt therefore always succeeds. The timeout that names "associated but never addressed" as `no_ip` becomes unreachable, section 9.4's fallback is keyed on the station *not* connecting and so never raises the access point, and the screen prints an address that answers nothing.
+
+A wrong passphrase costs a minute and names itself. A wrong gateway would cost a trip to the router's admin page — for most people the one device in the house they are least willing to open — or a factory reset, which takes the tokens and the configuration with it in exchange for a typo. That is not a trade this design gets to offer.
+
+So the device proves the configuration before it keeps it, the way network equipment has done it for decades:
+
+- A **freshly submitted** static configuration is applied as pending, not committed.
+- After association the gateway is resolved over **ARP, not ICMP**. Gateways that drop pings are common enough that pinging would revert configurations which work. ARP also answers the second question for free: an address already in use replies from the wrong MAC, which is duplicate address detection (RFC 5227) with no extra machinery.
+- No confirmation within roughly fifteen seconds reverts to DHCP, keeps the static configuration stored and marked failed, and prints the reason. The panel comes back on the network at an address on the screen, reachable from the browser that is already open.
+- If DHCP does not answer either — the DHCP-less segment this feature exists for — that is the existing `no_ip` path and section 9.4 raises the access point. No new terminal state, and no new name in the station state machine.
+
+The trial covers only a configuration that has just been submitted. Once confirmed, a static address is sticky: a router that is down at some later boot is an ordinary retry. Discarding a working address because of a five-minute outage would be a worse bug than the one this section prevents.
+
+The contract is M1 and the implementation is M7, alongside the recovery paths of section 9.5 that stand behind it. Until the 10-second press and `POST /factory_reset` exist there is no rescue from a bad static address that does not go through the router, so M1 accepts the field and refuses the mode.
 
 ## 10. Editor
 
@@ -717,7 +756,7 @@ M5 outranks the editor because a wall panel without a brightness schedule gets u
 | | Scope | Done when |
 |--|-------|-----------|
 | M6 | Web editor, entity picker, second theme | someone unfamiliar builds a page without reading the JSON format |
-| M7 | Setup screen and portal polish, pairing QR, error mode, factory reset from the panel | the section 9 flow works with no cable and no ESP-IDF, for someone who has not read this document |
+| M7 | Setup screen and portal polish, pairing QR, error mode, factory reset from the panel, static addressing (9.6) | the section 9 flow works with no cable and no ESP-IDF, for someone who has not read this document |
 | M8 | Release OTA with manifest, prebuilt binary, browser flasher, README, enclosure files | someone without ESP-IDF gets a running panel and receives updates |
 
 M0 is a weekend. M1–M3 carry the technical risk. M4–M5 are the bulk of the hours at the lowest risk. M6–M8 are conditional — they determine whether anyone else can use this.
