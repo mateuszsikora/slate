@@ -40,17 +40,17 @@ jobs:
     name: fonts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
 
       # Keyed on the two files that decide the output, so a normal pull request
       # touches the network not at all, and any change to the glyph list or the
       # script misses the cache and re-runs the resolution above.
       - id: cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             firmware/main/assets
@@ -76,7 +76,7 @@ jobs:
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: fonts
           path: firmware/main/assets/*.c
@@ -107,18 +107,18 @@ jobs:
           - variant: release
             sdkconfig_defaults: sdkconfig.defaults;../.github/sdkconfig.ci-release
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
         working-directory: .
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: fonts
           path: firmware/main/assets
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           # ccache 4 uses the XDG path on a clean Linux home. ~/.ccache is only
           # selected when that legacy directory already exists, which a fresh
@@ -130,7 +130,7 @@ jobs:
       # Keyed on the lock file, which is committed precisely so that a build resolves
       # the same components twice. A cache hit here also means the build does not
       # depend on the component registry being up.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: firmware/managed_components
           key: components-${{ hashFiles('firmware/dependencies.lock') }}
@@ -212,7 +212,7 @@ jobs:
       # pull request's build being flashable to the panel from any machine with no
       # ESP-IDF on it. The .elf and .map are what a core dump (§11.3) and a size
       # regression are read against, and both are useless once the runner is gone.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: slate-${{ matrix.variant }}
           path: |
