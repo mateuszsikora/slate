@@ -2,4 +2,10 @@ dependencies:
   idf: ">=5.5"
   # LittleFS is not in ESP-IDF. This is the component the `littlefs` partition
   # subtype (0x83) in firmware/partitions.csv is written for.
-  joltwallet/littlefs: "^1.16.4"
+  #
+  # Pinned exactly, not with a caret. This component decides the on-disk format,
+  # and a minor upgrade that changes it turns a mount into a reformat — which,
+  # with format_if_mount_failed, is a silently erased configuration on the first
+  # boot after an OTA. dependencies.lock is committed for the same reason.
+  # Moving this version is a deliberate act that owns a migration.
+  joltwallet/littlefs: "==1.22.3"

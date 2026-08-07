@@ -4,7 +4,11 @@ firmware/build-*/
 firmware/sdkconfig
 firmware/sdkconfig.old
 firmware/managed_components/
-firmware/dependencies.lock
+
+# firmware/dependencies.lock is NOT ignored. It records the exact component
+# versions a build resolved, and joltwallet/littlefs decides the on-disk
+# filesystem format — an unpinned upgrade is a silently reformatted partition
+# on the first boot after an OTA.
 
 # Generated LVGL fonts. The sources of truth are tools/fonts/icons.txt and
 # tools/fonts/generate.sh; the .c files are build output and would otherwise

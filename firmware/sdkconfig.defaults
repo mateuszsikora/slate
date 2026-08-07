@@ -39,6 +39,25 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # server up as those land. The default 3584 B is not enough headroom for that.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# 1 kHz tick. LVGL's timer and the §6.2 VSYNC gate both resolve in single-digit
-# milliseconds, and the default 100 Hz quantises every one of them to 10 ms.
-CONFIG_FREERTOS_HZ=1000
+# CONFIG_FREERTOS_HZ is deliberately left alone. The argument for raising it is
+# that LVGL's timer and the §6.2 VSYNC gate resolve in single-digit
+# milliseconds, which the default 100 Hz quantises — and that is a display
+# argument, on display evidence, so it belongs to #6 along with the measurement
+# that justifies it. It is not inherited from the spikes: neither S-2 nor S-3
+# records a tick rate.
+
+# --- LittleFS geometry ---
+# Pinned rather than left at the component's defaults, because these values
+# are the on-disk format. littlefs stores the name length in the superblock and
+# validates it at mount, and the read/write/page sizes decide the layout — so a
+# component upgrade that shifts a default turns a mount into a reformat, which
+# with format_if_mount_failed is a configuration erased on the first boot after
+# an OTA. Written here so the values live in the repository rather than only in
+# the gitignored sdkconfig.
+CONFIG_LITTLEFS_PAGE_SIZE=256
+CONFIG_LITTLEFS_OBJ_NAME_LEN=64
+CONFIG_LITTLEFS_READ_SIZE=128
+CONFIG_LITTLEFS_WRITE_SIZE=128
+CONFIG_LITTLEFS_LOOKAHEAD_SIZE=128
+CONFIG_LITTLEFS_CACHE_SIZE=512
+CONFIG_LITTLEFS_BLOCK_CYCLES=512

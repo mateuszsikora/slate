@@ -8,9 +8,10 @@
  *
  * The boot report below is the only user interface the firmware currently has.
  * It exists to answer the question this issue is judged on — is the device
- * token the same one as before the reboot — and it is written to the serial log
- * because §4.3's pairing QR needs a screen that #6 has not brought up yet. When
- * it does, the QR replaces this and the token stops being logged.
+ * token the same one as before the reboot — and it answers it with a
+ * fingerprint rather than the token. The token itself belongs in exactly one
+ * place, §4.3's pairing QR on the screen; a serial log is a thing people paste
+ * into issues.
  */
 
 #include <inttypes.h>
@@ -26,30 +27,19 @@
 
 static const char *TAG = "slate";
 
-/*
- * §4.1 puts a reboot counter in `GET /status`, next to the reset reason,
- * because the two together are what distinguishes a panic from a power cut
- * without a cable attached. #10 reads it; the increment belongs at boot.
- */
-static uint32_t bump_boot_count(void)
-{
-    uint32_t count = 0;
-
-    esp_err_t err = slate_store_u32_get(SLATE_KEY_BOOT_COUNT, &count);
-    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGW(TAG, "reading boot count: %s", esp_err_to_name(err));
-    }
-
-    count++;
-    err = slate_store_u32_set(SLATE_KEY_BOOT_COUNT, count);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "writing boot count: %s", esp_err_to_name(err));
-    }
-
-    return count;
-}
-
 #ifdef SLATE_STORE_SELFTEST
+static int s_failures;
+
+#define CHECK(cond, what)                                     \
+    do {                                                      \
+        bool ok_ = (cond);                                    \
+        if (!ok_) {                                           \
+            s_failures++;                                     \
+        }                                                     \
+        ESP_LOGI(TAG, "selftest: %-34s %s", what,             \
+                 ok_ ? "PASS" : "FAIL");                      \
+    } while (0)
+
 /*
  * The LittleFS half of this issue's "Done when" — a configuration that survives
  * an application update — cannot be exercised from outside the device until
@@ -61,59 +51,110 @@ static uint32_t bump_boot_count(void)
  * it reads back on every boot afterwards. Reflash the application partition
  * between the two and the report is the proof. It is off by default and comes
  * out when #24 lands.
+ *
+ * Every case states a verdict rather than printing a value. A check that prints
+ * `refused with ESP_OK` and calls it a day is not a check.
  */
 static void store_selftest(void)
 {
     static const char SAMPLE[] =
         "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"pages\":[]}";
+    const size_t SAMPLE_LEN = sizeof(SAMPLE) - 1;
 
     if (!slate_store_config_exists()) {
-        esp_err_t err = slate_store_config_write(SAMPLE, sizeof(SAMPLE) - 1);
-        ESP_LOGI(TAG, "selftest: wrote %d B of configuration: %s",
-                 (int) (sizeof(SAMPLE) - 1), esp_err_to_name(err));
+        esp_err_t err = slate_store_config_write(SAMPLE, SAMPLE_LEN);
+        CHECK(err == ESP_OK, "write configuration");
     }
 
     char *json = NULL;
     size_t len = 0;
     esp_err_t err = slate_store_config_read(&json, &len);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "selftest: reading configuration: %s", esp_err_to_name(err));
-        return;
+    CHECK(err == ESP_OK, "read configuration");
+    if (err == ESP_OK) {
+        CHECK(len == SAMPLE_LEN && memcmp(json, SAMPLE, len) == 0, "configuration round-trips");
+        free(json);
     }
 
-    ESP_LOGI(TAG, "selftest: read %u B, %s", (unsigned) len,
-             (len == sizeof(SAMPLE) - 1 && memcmp(json, SAMPLE, len) == 0) ? "identical"
-                                                                          : "DIFFERENT");
-    free(json);
+    /* §3.1's cap, checked against a length one byte past the real buffer rather
+     * than a fabricated 64 KB — the guard is what is under test, and handing it
+     * a length that would overread if it ever moved is not worth the coverage. */
+    CHECK(slate_store_config_write(SAMPLE, sizeof(SAMPLE)) == ESP_OK, "write at buffer length");
+    CHECK(slate_store_config_write(SAMPLE, SLATE_CONFIG_MAX_BYTES + 1) == ESP_ERR_INVALID_SIZE,
+          "over-size write refused");
+    CHECK(slate_store_config_write(SAMPLE, 0) == ESP_ERR_INVALID_ARG, "empty write refused");
 
-    /* Over-size writes are refused rather than truncated (§3.1). */
-    err = slate_store_config_write(SAMPLE, SLATE_CONFIG_MAX_BYTES + 1);
-    ESP_LOGI(TAG, "selftest: 64 KB + 1 write refused with %s", esp_err_to_name(err));
+    /* Restore, so the next boot's round-trip check has the sample back. */
+    slate_store_config_write(SAMPLE, SAMPLE_LEN);
 
-    ESP_LOGI(TAG, "selftest: token match %d / mismatch %d",
-             slate_store_device_token_matches(slate_store_device_token()),
-             slate_store_device_token_matches("0000000000000000000000000000000A"));
+    char token[SLATE_DEVICE_TOKEN_LEN + 1];
+    CHECK(slate_store_device_token_copy(token, sizeof(token)) == ESP_OK, "token copy");
+    CHECK(strlen(token) == SLATE_DEVICE_TOKEN_LEN, "token is 32 characters");
+    CHECK(slate_store_device_token_matches(token), "correct token matches");
+    CHECK(!slate_store_device_token_matches("0000000000000000000000000000000A"),
+          "wrong token rejected");
+    CHECK(!slate_store_device_token_matches(""), "empty token rejected");
+    token[SLATE_DEVICE_TOKEN_LEN - 1] = '\0';
+    CHECK(!slate_store_device_token_matches(token), "short token rejected");
+
+    char small[4];
+    CHECK(slate_store_device_token_copy(small, sizeof(small)) == ESP_ERR_INVALID_SIZE,
+          "token copy refuses a small buffer");
+
+    /* §12: the generic accessor must not be able to name the secret. */
+    char leak[SLATE_HA_TOKEN_MAX_LEN];
+    CHECK(slate_store_str_get("ha_token", leak, sizeof(leak)) == ESP_ERR_INVALID_ARG,
+          "ha token unreachable via str_get");
+
+    /* One vocabulary for "unset", whichever partition it lives on. */
+    CHECK(slate_store_str_get("no_such_key", leak, sizeof(leak)) == ESP_ERR_NOT_FOUND,
+          "missing key reports NOT_FOUND");
+
+    size_t size = 0;
+    CHECK(slate_store_str_size(SLATE_KEY_DEVICE_TOKEN, &size) == ESP_OK &&
+              size == SLATE_DEVICE_TOKEN_LEN + 1,
+          "str_size reports the required buffer");
+
+    ESP_LOGI(TAG, "selftest: %d failure(s)", s_failures);
 }
 #endif
 
 void app_main(void)
 {
-    ESP_ERROR_CHECK(slate_store_init());
+    /*
+     * Not ESP_ERROR_CHECK. §9 says there is no combination of circumstances in
+     * which a powered panel is unreachable, and aborting here would reboot into
+     * the identical failure forever — the one thing only a USB cable fixes. A
+     * store that could not come up is exactly when the setup access point (#55)
+     * and the error screen (#6) matter most, so the boot continues and says so.
+     */
+    esp_err_t store_err = slate_store_init();
+    if (store_err != ESP_OK) {
+        ESP_LOGE(TAG, "store degraded: %s — continuing", esp_err_to_name(store_err));
+    }
+
+    char fingerprint[SLATE_TOKEN_FINGERPRINT_LEN + 1] = "?";
+    slate_store_device_token_fingerprint(fingerprint, sizeof(fingerprint));
+
+    ESP_LOGI(TAG, "%s, boot #%" PRIu32 ", reset reason %d",
+             slate_store_device_name(), slate_store_boot_count(), (int) esp_reset_reason());
+    ESP_LOGI(TAG, "device token %s (fingerprint; the token itself is shown only in §4.3's QR)",
+             fingerprint);
 
     size_t fs_total = 0;
     size_t fs_used = 0;
-    ESP_ERROR_CHECK(slate_store_fs_usage(&fs_total, &fs_used));
+    if (slate_store_fs_usage(&fs_total, &fs_used) == ESP_OK) {
+        ESP_LOGI(TAG, "littlefs %u B total, %u B used, configuration %s",
+                 (unsigned) fs_total, (unsigned) fs_used,
+                 slate_store_config_exists() ? "present" : "absent");
+    } else {
+        ESP_LOGW(TAG, "littlefs unavailable");
+    }
 
-    /* Outside the ESP_LOGI below on purpose: at a log level under INFO the
-     * macro compiles away, and with it would go the increment. */
-    uint32_t boot_count = bump_boot_count();
+    if (slate_store_storage_was_reset()) {
+        ESP_LOGE(TAG, "storage was reset during boot — stored configuration and credentials "
+                      "are gone");
+    }
 
-    ESP_LOGI(TAG, "%s, boot #%" PRIu32 ", reset reason %d",
-             slate_store_device_name(), boot_count, (int) esp_reset_reason());
-    ESP_LOGI(TAG, "device token %s", slate_store_device_token());
-    ESP_LOGI(TAG, "littlefs %u B total, %u B used, configuration %s",
-             (unsigned) fs_total, (unsigned) fs_used,
-             slate_store_config_exists() ? "present" : "absent");
     ESP_LOGI(TAG, "home assistant %s",
              slate_store_ha_token_is_set() ? "configured" : "not configured");
     ESP_LOGI(TAG, "free heap %u B internal, %u B psram",
