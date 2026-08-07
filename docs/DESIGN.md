@@ -312,7 +312,7 @@ All LVGL access happens on one task; API handlers and the HA client post work to
 - LVGL heap: 2 MB in PSRAM — the entire widget tree budget.
 - State store: sized from the configuration, ~256 B per entity. Even a config saturating the 64 KB limit stays in the tens of KB.
 - Configuration: ≤64 KB, parsed into structs then freed.
-- The setup access point (§9) costs internal SRAM where there is least of it. S-2 measured 104 167 B of internal DMA-capable memory free with the station alone; `WIFI_MODE_APSTA` adds a second interface's buffers on top. It is therefore raised on demand and torn down as soon as the station associates, never left running as a permanent second interface — and whether `APSTA` fits at all is measured before it is relied on. If it does not, the fallback runs the access point alone and retries the station by cycling the mode, which costs a few seconds of downtime on a device that by definition has no connection to lose.
+- The setup access point (§9) costs internal SRAM where there is least of it. S-2 measured 104 167 B of internal DMA-capable memory free with the station alone; `WIFI_MODE_APSTA` adds a second interface's buffers on top. It is raised on demand and torn down as soon as the station associates, never left running as a permanent second interface. `APSTA` is the intended mode and §9.4 depends on it: the station must keep trying while the access point is up, which is what lets an unattended panel recover on its own. If it does not fit, that is a budget problem to solve — not a behaviour to drop; §9.4 names the degraded shape it may not fall below.
 
 ### 6.3 Partition table
 
@@ -516,9 +516,13 @@ station lost while running
        └─ still down after 5 min ────────────► setup AP raised *alongside* the dashboard
 ```
 
-In the runtime case the dashboard stays on screen with its last known values marked stale — the `offline` presentation of §6.5, which exists for a Home Assistant outage and applies here for the same reason — and the setup details appear as a banner rather than a full-screen card. The station keeps retrying underneath the whole time, and the access point is torn down without ceremony the moment it reconnects — an unattended panel heals itself when the router comes back and nobody has to have been in the room.
+In the runtime case the dashboard stays on screen with its last known values marked stale — the `offline` presentation of §6.5, which exists for a Home Assistant outage and applies here for the same reason — and the setup details appear as a banner rather than a full-screen card.
 
-Two consequences that are easy to miss:
+**Raising the access point must never stop the station trying.** This is a requirement, not an implementation note, and it is what makes the five minutes above a safe number rather than a gamble. A router that comes back at minute seven has to find the panel waiting for it: the panel returns to normal, the access point is torn down without ceremony, and nobody had to be in the room. Without it the fallback is a trap — the panel survives the outage and then sits on its own access point indefinitely, needing a human for a fault that fixed itself.
+
+The mode is `WIFI_MODE_APSTA`, and §6.2 records what it costs. Should it not fit alongside everything else M1 puts in internal SRAM, the answer is to find the memory, not to drop the retry. The floor — the degraded shape this may not fall below — is an access point that yields the radio back to the station periodically, at most a minute apart, long enough to attempt an association. That drops the setup page's clients for a few seconds each time, which is a bad experience but a recoverable one. A panel that has stopped trying is not recoverable without a person.
+
+Two further consequences that are easy to miss:
 
 - The screen must not blank or dim while setup details are on it. `screen_off_after` and the night schedule (§3.3) are suspended in setup mode, since the whole point of the mode is an address someone can read.
 - The OTA health check must not equate health with a station connection — see §11.2, which this changes.
