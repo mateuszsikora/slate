@@ -37,12 +37,13 @@ static const char *TAG = "store";
 /*
  * Private keys, deliberately not in the header.
  *
- * §12's Home Assistant token is private so that the generic accessors cannot
- * name it — see key_is_secret(). KEY_FS_READY is private because it is this
- * component's own bookkeeping.
+ * §12's Home Assistant token and station passphrase are private so that the
+ * generic accessors cannot name them — see key_is_secret(). KEY_FS_READY is
+ * private because it is this component's own bookkeeping.
  */
-#define KEY_HA_TOKEN "ha_token"
-#define KEY_FS_READY "fs_ready"
+#define KEY_HA_TOKEN  "ha_token"
+#define KEY_WIFI_PASS "wifi_pass"
+#define KEY_FS_READY  "fs_ready"
 
 /*
  * The device token alphabet, and the reason it is exactly 64 characters long.
@@ -68,6 +69,7 @@ static char s_device_name[SLATE_DEVICE_NAME_LEN + 1];
 
 static uint32_t s_boot_count;
 static bool s_ha_token_set;
+static bool s_wifi_configured;
 static bool s_storage_was_reset;
 static bool s_fs_mounted;
 
@@ -120,7 +122,7 @@ static esp_err_t from_nvs(esp_err_t err)
  * against is a serialiser looping over key names. */
 static bool key_is_secret(const char *key)
 {
-    return strcmp(key, KEY_HA_TOKEN) == 0;
+    return strcmp(key, KEY_HA_TOKEN) == 0 || strcmp(key, KEY_WIFI_PASS) == 0;
 }
 
 /* -------------------------------------------------------------------------
@@ -594,6 +596,84 @@ esp_err_t slate_store_ha_clear(void)
     return url_err != ESP_OK ? url_err : token_err;
 }
 
+esp_err_t slate_store_wifi_set(const char *ssid, const char *password)
+{
+    if (ssid == NULL || ssid[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strlen(ssid) >= SLATE_WIFI_SSID_BUF_LEN ||
+        (password != NULL && strlen(password) >= SLATE_WIFI_PASSWORD_BUF_LEN)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open_ns(NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_str(nvs, SLATE_KEY_WIFI_SSID, ssid);
+    if (err == ESP_OK) {
+        /* An open network stores no passphrase rather than an empty one, so
+         * the reader's ESP_ERR_NOT_FOUND means "open" and never "written as
+         * blank by a form that submitted an untouched field". */
+        if (password == NULL || password[0] == '\0') {
+            err = nvs_erase_key(nvs, KEY_WIFI_PASS);
+            if (err == ESP_ERR_NVS_NOT_FOUND) {
+                err = ESP_OK;
+            }
+        } else {
+            err = nvs_set_str(nvs, KEY_WIFI_PASS, password);
+        }
+    }
+    err = nvs_finish(nvs, err);
+
+    if (err == ESP_OK) {
+        LOCK();
+        s_wifi_configured = true;
+        UNLOCK();
+    }
+    return err;
+}
+
+esp_err_t slate_store_wifi_ssid_get(char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return str_get_raw(SLATE_KEY_WIFI_SSID, out, out_len);
+}
+
+bool slate_store_wifi_is_configured(void)
+{
+    /* Cached for the reason slate_store_ha_token_is_set() is: §9.4 asks this
+     * on every pass through the retry loop. */
+    return s_wifi_configured;
+}
+
+esp_err_t slate_store_wifi_password_get(char *out, size_t out_len)
+{
+    if (out == NULL || out_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return str_get_raw(KEY_WIFI_PASS, out, out_len);
+}
+
+esp_err_t slate_store_wifi_clear(void)
+{
+    /* Secret first, and both attempted before either is reported — the order
+     * slate_store_ha_clear() uses, for the same reason. */
+    esp_err_t pass_err = erase_raw(KEY_WIFI_PASS);
+    esp_err_t ssid_err = erase_raw(SLATE_KEY_WIFI_SSID);
+
+    if (ssid_err == ESP_OK) {
+        LOCK();
+        s_wifi_configured = false;
+        UNLOCK();
+    }
+    return pass_err != ESP_OK ? pass_err : ssid_err;
+}
+
 /* -------------------------------------------------------------------------
  * UI configuration
  * ------------------------------------------------------------------------- */
@@ -892,6 +972,7 @@ esp_err_t slate_store_init(void)
     UNLOCK();
 
     s_ha_token_set = key_exists(KEY_HA_TOKEN);
+    s_wifi_configured = key_exists(SLATE_KEY_WIFI_SSID);
 
     bump_boot_count();
 
@@ -942,6 +1023,7 @@ esp_err_t slate_store_factory_reset(void)
     STEP(init_nvs(), "reinitialising NVS");
 
     s_ha_token_set = false;
+    s_wifi_configured = false;
     s_boot_count = 0;
 
     /* Then the filesystem. */
