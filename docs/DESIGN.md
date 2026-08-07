@@ -232,6 +232,16 @@ The same object is what `POST /wifi` accepts:
 
 An absent `ipv4` means `dhcp`. That default is what makes the field addable without a version — section 3.1's rule that unknown fields are ignored points the same way for a client written against a firmware that predates it — and it is why the shape is settled here rather than when the feature is built. M1 accepts `dhcp` and refuses `static` with a named error, for the reason section 9.6 gives.
 
+`POST /wifi` answers `202`, because the status has to say what the body cannot: the credentials are stored and are being applied, and section 9.3 is why the outcome is not knowable here. Its refusals are `400` unless noted: `empty_body`, `invalid_json`, `truncated`, `too_large` (`413`), `ssid_required`, `ssid_too_long`, `password_too_long`, `bad_ipv4`, `bad_ipv4_mode`, `bad_address`, `bad_gateway`, `bad_dns`, `static_unsupported`, and `store_failed` (`500`). The addressing is checked for coherence before the mode is refused, so a typed gateway that is on the wrong subnet is reported as `bad_gateway` rather than disappearing behind `static_unsupported` — the validation exists in M1 precisely so that it runs before the feature does.
+
+`GET /wifi/scan` serves the cache of section 9.2 and says how old it is. `age_s` is `null` when no sweep has been taken, which is a different thing from a room with no networks in it:
+
+```json
+{"networks": [{"ssid": "home", "rssi": -54, "channel": 6, "auth": "wpa2"}], "age_s": 12}
+```
+
+`auth` is `open`, `wep`, `wpa`, `wpa2`, `wpa3`, `enterprise` or `unknown` — the question a person picking a network is being asked is whether it wants a passphrase, not which key exchange it prefers. `?rescan=1` sweeps again before answering, and is the section 9.2 refresh button rather than something a client polls: the sweep makes the access point unresponsive while it runs.
+
 The complete M1 response shapes are:
 
 ```json
@@ -242,7 +252,8 @@ The complete M1 response shapes are:
   "name": "slate-a1b2c3",
   "themes": [],
   "pairing": "ready",
-  "network": {"mode": "sta", "ssid": "home", "ip": "192.168.1.42", "sta_ssid": "home", "last_error": null}
+  "network": {"mode": "sta", "ssid": "home", "ip": "192.168.1.42", "sta_ssid": "home",
+              "ipv4": {"mode": "dhcp"}, "last_error": null}
 }
 ```
 
@@ -530,6 +541,8 @@ Steps 6–8 are M6 and later. From M1 the setup page carries the WiFi form and n
 The setup page is **compiled into the firmware**, not served from LittleFS. It has to work on a device that has never had a filesystem, and LittleFS is what a bad OTA or a first flash is most likely to leave empty. The cost is trivial against the flash S-3 measured — 22.4 % of a 6 MB slot — and the page is a gzipped single file with no external references, targeted under 24 KB.
 
 The captive portal is best-effort and never the only way in. Answering every DNS query is how a captive portal is detected in the first place, so both iOS and Android will label the network as having no internet and offer to leave it. The address is printed on the screen precisely so that offer costs nothing.
+
+Answering the query is half of it. The probe that follows arrives on this server at whatever path the phone asked for — `/hotspot-detect.html` and its equivalents — so an unmatched request that came in on the access point is redirected to the setup page, and the portal sheet opens on the page rather than on a 404. Everything under the API base keeps answering section 4's `{"error": "not_found"}` instead, redirect or not: a client that asked for a route this firmware does not have wants to be told so. The DHCP server also hands out the portal's URL directly (RFC 8910), which is what a client that understands it uses in preference to any of the above.
 
 Scan results are cached from a sweep taken when the access point comes up, not gathered per request: `esp_wifi_scan_start()` on a radio that is also running an access point makes that access point unresponsive for the duration, which a browser mid-request experiences as the panel having crashed. The page has a refresh button that re-scans and says it will take a few seconds, and a field for typing an SSID that the sweep did not find.
 

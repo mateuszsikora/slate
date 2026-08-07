@@ -13,6 +13,7 @@
 #include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "lwip/inet.h"
@@ -67,20 +68,53 @@ esp_err_t slate_api_send_error(httpd_req_t *req, const char *status, const char 
     return httpd_resp_send(req, body, len);
 }
 
+/**
+ * Whether this request arrived on the setup access point's own address.
+ *
+ * §4.3's exception is "on the access point interface only", and the interface a
+ * request came in on is not something HTTP carries — a Host header is whatever
+ * the client typed. The local end of the accepted socket is the fact, so that is
+ * what is asked.
+ *
+ * The address family is where this gets its one surprise, and it is worth
+ * spelling out because getting it wrong fails in the safe direction and is
+ * therefore quiet: `esp_http_server` opens its listening socket with `PF_INET6`
+ * whenever lwIP has IPv6 compiled in, which is ESP-IDF's default. Every IPv4
+ * client then arrives on a dual-stack socket, and `getsockname()` reports
+ * `AF_INET6` with an IPv4-mapped address — `::ffff:192.168.4.1` — rather than
+ * `AF_INET`. A check that only accepts `AF_INET` therefore matches nothing at
+ * all, which does not look like a bug: every route keeps working, and the one
+ * client that cannot send a token gets a 401 on the one page that is supposed to
+ * work without one.
+ */
 static bool request_is_on_setup_ap(httpd_req_t *req)
 {
     int fd = httpd_req_to_sockfd(req);
     struct sockaddr_storage local = {0};
     socklen_t len = sizeof(local);
-    if (fd < 0 || getsockname(fd, (struct sockaddr *) &local, &len) != 0 ||
-        local.ss_family != AF_INET) {
+    if (fd < 0 || getsockname(fd, (struct sockaddr *) &local, &len) != 0) {
         return false;
     }
 
-    char address[INET_ADDRSTRLEN];
-    const struct sockaddr_in *ipv4 = (const struct sockaddr_in *) &local;
-    return inet_ntop(AF_INET, &ipv4->sin_addr, address, sizeof(address)) != NULL &&
-           strcmp(address, SLATE_SETUP_AP_ADDRESS) == 0;
+    uint32_t address = 0;
+    if (local.ss_family == AF_INET) {
+        address = ((const struct sockaddr_in *) &local)->sin_addr.s_addr;
+    } else if (local.ss_family == AF_INET6) {
+        const struct sockaddr_in6 *ipv6 = (const struct sockaddr_in6 *) &local;
+        if (!IN6_IS_ADDR_V4MAPPED(&ipv6->sin6_addr)) {
+            /* A client that reached the panel over real IPv6 is not on the setup
+             * access point, which serves IPv4 and a DHCP server (§9.2). */
+            return false;
+        }
+        memcpy(&address, ipv6->sin6_addr.un.u8_addr + 12, sizeof(address));
+    } else {
+        return false;
+    }
+
+    /* Compared as an address rather than as text: one of the two sides would
+     * otherwise be a string produced by inet_ntop, and "0.0.0.0" versus "::"
+     * versus a mapped form is a comparison with more than one right answer. */
+    return address == esp_ip4addr_aton(SLATE_SETUP_AP_ADDRESS);
 }
 
 static bool bearer_token_matches(httpd_req_t *req)
@@ -222,16 +256,51 @@ static cJSON *network_json(const slate_wifi_status_t *status)
         return NULL;
     }
 
-    /* #55 changes `mode` and the active SSID when its AP is raised. Until
-     * then this component truthfully has one station interface, even while
-     * that station is unconfigured or retrying. */
-    bool ok = cJSON_AddStringToObject(network, "mode", "sta") != NULL &&
+    /*
+     * Read out of esp_netif rather than kept here. #55 raises and tears down the
+     * access point on its own task, and a copy of "is it up" in this component
+     * would be a second answer to keep in step with the one that owns the
+     * interface — which §4.1 already refuses to do for `ipv4`, for the same
+     * reason: "a field that repeated the request instead would make the setup
+     * page show a number meaning two different things."
+     *
+     * `sta` wins whenever the station has an address, even during the moment
+     * before the access point is torn down. §4.1 says `ssid` is "the network the
+     * device is currently on or offering", and a panel that is on one is not
+     * offering one for much longer.
+     */
+    esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    bool on_setup_ap = !status->connected && ap != NULL && esp_netif_is_netif_up(ap);
+
+    char ap_address[16] = {0};
+    esp_netif_ip_info_t ip = {0};
+    if (on_setup_ap && esp_netif_get_ip_info(ap, &ip) == ESP_OK) {
+        esp_ip4addr_ntoa(&ip.ip, ap_address, sizeof(ap_address));
+    }
+
+    /* §9.2 and §4.3 make the access point's SSID the device name — "so one panel
+     * is called one thing everywhere" — and slate_store owns that string, so
+     * this reports it rather than building a second spelling of it. */
+    bool ok = cJSON_AddStringToObject(network, "mode", on_setup_ap ? "ap" : "sta") != NULL &&
               add_string_or_null(network, "ssid",
-                                 status->connected ? status->sta_ssid : NULL) &&
-              add_string_or_null(network, "ip", status->connected ? status->ip : NULL) &&
-              add_string_or_null(network, "sta_ssid", status->sta_ssid) &&
-              add_string_or_null(network, "last_error",
-                                 slate_wifi_error_str(status->last_error));
+                                 on_setup_ap ? slate_store_device_name()
+                                             : (status->connected ? status->sta_ssid : NULL)) &&
+              add_string_or_null(network, "ip",
+                                 on_setup_ap ? ap_address
+                                             : (status->connected ? status->ip : NULL)) &&
+              add_string_or_null(network, "sta_ssid", status->sta_ssid);
+
+    /*
+     * §4.1: `ipv4` is "where the station's address came from, and it is reported
+     * rather than echoed". In M1 there is one answer it can be — #63 implements
+     * the static half, and until then a static configuration is refused by
+     * `POST /wifi` rather than stored, so nothing can have come from one. The
+     * field lands now because ADR-4 makes its name contract and §4.1 settles the
+     * shape here rather than there.
+     */
+    cJSON *ipv4 = ok ? cJSON_AddObjectToObject(network, "ipv4") : NULL;
+    ok = ok && ipv4 != NULL && cJSON_AddStringToObject(ipv4, "mode", "dhcp") != NULL &&
+         add_string_or_null(network, "last_error", slate_wifi_error_str(status->last_error));
     if (!ok) {
         cJSON_Delete(network);
         return NULL;
@@ -360,10 +429,70 @@ static esp_err_t options_handler(httpd_req_t *req)
     return httpd_resp_send(req, NULL, 0);
 }
 
+/*
+ * The other half of §9.2's captive portal, and the reason it is here rather than
+ * in #55's component.
+ *
+ * The DNS responder answers every query with the device address, so a phone's
+ * portal probe — `http://captive.apple.com/hotspot-detect.html` and its
+ * equivalents — arrives at this server on a path nothing is registered for. A
+ * bare 404 there is what makes the portal sheet open onto an error page, so an
+ * unmatched request that came in on the access point is redirected to the setup
+ * page instead. That is what "phones open the page unprompted" needs.
+ *
+ * Doing it with a wildcard route would put every unregistered GET path behind
+ * §4.3's token exception, leaving registration order to decide whether
+ * `/api/v1/status` resolved to a handler or to the exception — an accident
+ * waiting for the next component to register a route. A 404 handler cannot be
+ * reached by any request a route matched, so it cannot shadow one.
+ *
+ * Everything under the API base keeps answering §4's failure shape, redirect or
+ * not: a client that asked for a route this firmware does not have wants to be
+ * told so, not sent a setup page with a 302.
+ */
+static esp_err_t not_found_handler(httpd_req_t *req, httpd_err_code_t error)
+{
+    (void) error;
+    set_common_headers(req);
+
+    static const char BASE[] = SLATE_API_BASE_PATH "/";
+    bool api_request = strncmp(req->uri, BASE, sizeof(BASE) - 1) == 0;
+
+    if (!api_request && request_is_on_setup_ap(req)) {
+        httpd_resp_set_status(req, "302 Found");
+        httpd_resp_set_hdr(req, "Location", "http://" SLATE_SETUP_AP_ADDRESS "/");
+        httpd_resp_send(req, NULL, 0);
+        return ESP_OK;
+    }
+
+    slate_api_send_error(req, "404 Not Found", "not_found");
+
+    /* Same bound as the 401 above: a body nobody read is a body esp_http_server
+     * drains 32 bytes at a time on the one HTTP task, and a client that keeps
+     * trickling owns it for as long as it likes. */
+    return req->content_len > 0 ? ESP_FAIL : ESP_OK;
+}
+
 esp_err_t slate_api_init(void)
 {
     if (s_server != NULL) {
         return ESP_ERR_INVALID_STATE;
+    }
+
+    /*
+     * The first line in this firmware that opens a socket, so it is the one that
+     * has to be sure lwIP is running: httpd_start() reaches the TCP/IP thread,
+     * and without one the assert inside it is a panic on the second line of
+     * app_main rather than an error this function could return.
+     *
+     * Idempotent, and here for the same reason slate_wifi_init() calls it —
+     * #55's setup portal has to be watching for the station's hand-off before the
+     * station exists, so the HTTP server now comes up before the radio and
+     * neither component gets to assume the other went first.
+     */
+    esp_err_t netif_err = esp_netif_init();
+    if (netif_err != ESP_OK) {
+        return netif_err;
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -399,6 +528,9 @@ esp_err_t slate_api_init(void)
     }
     if (err == ESP_OK) {
         err = slate_api_register_uri(&options, SLATE_API_AUTH_PUBLIC);
+    }
+    if (err == ESP_OK) {
+        err = httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND, not_found_handler);
     }
     if (err != ESP_OK) {
         httpd_stop(s_server);
