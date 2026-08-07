@@ -2,9 +2,10 @@
  * Slate — firmware entry point.
  *
  * At this point in M1 the application is the store, the WiFi station and the
- * clock and the HTTP API. The display (#6), setup access point (#55) and OTA
- * (#11, #12) each attach here as they land, in that order, because
- * each one depends on the one before it having somewhere to keep its state.
+ * clock, the HTTP API and development OTA. The display (#6), setup access
+ * point (#55) and OTA rollback (#12) each attach here as they land, in that
+ * order, because each one depends on the one before it having somewhere to
+ * keep its state.
  *
  * The boot report below is the only user interface the firmware currently has.
  * It exists to answer the questions the landed issues are judged on — is the
@@ -26,6 +27,7 @@
 #include "esp_system.h"
 
 #include "slate_api.h"
+#include "slate_ota.h"
 #include "slate_store.h"
 #include "slate_time.h"
 #include "slate_wifi.h"
@@ -254,6 +256,15 @@ static void start_api(void)
 #ifdef SLATE_API_SELFTEST
     slate_api_selftest();
 #endif
+
+    /* §11.1 is one route on the server that just came up, so it attaches here
+     * and not before: without the API there is nothing to register against,
+     * and a device whose HTTP server did not start cannot be flashed over the
+     * network by any means this milestone owns. */
+    err = slate_ota_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "development OTA unavailable: %s — continuing", esp_err_to_name(err));
+    }
 }
 
 void app_main(void)

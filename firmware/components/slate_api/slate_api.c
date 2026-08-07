@@ -50,7 +50,7 @@ static void set_common_headers(httpd_req_t *req)
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
 }
 
-static esp_err_t send_json_error(httpd_req_t *req, const char *status, const char *error)
+esp_err_t slate_api_send_error(httpd_req_t *req, const char *status, const char *error)
 {
     char body[64];
     int len = snprintf(body, sizeof(body), "{\"error\":\"%s\"}", error);
@@ -111,7 +111,7 @@ static esp_err_t dispatch(httpd_req_t *req)
                    bearer_token_matches(req);
     if (!allowed) {
         httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer");
-        return send_json_error(req, "401 Unauthorized", "unauthorized");
+        return slate_api_send_error(req, "401 Unauthorized", "unauthorized");
     }
 
     /* Preserve the handler contract: the wrapper's context is private, and
@@ -245,16 +245,16 @@ static const char *reset_reason_str(esp_reset_reason_t reason)
     }
 }
 
-static esp_err_t send_json(httpd_req_t *req, cJSON *root)
+esp_err_t slate_api_send_json(httpd_req_t *req, cJSON *root)
 {
     if (root == NULL) {
-        return send_json_error(req, "500 Internal Server Error", "out_of_memory");
+        return slate_api_send_error(req, "500 Internal Server Error", "out_of_memory");
     }
 
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (body == NULL) {
-        return send_json_error(req, "500 Internal Server Error", "out_of_memory");
+        return slate_api_send_error(req, "500 Internal Server Error", "out_of_memory");
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -277,7 +277,7 @@ static esp_err_t info_handler(httpd_req_t *req)
     const esp_app_desc_t *app = esp_app_get_description();
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
-        return send_json(req, NULL);
+        return slate_api_send_json(req, NULL);
     }
 
     bool ok = cJSON_AddStringToObject(root, "model", MODEL_ID) != NULL &&
@@ -290,9 +290,9 @@ static esp_err_t info_handler(httpd_req_t *req)
               add_item(root, "network", network_json(&wifi));
     if (!ok) {
         cJSON_Delete(root);
-        return send_json(req, NULL);
+        return slate_api_send_json(req, NULL);
     }
-    return send_json(req, root);
+    return slate_api_send_json(req, root);
 }
 
 static esp_err_t status_handler(httpd_req_t *req)
@@ -302,7 +302,7 @@ static esp_err_t status_handler(httpd_req_t *req)
 
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
-        return send_json(req, NULL);
+        return slate_api_send_json(req, NULL);
     }
 
     bool ok = add_item(root, "network", network_json(&wifi)) &&
@@ -332,9 +332,9 @@ static esp_err_t status_handler(httpd_req_t *req)
                                slate_store_storage_was_reset()) != NULL;
     if (!ok) {
         cJSON_Delete(root);
-        return send_json(req, NULL);
+        return slate_api_send_json(req, NULL);
     }
-    return send_json(req, root);
+    return slate_api_send_json(req, root);
 }
 
 static esp_err_t options_handler(httpd_req_t *req)
