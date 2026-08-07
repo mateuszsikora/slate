@@ -595,6 +595,15 @@ POST /api/v1/ota/upload    body: raw .bin
 
 `esp_ota_begin` → `esp_ota_write` as the body streams in → `esp_ota_end` → `esp_ota_set_boot_partition` → reboot. Roughly a hundred lines. The host-side script is a `curl --data-binary @build/slate.bin` with the token header.
 
+The answer comes before the reboot, because after it there is nobody left to answer:
+
+```json
+{"status": "ok", "partition": "ota_1", "bytes": 927040,
+ "version": "1.0.0-3-gd81fdc4", "reboot_in_ms": 500}
+```
+
+`version` is read out of the image that has just been written, not the one that is running — "did the file I meant to send arrive" is the question a development flash asks, and the panel is the only party that can answer it. Failures are §4's `{"error": "..."}` with `empty_body`, `too_large`, `not_an_image`, `truncated`, `invalid_image`, `pending_verify` (§11.2), `no_ota_partition` or `ota_failed`. Everything up to `truncated` is refused before a sector is erased, so a wrong file costs nothing but the upload: the image header is checked first, and `Content-Length` is what `esp_ota_begin` erases against rather than the whole slot.
+
 From this point the board can hang on a wall while development continues from a desk.
 
 ### 11.2 Rollback belongs to the same step
