@@ -192,19 +192,30 @@ Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: B
 
 | Method | Path               | Description |
 |--------|--------------------|-------------|
-| GET    | `/info`            | model, firmware version, `schema_max`, name, available themes, pairing state. No auth. |
+| GET    | `/info`            | model, firmware version, `schema_max`, name, available themes, pairing state, current network state. No auth. |
 | GET    | `/config`          | current UI configuration |
 | PUT    | `/config`          | replace configuration; validates, rebuilds the UI, persists. With `?transient=1` (edit mode only) the rebuild happens in RAM and nothing is written to flash — this is what live preview uses, so a drag session does not wear the flash. |
 | POST   | `/config/validate` | validate without saving — returns errors keyed by `tile.id` |
 | GET    | `/entities`        | entities from HA: `entity_id`, `friendly_name`, `domain`, `area`, `state`, `supported_features` |
 | GET    | `/areas`           | areas from HA |
 | POST   | `/ha`              | set HA URL and token; connection is tested before saving |
-| GET    | `/status`          | WiFi state, HA state, RSSI, uptime, free heap, reset reason, reboot counter, entity count |
+| GET    | `/wifi/scan`       | nearby networks: `ssid`, `rssi`, `channel`, `auth`. Cached — see section 9.2 |
+| POST   | `/wifi`            | set station credentials, persist, then apply. Answers before the result is known (section 9.3) |
+| DELETE | `/wifi`            | forget the credentials and raise the setup access point |
+| GET    | `/status`          | network state, HA state, RSSI, uptime, free heap, reset reason, reboot counter, entity count |
 | POST   | `/mode`            | `{"mode": "normal"\|"edit"}` |
 | POST   | `/identify`        | flashes the screen — for telling panels apart |
 | POST   | `/ota/upload`      | development OTA; raw `.bin` body (section 11.1) |
 | GET    | `/coredump`        | last core dump, if any |
 | POST   | `/factory_reset`   | wipes NVS and LittleFS |
+
+Network state appears in `/info` as well as `/status`, because a browser that has just joined the setup access point has no token and still has to know what it is looking at:
+
+```json
+{"network": {"mode": "ap", "ssid": "slate-a1b2c3", "ip": "192.168.4.1", "sta_ssid": null, "last_error": "bad_password"}}
+```
+
+`mode` is `sta` or `ap`; `ssid` is the network the device is currently on or offering; `sta_ssid` is the configured station network, which exists even while the access point is up. `last_error` is the reason the station is not connected, and it is the same string the setup screen prints — one vocabulary, so a report from the panel and a report from the API cannot disagree.
 
 ### 4.2 WebSocket `/api/v1/ws`
 
@@ -237,7 +248,9 @@ http://192.168.1.42/?t=Xk7p...
 
 The editor persists it in `localStorage`. Requests without it receive 401. A new token is issued after `factory_reset` or on explicit request from the device screen.
 
-This handles device discovery and authorization in a single step. Because the stored token outlives a DHCP lease, the device also advertises itself over mDNS as `slate-<mac>.local`; the editor falls back to it when the remembered IP stops answering, and the error screen always shows the current address.
+This handles device discovery and authorization in a single step. Because the stored token outlives a DHCP lease, the device also advertises itself over mDNS as `slate-<mac>.local`; the editor falls back to it when the remembered IP stops answering, and the error screen always shows the current address. mDNS is advertised on the setup access point too, so the same name works before the panel has ever joined a network.
+
+There is one exception to the token, and it is narrow. While the setup access point is up, the setup page itself and the three endpoints it needs — `GET /wifi/scan`, `POST /wifi`, `GET /info` — are served **without a token, on the access point interface only**. Everything else answers 401 there exactly as it does on the station interface. The reasoning is that a token the browser must be told, when the browser has just joined an open network whose name is printed on the same screen as the token, is a step that buys nothing and costs the one flow that must not have steps. The exposure this accepts is bounded and worth stating plainly: someone within radio range can move the panel to a different network. They cannot read the Home Assistant token, write a configuration or upload firmware. Section 12 carries the same point from the security side.
 
 ## 5. Home Assistant integration
 
@@ -286,7 +299,7 @@ Optimistic updates are mandatory. A tap immediately reflects the expected state 
 
 ### 6.1 Stack
 
-ESP-IDF 5.x, LVGL 9.3+, `esp_lcd` with an RGB panel, GT911 over I²C, CH422G as IO expander, `esp_websocket_client` for Home Assistant, `esp_http_server` for the API, cJSON for configuration, SNTP for time (the system bar clock and the night schedule are meaningless without it).
+ESP-IDF 5.x, LVGL 9.3+, `esp_lcd` with an RGB panel, GT911 over I²C, CH422G as IO expander, `esp_websocket_client` for Home Assistant, `esp_http_server` for the API and for the setup page, `esp_wifi` in station and SoftAP modes with a small DNS responder for the captive portal (§9.2), cJSON for configuration, SNTP for time (the system bar clock and the night schedule are meaningless without it).
 
 All LVGL access happens on one task; API handlers and the HA client post work to it through a queue rather than touching the tree directly.
 
@@ -299,6 +312,7 @@ All LVGL access happens on one task; API handlers and the HA client post work to
 - LVGL heap: 2 MB in PSRAM — the entire widget tree budget.
 - State store: sized from the configuration, ~256 B per entity. Even a config saturating the 64 KB limit stays in the tens of KB.
 - Configuration: ≤64 KB, parsed into structs then freed.
+- The setup access point (§9) costs internal SRAM where there is least of it. S-2 measured 104 167 B of internal DMA-capable memory free with the station alone; `WIFI_MODE_APSTA` adds a second interface's buffers on top. It is raised on demand and torn down as soon as the station associates, never left running as a permanent second interface. `APSTA` is the intended mode and §9.4 depends on it: the station must keep trying while the access point is up, which is what lets an unattended panel recover on its own. If it does not fit, that is a budget problem to solve — not a behaviour to drop; §9.4 names the degraded shape it may not fall below.
 
 ### 6.3 Partition table
 
@@ -347,7 +361,7 @@ Rebuilds must be memory-idempotent. After 500 cycles the free LVGL heap returns 
 
 | Mode    | Behaviour |
 |---------|-----------|
-| setup   | WiFi wizard with on-screen keyboard, then a QR code with address and token |
+| setup   | the device runs its own access point and serves the setup page. The screen shows the SSID, the password if one is set, the address and a pairing QR — section 9 |
 | normal  | dashboard; touch controls entities |
 | edit    | top bar reads "edit mode", touch does not call services, live preview of changes |
 | offline | HA unreachable: tiles dimmed, indicator in the bar, last known values visible but clearly marked stale |
@@ -433,18 +447,89 @@ Three type steps: hero 44 px, body 20 px, caption 15 px. Fonts are rendered at `
 
 Icons: 60–80 Material Design Icons glyphs selected for the component set, compiled as a font. Character coverage: Latin-1 plus Polish diacritics. Wider script support is deferred, but the coverage decision is made during S-3 because it drives flash usage.
 
-## 9. First run
+## 9. First run and the setup access point
+
+A panel that has never been configured and a panel whose router has gone away look identical from the outside: a screen that is on and a device that answers nothing. Slate treats them as the same state and resolves both the same way — **when the station is not connected, the device raises its own access point and serves a setup page over it.** There is no combination of circumstances in which a powered panel is unreachable, and no failure that is fixed by a USB cable.
+
+This replaces the on-screen WiFi wizard the design originally called for. A phone keyboard beats an LVGL one at typing a WPA2 passphrase, the browser is already required for everything else the panel is configured with, and removing the wizard removes the only reason setup would depend on the touch controller working.
+
+### 9.1 The flow
 
 1. Flash from the browser using ESP Web Tools (Chromium-based browsers).
-2. The device boots into setup. It scans for networks, lists them on screen, and accepts the password through an on-screen LVGL keyboard.
-3. Once connected, the screen shows a QR code containing the address and token, along with the address in plain text.
-4. Scanning with a phone, or typing the address, opens the editor.
-5. The editor asks for the Home Assistant URL and a long-lived token. `POST /ha` verifies the connection before persisting.
-6. The entity picker populates and the first page can be arranged.
+2. The device boots, finds no credentials in NVS, and comes up in setup mode. The screen shows the access point's SSID, its password if one is set, the address to open, and a `WIFI:` QR that joins the network in one scan. This is a different QR from the pairing one of §4.3 — that one carries a URL and a token, and there is nothing to pair with until there is a network.
+3. Join `slate-<mac6>` from a phone or laptop and open `http://192.168.4.1`.
+4. The setup page lists nearby networks. Pick one, type the password, submit.
+5. The panel reports the outcome **on its own screen** — see §9.3 for why the browser cannot. On success it shows the station address and the pairing QR with the device token; on failure the access point comes back with the reason.
+6. Scanning the pairing QR, or typing the address, opens the editor.
+7. The editor asks for the Home Assistant URL and a long-lived token. `POST /ha` verifies the connection before persisting.
+8. The entity picker populates and the first page can be arranged.
 
-Network failure handling: three failed connection attempts return the device to the wizard with a specific message (wrong password / network unavailable). Changing a router must never require reflashing.
+Steps 6–8 are M6 and later. From M1 the setup page carries the WiFi form and nothing else; it grows into the editor's pairing view rather than being replaced by it.
 
-The wizard remains reachable later: a 10-second press anywhere on the screen in error mode, or `POST /factory_reset`.
+### 9.2 The access point
+
+| | |
+|---|---|
+| SSID | `slate-<mac6>` — the last three bytes of the base MAC in lowercase hex, the same suffix as `slate-<mac>.local` (§4.3) and the device name (§16), so one panel is called one thing everywhere |
+| Password | **none by default.** WPA2 can be set and is then printed on the setup screen next to the SSID. The 8-character floor is the standard's, not ours |
+| Address | `192.168.4.1`, the `esp_netif` default, kept because it is the address people already recognise from every other device that does this |
+| DHCP | served by the device, which is also the gateway |
+| Portal | a DNS responder answering every query with the device address, so phones open the page unprompted |
+
+The setup page is **compiled into the firmware**, not served from LittleFS. It has to work on a device that has never had a filesystem, and LittleFS is what a bad OTA or a first flash is most likely to leave empty. The cost is trivial against the flash S-3 measured — 22.4 % of a 6 MB slot — and the page is a gzipped single file with no external references, targeted under 24 KB.
+
+The captive portal is best-effort and never the only way in. Answering every DNS query is how a captive portal is detected in the first place, so both iOS and Android will label the network as having no internet and offer to leave it. The address is printed on the screen precisely so that offer costs nothing.
+
+Scan results are cached from a sweep taken when the access point comes up, not gathered per request: `esp_wifi_scan_start()` on a radio that is also running an access point makes that access point unresponsive for the duration, which a browser mid-request experiences as the panel having crashed. The page has a refresh button that re-scans and says it will take a few seconds, and a field for typing an SSID that the sweep did not find.
+
+### 9.3 `POST /wifi` cannot tell you whether it worked
+
+There is one radio. The access point and the station share it and must sit on the same channel, so at the moment the station associates with the router the access point moves to the router's channel and drops every client attached to it — including the browser that submitted the form, at the exact instant of success. Polling for a result from that browser is not a thing that can be made to work.
+
+So `POST /wifi` answers as soon as the credentials are stored and validated for shape, and the **result is reported on the panel**. This is not a consolation prize for a missing feature; it is the reason the screen shows the address in the first place, and it is why requirement and hardware agree here rather than fighting.
+
+Failures are named, not generic, and the vocabulary is shared with `/info.network.last_error` (§4.1) so the screen and the API cannot tell different stories:
+
+| `last_error` | On screen |
+|---|---|
+| `bad_password` | Wrong password for `<ssid>` |
+| `not_found`    | `<ssid>` is not in range |
+| `no_ip`        | Joined `<ssid>` but the router gave no address |
+| `auth_timeout` | `<ssid>` did not answer |
+
+After three failed attempts the access point returns on the same SSID with the reason on screen and the credentials still in NVS, so a corrected password is one field, not a re-entry of everything.
+
+### 9.4 When the network goes away later
+
+A router reboot must not tear a working dashboard off the wall and replace it with a setup card. The two cases are deliberately different:
+
+```
+cold boot
+  ├─ no credentials ─────────────────────────► setup AP immediately
+  └─ credentials
+       └─ associate, 3 attempts ──ok─────────► normal
+                              └─ fail ───────► setup AP, credentials kept
+
+station lost while running
+  └─ reconnect with backoff 1 → 2 → 4 → 8 → 15 → 30 s
+       ├─ back within 5 min ─────────────────► normal; only the bar indicator ever moved
+       └─ still down after 5 min ────────────► setup AP raised *alongside* the dashboard
+```
+
+In the runtime case the dashboard stays on screen with its last known values marked stale — the `offline` presentation of §6.5, which exists for a Home Assistant outage and applies here for the same reason — and the setup details appear as a banner rather than a full-screen card.
+
+**Raising the access point must never stop the station trying.** This is a requirement, not an implementation note, and it is what makes the five minutes above a safe number rather than a gamble. A router that comes back at minute seven has to find the panel waiting for it: the panel returns to normal, the access point is torn down without ceremony, and nobody had to be in the room. Without it the fallback is a trap — the panel survives the outage and then sits on its own access point indefinitely, needing a human for a fault that fixed itself.
+
+The mode is `WIFI_MODE_APSTA`, and §6.2 records what it costs. Should it not fit alongside everything else M1 puts in internal SRAM, the answer is to find the memory, not to drop the retry. The floor — the degraded shape this may not fall below — is an access point that yields the radio back to the station periodically, at most a minute apart, long enough to attempt an association. That drops the setup page's clients for a few seconds each time, which is a bad experience but a recoverable one. A panel that has stopped trying is not recoverable without a person.
+
+Two further consequences that are easy to miss:
+
+- The screen must not blank or dim while setup details are on it. `screen_off_after` and the night schedule (§3.3) are suspended in setup mode, since the whole point of the mode is an address someone can read.
+- The OTA health check must not equate health with a station connection — see §11.2, which this changes.
+
+### 9.5 Getting back to setup
+
+`DELETE /api/v1/wifi` forgets the credentials and raises the access point. `POST /factory_reset` does the same and takes the tokens and the configuration with it. From the panel itself: a 10-second press anywhere on the screen. Changing a router must never require reflashing, and after M1 it never requires a cable either.
 
 ## 10. Editor
 
@@ -483,10 +568,13 @@ Without rollback, the first firmware that crashes on boot forces the panel off t
 
 `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`. After a new image boots:
 
-- WiFi connected and the HTTP server answers `/api/v1/info` within 60 s → `esp_ota_mark_app_valid_cancel_rollback()`
+- the HTTP server answers `/api/v1/info` within 60 s on whichever interface is up — the station, or the setup access point of §9 → `esp_ota_mark_app_valid_cancel_rollback()`
 - otherwise reboot and automatic revert to the previous partition
 
-The health check must not include the Home Assistant connection. If HA is down for maintenance, a perfectly good image would be rolled back. Health means "I can accept the next OTA", nothing more.
+Health means "I can accept the next OTA", nothing more, and the check must contain nothing else. Two exclusions follow from that and both are load-bearing:
+
+- **Not the Home Assistant connection.** If HA is down for maintenance, a perfectly good image would be rolled back.
+- **Not the station connection.** A device sitting on its own access point with the API answering can be flashed again — `POST /ota/upload` at `192.168.4.1` is the same endpoint. An image that boots while the router happens to be down is not a bad image, and rolling it back would be the same mistake as the first exclusion, arriving through a different door. Rolling back would also be actively wrong: the previous image is no more able to reach a router that is not there, so the device reboots into an identical state having thrown away the newer firmware.
 
 ### 11.3 Logs and crashes without a cable
 
@@ -521,6 +609,8 @@ Minimal by design — the device sits on a LAN, not on the internet.
 - The Home Assistant token lives only in NVS and is never returned by the API (masked in `GET /status`). It is the one secret that genuinely matters.
 - The device token guards write endpoints.
 - Documentation states plainly that a long-lived HA token carries full account privileges, and recommends a dedicated account in Home Assistant's **`system-users`** group. Not `system-admin`, which grants more than Slate needs, and explicitly **not `system-read-only`**, which does not work: S-4 measured that group reading every registry Slate needs while being refused `call_service`, so the panel renders a perfect dashboard on which nothing responds to a tap. The group has to be named, because "restricted" reads like "read-only" to anyone skimming. The failure is also quiet: a denied service call comes back as `home_assistant_error`, not `unauthorized`, so firmware matching on the error code classifies a permission problem as a transient fault and reverts the optimistic update (§5.4) on every tap, forever, with no hint that the account is the cause.
+- The WiFi passphrase written by `POST /wifi` lives in NVS and is never returned by the API, and it never enters the configuration JSON — §10 makes that file something people export, import and share, and a credential does not belong in a document with those properties.
+- **The setup access point is open by default**, and the setup page on it is served without a token (§4.3). This is the one place the token rule is relaxed, and the trade is worth naming rather than discovering. What an attacker in radio range gets is the ability to move the panel to a different network. What they do not get is the Home Assistant token, the configuration, or `/ota/upload` — those answer 401 on the access point exactly as they do on the station, and a panel moved to a hostile network still holds every secret behind a token that only the screen has shown. The threat model is a room, and the mitigation is the same one the whole pairing scheme rests on: the screen is in that room and the attacker is not. A WPA2 passphrase can be set for anyone whose radio range is a shared building rather than a house; it is then displayed on the setup screen, which is the same trade one layer down.
 - No HTTPS on the device. A deliberate trade-off: a self-signed certificate on an ESP32 is a worse experience than its absence on a local network.
 
 Rate limiting and origin allow-lists will be added if a concrete scenario requires them.
@@ -566,13 +656,15 @@ Ordered so that a usable panel is mounted after M3 and everything afterwards imp
 | | Scope | Done when |
 |--|-------|-----------|
 | M0 | Spikes S-1…S-4 | four written answers; board variant and partition sizes decided |
-| M1 | Partition table, LCD, touch, backlight, WiFi, SNTP, LittleFS, device token, OTA, rollback, WS logs, core dump | new firmware installs over `curl`; a deliberately broken image rolls back; logs are visible remotely |
+| M1 | Partition table, LCD, touch, backlight, WiFi station **and setup access point**, SNTP, LittleFS, device token, OTA, rollback, WS logs, core dump | a panel with no credentials opens its own access point and is pointed at a network from a phone; new firmware installs over `curl`; a deliberately broken image rolls back; logs are visible remotely |
 | M2 | HA client: auth, `subscribe_entities`, `call_service`, reconnect | live entity state on screen, toggle works, WiFi loss and recovery resumes automatically |
 | M3 | UI runtime, light, sensor, one theme, `PUT /config` | a hand-written JSON pushed with `curl` rebuilds the screen. The panel goes on the wall. |
 
 The device token is generated in M1, not later: every write endpoint — including development OTA — requires it from the first day the API exists.
 
-M1 ends with a literal test: unplug the USB cable and put it away. Everything afterwards happens over the network. Reaching for the cable during M2 for firmware reasons means M1 was not finished.
+The setup access point is in M1 for the same kind of reason and it is not a comfort feature. Without it, M1's WiFi credentials arrive from a build-time configuration, which means the first change of network — a router swapped, an SSID renamed, a panel carried to another room — costs a serial flash. That is the exact failure M1 exists to eliminate, and it would sit in the middle of it until M7.
+
+M1 ends with a literal test: unplug the USB cable and put it away. Everything afterwards happens over the network. Reaching for the cable during M2 for firmware reasons means M1 was not finished — and the network is included in "firmware reasons", which is what the access point buys.
 
 After M3 the iteration loop exists: edit JSON, push, observe. That alone is faster than the ESPHome cycle.
 
@@ -590,7 +682,7 @@ M5 outranks the editor because a wall panel without a brightness schedule gets u
 | | Scope | Done when |
 |--|-------|-----------|
 | M6 | Web editor, entity picker, second theme | someone unfamiliar builds a page without reading the JSON format |
-| M7 | On-screen WiFi wizard, QR code, factory reset | the section 9 flow works with no cable and no ESP-IDF |
+| M7 | Setup screen and portal polish, pairing QR, error mode, factory reset from the panel | the section 9 flow works with no cable and no ESP-IDF, for someone who has not read this document |
 | M8 | Release OTA with manifest, prebuilt binary, browser flasher, README, enclosure files | someone without ESP-IDF gets a running panel and receives updates |
 
 M0 is a weekend. M1–M3 carry the technical risk. M4–M5 are the bulk of the hours at the lowest risk. M6–M8 are conditional — they determine whether anyone else can use this.
