@@ -234,6 +234,8 @@ An absent `ipv4` means `dhcp`. That default is what makes the field addable with
 
 `POST /wifi` answers `202`, because the status has to say what the body cannot: the credentials are stored and are being applied, and section 9.3 is why the outcome is not knowable here. Its refusals are `400` unless noted: `empty_body`, `invalid_json`, `truncated`, `too_large` (`413`), `ssid_required`, `ssid_too_long`, `password_too_long`, `bad_ipv4`, `bad_ipv4_mode`, `bad_address`, `bad_gateway`, `bad_dns`, `static_unsupported`, and `store_failed` (`500`). The addressing is checked for coherence before the mode is refused, so a typed gateway that is on the wrong subnet is reported as `bad_gateway` rather than disappearing behind `static_unsupported` — the validation exists in M1 precisely so that it runs before the feature does.
 
+A gateway must be a different host on the address's subnet. The subnet's network and broadcast addresses, and the panel's own address, are refused as `bad_gateway`: all three are valid dotted quads, but none can answer the ARP proof section 9.6 requires.
+
 `GET /wifi/scan` serves the cache of section 9.2 and says how old it is. `age_s` is `null` when no sweep has been taken, which is a different thing from a room with no networks in it:
 
 ```json

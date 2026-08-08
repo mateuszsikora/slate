@@ -152,6 +152,26 @@ jobs:
                  -DSDKCONFIG_DEFAULTS="${{ matrix.sdkconfig_defaults }}" \
                  build
 
+      # The API and setup self-tests need real interfaces to execute and therefore
+      # remain hardware checks. Their code used to be absent from every CI build,
+      # though, so a refactor could let the verifier itself stop compiling while
+      # both normal variants stayed green. Build the opt-in image separately: it
+      # keeps the development artifact unchanged and ccache makes the duplicate
+      # ESP-IDF component compilation cheap.
+      - name: Compile hardware self-tests
+        if: matrix.variant == 'development'
+        env:
+          IDF_CCACHE_ENABLE: '1'
+          CCACHE_DIR: /github/home/.cache/ccache
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          idf.py -B build-selftest \
+                 -DSDKCONFIG=build-selftest/sdkconfig \
+                 -DSDKCONFIG_DEFAULTS=sdkconfig.defaults \
+                 -DSLATE_API_SELFTEST=1 \
+                 -DSLATE_SETUP_SELFTEST=1 \
+                 build
+
       # Component Manager re-solves dependencies and rewrites dependencies.lock
       # when an idf_component.yml changes. A successful compile must not hide that
       # generated change: the committed lock is what makes the next clean build use

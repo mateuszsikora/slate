@@ -68,9 +68,10 @@ typedef struct {
     slate_wifi_setup_reason_t reason;
 } msg_t;
 
-#define MSG_QUEUE_DEPTH 4
-#define TASK_STACK      4096
-#define TASK_PRIORITY   4 /* below slate_wifi's 5: the station outranks the fallback */
+#define MSG_QUEUE_DEPTH  4
+#define TASK_STACK       4096
+#define TASK_PRIORITY    4 /* below slate_wifi's 5: the station outranks the fallback */
+#define RELEASE_RETRY_MS 1000
 
 static QueueHandle_t s_queue;
 static TaskHandle_t s_task;
@@ -426,14 +427,14 @@ static void raise_ap(slate_wifi_setup_reason_t reason)
 #endif
 }
 
-static void release_ap(void)
+/** Tear the access point down without claiming success while the driver still owns it. */
+static bool release_ap(void)
 {
     if (!s_ap_up) {
-        return;
+        return true;
     }
 
     ESP_LOGI(TAG, "the station is back — tearing the access point down");
-    slate_setup_dns_stop();
 
     /*
      * Back to station-only, and the interface destroyed rather than left
@@ -445,7 +446,13 @@ static void release_ap(void)
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "returning to station-only mode: %s", esp_err_to_name(err));
+        return false;
     }
+
+    /* Stop services only after the driver has accepted the mode change. If it
+     * refuses, the still-running access point keeps its DHCP/DNS/netif and this
+     * component keeps an honest `s_ap_up` until setup_task() retries. */
+    slate_setup_dns_stop();
 
     if (s_ap_netif != NULL) {
         esp_netif_destroy_default_wifi(s_ap_netif);
@@ -455,6 +462,7 @@ static void release_ap(void)
 
     ESP_LOGI(TAG, "free internal DMA-capable memory with the station alone: %u B",
              (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+    return true;
 }
 
 static void setup_task(void *arg)
@@ -469,7 +477,12 @@ static void setup_task(void *arg)
         if (msg.kind == MSG_RAISE) {
             raise_ap(msg.reason);
         } else {
-            release_ap();
+            /* slate_wifi posts RELEASED once. A transient driver error cannot be
+             * left for a second event that will never come, so this task owns the
+             * retry and keeps the still-working AP intact between attempts. */
+            while (!release_ap()) {
+                vTaskDelay(pdMS_TO_TICKS(RELEASE_RETRY_MS));
+            }
         }
     }
 }
