@@ -303,6 +303,10 @@ The complete M1 response shapes are:
 
 `ha` is `unconfigured`, `disconnected` or `connected`. The three LVGL values are numbers once the LVGL allocator exists and `null` before display bring-up or when it is unavailable; reporting zero would look like a completely exhausted allocator. `reset_reason` uses stable lowercase names rather than exposing ESP-IDF enum values. `storage_reset` says that boot recovery erased corrupt NVS or reformatted LittleFS, which is different from a factory-fresh empty store even though both may have no configuration.
 
+`GET /coredump` is the one route whose success is not JSON. It answers `200 application/octet-stream` with the core dump exactly as the panic handler wrote it to flash — ESP-IDF's header, the ELF, and the trailing checksum — which is what `esp-coredump --core-format raw` reads and also what `idf.py coredump-info` pulls over a cable. One artifact for both transports rather than one per transport. Its refusals are §4's `{"error": "..."}`: `no_coredump` (`404`) when nothing has crashed since the partition was last erased, `corrupt_coredump` (`500`) when a dump is present and fails its checksum, `coredump_read_failed` (`500`) when flash or the partition table will not cooperate, and `out_of_memory` (`500`).
+
+`no_coredump` and `corrupt_coredump` are separate answers because they are opposite news: one is a healthy panel, the other is a crash whose record cannot be believed — and S-3 watched ESP-IDF log "Core dump has been saved to flash" three lines after the write had failed, which is precisely the lie a client must not be handed as a body. There is deliberately no `DELETE`: a panic overwrites the partition rather than appending to it, so nothing accumulates, and a `GET` that does not consume the dump is one that can be retried when the first attempt crosses a weak WiFi link.
+
 ### 4.2 WebSocket `/api/v1/ws`
 
 Event channel for the editor and for remote diagnostics. Token sent in the first frame.
@@ -420,7 +424,7 @@ The sizes follow measurements rather than round numbers:
 
 - **6 MB per application slot.** S-3 measured the skeleton at 1.34 MiB release and 1.48 MiB development (`-Og`), and §11.1 makes the development image the one that travels over the wire daily. That figure is a lower bound — no UI runtime, no component library, no Home Assistant client, no configuration parser — so the slot is sized for growth rather than for today's image.
 - **3.75 MB of LittleFS.** The editor bundle (§10) targets under 400 KB gzipped and a configuration is capped at 64 KB (§3.1). The remainder is room for the deferred asset manager (§15), which would otherwise arrive as a reflash.
-- **128 KB of coredump.** An ELF dump of a twelve-task image resembling M1's — WiFi, lwIP, HTTP server, plus the LVGL and Home Assistant tasks — measures 21 KB. A dump stores each task's *used* stack, so the ceiling is the sum of the allocated ones: around 50 KB for that task set, and still inside 128 KB once M1 fills them. §11.3 depends on the dump surviving a panic, and a partition that truncates it is worse than no partition at all.
+- **128 KB of coredump.** An ELF dump of a twelve-task image resembling M1's — WiFi, lwIP, HTTP server, plus the LVGL and Home Assistant tasks — measures 21 KB. A dump stores each task's *used* stack, so the ceiling is the sum of the allocated ones: around 50 KB for that task set, and still inside 128 KB once M1 fills them. §11.3 depends on the dump surviving a panic, and a partition that truncates it is worse than no partition at all. #14 measured the real thing at **26 020 B — 19.9 % of the partition** — for a forced panic in `app_main` with thirteen tasks alive (`main`, both idles, `ipc0`, `ipc1`, `esp_timer`, `sys_evt`, `tiT`, `wifi`, `httpd`, `slate_wifi`, `slate_setup`, `ota_health`), which is M1 without the display. The estimate above was the right shape.
 - **`phy_init` is kept** even though `CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION` is off by default. Four kilobytes now cost nothing; enabling that option later without the partition costs a serial flash.
 
 NVS and LittleFS sit outside the application slots, so configuration and tokens survive an update (§11.4). Changing any of this later forces a full serial flash, which is why the table is settled before firmware code is written.
@@ -704,7 +708,7 @@ Health means "I can accept the next OTA", nothing more, and the check must conta
 OTA solves flashing but not diagnostics. Without these three, the first boot loop sends you back to USB anyway:
 
 - **Logs over WebSocket** — hook `esp_log_set_vprintf`, keep an 8 KB ring buffer, stream as `{"type": "log"}` on `/api/v1/ws`. Recent lines remain available after reconnect.
-- **Core dump to flash** — `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` plus `GET /coredump` returning the dump for `espcoredump.py`.
+- **Core dump to flash** — `CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y` plus `GET /coredump` returning the dump for `espcoredump.py`. `tools/coredump/fetch.sh` is the host side, as `tools/ota/upload.sh` is for §11.1. The `.elf` it symbolicates against has to be the one that *crashed*, which §11.2 makes a real trap: a panicking image is rolled back, so the panel serving the dump is routinely not running the firmware that produced it. The device says which image it was — the boot report names the crashed task, the program counter and the ELF SHA-256 prefix of the image the dump came from, and whether that is the image now running.
 - **Reset reason** — `esp_reset_reason()` and a reboot counter in `GET /status`, which immediately distinguishes a panic from a power cut.
 
 ### 11.4 Release OTA

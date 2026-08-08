@@ -2,8 +2,8 @@
  * Slate — firmware entry point.
  *
  * At this point in M1 the application is the store, the WiFi station and the
- * clock, the HTTP API, development OTA with rollback and the setup access
- * point. The display (#6) attaches here when it lands.
+ * clock, the HTTP API, development OTA with rollback, core dump retrieval and
+ * the setup access point. The display (#6) attaches here when it lands.
  *
  * The boot report below is the only user interface the firmware currently has.
  * It exists to answer the questions the landed issues are judged on — is the
@@ -26,6 +26,7 @@
 #include "esp_system.h"
 
 #include "slate_api.h"
+#include "slate_coredump.h"
 #include "slate_ota.h"
 #include "slate_setup.h"
 #include "slate_store.h"
@@ -52,6 +53,38 @@ static void ota_rollback_selftest(void)
     }
     ESP_LOGW(TAG, "rollback selftest: %s is not pending verification; continuing",
              running->label);
+}
+#endif
+
+#ifdef SLATE_COREDUMP_SELFTEST
+/*
+ * The forced panic §11.3 is measured with, and the only writer of the coredump
+ * partition there will ever be — a dump is produced by crashing, and nothing in
+ * M1's scope crashes on purpose.
+ *
+ * Two properties, both deliberate.
+ *
+ * It panics only when flash holds no readable dump, so it is not a boot loop: the
+ * first boot crashes, the reboot after it finds a dump and carries on serving it.
+ * Re-arming the test means erasing the partition, which is a decision somebody
+ * takes rather than one a build knob takes for them.
+ *
+ * It panics at the end of app_main, before §11.2's health check can mark the
+ * image valid, so an OTA of this build exercises the whole of §11.3's promise in
+ * one go: the panel crashes on a pending image, the bootloader returns to the
+ * previous slot, and the dump written by an image that is no longer running is
+ * still fetchable from the one that is. That is the real shape of the problem —
+ * a panel that came back from a crash is usually not running the firmware that
+ * crashed.
+ */
+static void coredump_selftest(void)
+{
+    if (slate_coredump_available()) {
+        ESP_LOGW(TAG, "coredump selftest: a dump is already on flash; not panicking again");
+        return;
+    }
+    ESP_LOGE(TAG, "coredump selftest: panicking to write a core dump");
+    abort();
 }
 #endif
 
@@ -362,6 +395,15 @@ static void start_api(void)
         ESP_LOGE(TAG, "development OTA unavailable: %s — continuing", esp_err_to_name(err));
     }
 
+    /* §11.3's other half of the same idea: OTA is how firmware gets onto a panel
+     * that has no cable, and this is how the reason it crashed gets off one. It
+     * also prints what is on flash, so every boot report says whether there is a
+     * crash waiting to be fetched. */
+    err = slate_coredump_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "core dump retrieval unavailable: %s — continuing", esp_err_to_name(err));
+    }
+
     /*
      * §9's promise — no powered panel is unreachable — and the routes that carry
      * it, registered on the same server for the same reason. Before the station,
@@ -443,4 +485,8 @@ void app_main(void)
     if (health_err != ESP_OK) {
         ESP_LOGE(TAG, "OTA boot health unavailable: %s", esp_err_to_name(health_err));
     }
+
+#ifdef SLATE_COREDUMP_SELFTEST
+    coredump_selftest();
+#endif
 }

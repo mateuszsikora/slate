@@ -4,10 +4,10 @@
 # S-2 measured against (docs/spikes/s3.md appendix, docs/spikes/s2.md), so the
 # firmware runs the same silicon settings the spikes reported numbers for.
 #
-# Everything here is deliberately about the board and the flash layout. Display,
-# LVGL, rollback and core dump each belong to the issue that turns them on —
-# #6, #12 and #14 — because each of them comes with a measurement that should be
-# taken in the same change that enables the option.
+# Every other option belongs to the issue that turns it on, because each comes
+# with a measurement that should be taken in the same change that enables it:
+# rollback arrived with #12 and core dump with #14, and display and LVGL are
+# still #6's to add.
 
 CONFIG_IDF_TARGET="esp32s3"
 
@@ -39,6 +39,33 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # it only after GET /api/v1/info answers on a real station or setup-AP address;
 # any reset before then makes the bootloader return to the previous slot.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# --- Core dump (design.md §11.3) ---
+# A panic writes an ELF core dump into the `coredump` partition #5 reserved, and
+# GET /api/v1/coredump serves it. The ELF format rather than the binary one
+# because it is what esp-coredump symbolicates a backtrace from; the binary
+# format is a task-and-stack blob with no notes in it.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+
+# Two knobs are deliberately left at their ESP-IDF defaults, because both
+# defaults are the right answer here and the reason is not obvious from the name:
+#
+#   ESP_COREDUMP_CAPTURE_DRAM (n) adds the whole of .bss, .data and the heap to
+#   the dump. Espressif asks for at least 128 KB of coredump partition for that
+#   — which is the entire partition (§6.3), sized against a dump of task stacks.
+#   A dump that does not fit is §6.3's "worse than no partition at all".
+#
+#   ESP_COREDUMP_CHECKSUM_CRC32 (the default) over SHA256: the checksum protects
+#   a development artifact travelling over a LAN, and SHA256 needs more of the
+#   dump stack below to compute — stack that is spent inside a panic handler.
+#
+# One default is worth stating because it costs DRAM without being asked for:
+# with SPIRAM=y, FREERTOS_TASK_CREATE_ALLOW_EXT_MEM defaults to y, which makes
+# ESP_COREDUMP_USE_STACK_SIZE=y and reserves ESP_COREDUMP_STACK_SIZE (1792 B) of
+# DRAM for a dump stack of its own. That is not optional: a task whose stack is
+# in PSRAM cannot be dumped from that stack, and §6.2's internal-memory budget
+# has to carry the 1792 B.
 
 # --- Tasks ---
 # app_main brings the store up and will bring the display, WiFi and the HTTP
