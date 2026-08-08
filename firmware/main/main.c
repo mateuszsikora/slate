@@ -142,6 +142,79 @@ static void store_selftest(void)
               size == SLATE_DEVICE_TOKEN_LEN + 1,
           "str_size reports the required buffer");
 
+    /* Preserve the real station tuple around the transactional WiFi checks.
+     * This selftest runs before the station task starts, so no association can
+     * observe the temporary values. */
+    bool had_wifi = slate_store_wifi_is_configured();
+    char saved_ssid[SLATE_WIFI_SSID_BUF_LEN] = {0};
+    char saved_password[SLATE_WIFI_PASSWORD_BUF_LEN] = {0};
+    bool had_password = had_wifi &&
+                        slate_store_wifi_password_get(saved_password, sizeof(saved_password)) ==
+                            ESP_OK;
+    if (had_wifi) {
+        CHECK(slate_store_wifi_ssid_get(saved_ssid, sizeof(saved_ssid)) == ESP_OK,
+              "save station SSID");
+    }
+    slate_ipv4_config_t saved_ipv4;
+    slate_store_ipv4_get(&saved_ipv4);
+
+    const slate_ipv4_config_t test_ipv4 = {
+        .state = SLATE_IPV4_STATIC_PENDING,
+        .address = 0xC000022A, /* 192.0.2.42, TEST-NET-1 */
+        .gateway = 0xC0000201,
+        .dns = {0xC0000235},
+        .prefix = 24,
+        .dns_count = 1,
+    };
+    CHECK(slate_store_wifi_set("slate-selftest", "temporary-secret", &test_ipv4) == ESP_OK,
+          "write static WiFi tuple");
+
+    slate_ipv4_config_t first_trial;
+    slate_store_ipv4_get(&first_trial);
+    CHECK(first_trial.generation != 0, "static trial has identity");
+
+    CHECK(slate_store_wifi_set("slate-selftest", NULL, NULL) == ESP_OK,
+          "missing password keeps same SSID secret");
+    char kept_password[SLATE_WIFI_PASSWORD_BUF_LEN] = {0};
+    CHECK(slate_store_wifi_password_get(kept_password, sizeof(kept_password)) == ESP_OK &&
+              strcmp(kept_password, "temporary-secret") == 0,
+          "same SSID password preserved");
+    explicit_bzero(kept_password, sizeof(kept_password));
+
+    CHECK(slate_store_wifi_set("slate-selftest", NULL, &test_ipv4) == ESP_OK,
+          "resubmit identical static tuple");
+    slate_ipv4_config_t second_trial;
+    slate_store_ipv4_get(&second_trial);
+    CHECK(second_trial.generation != first_trial.generation,
+          "identical trial gets new identity");
+    CHECK(slate_store_ipv4_set_state(&first_trial, SLATE_IPV4_STATIC_CONFIRMED) ==
+              ESP_ERR_INVALID_STATE,
+          "stale trial verdict rejected");
+
+    CHECK(slate_store_wifi_set("slate-selftest", "", NULL) == ESP_OK,
+          "explicit empty password selects open");
+    CHECK(slate_store_wifi_password_get(kept_password, sizeof(kept_password)) ==
+              ESP_ERR_NOT_FOUND,
+          "explicit empty password erased");
+
+    CHECK(slate_store_wifi_set("slate-other-selftest", "temporary-secret", NULL) == ESP_OK &&
+              slate_store_wifi_set("slate-new-selftest", NULL, NULL) == ESP_OK,
+          "write a different SSID without password");
+    CHECK(slate_store_wifi_password_get(kept_password, sizeof(kept_password)) ==
+              ESP_ERR_NOT_FOUND,
+          "password never crosses SSIDs");
+
+    if (had_wifi) {
+        const slate_ipv4_config_t *restore_ipv4 =
+            saved_ipv4.state == SLATE_IPV4_DHCP ? NULL : &saved_ipv4;
+        CHECK(slate_store_wifi_set(saved_ssid, had_password ? saved_password : "", restore_ipv4) ==
+                  ESP_OK,
+              "restore station tuple");
+    } else {
+        CHECK(slate_store_wifi_clear() == ESP_OK, "restore unconfigured station");
+    }
+    explicit_bzero(saved_password, sizeof(saved_password));
+
     ESP_LOGI(TAG, "selftest: %d failure(s)", s_failures);
 }
 #endif

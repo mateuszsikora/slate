@@ -281,6 +281,71 @@ static esp_err_t setup_ap_snapshot(void *ctx)
     return ESP_ERR_NOT_FOUND;
 }
 
+/** A host-order address as the dotted quad §4.1 spells everything else in. */
+static char *quad(uint32_t address, char *out, size_t out_len)
+{
+    snprintf(out, out_len, "%u.%u.%u.%u", (unsigned) (address >> 24 & 0xFF),
+             (unsigned) (address >> 16 & 0xFF), (unsigned) (address >> 8 & 0xFF),
+             (unsigned) (address & 0xFF));
+    return out;
+}
+
+/**
+ * §4.1's `ipv4`: where the address came from, and what the panel was told to use.
+ *
+ * Two facts rather than one, because after §9.6's revert they differ and both
+ * are needed. `mode` is the report — the station reads it off the interface, so
+ * a configuration that failed its trial says `dhcp` here, which is what the
+ * address on the screen actually is. `static` is what somebody typed and what
+ * became of it, which is what the setup page pre-fills the form from; §9.6 makes
+ * the recovery path "correct one field of what you already typed", and a page
+ * that could only see the mode would have nothing to put in the other fields.
+ *
+ * `static` is `null` when nothing is stored, which is every DHCP panel. A field
+ * added rather than one changed: ADR-4 makes the name contract, and §3.1's rule
+ * about unknown fields points the same way for a client written against a
+ * firmware that predates this.
+ */
+static bool ipv4_json(cJSON *ipv4, const slate_wifi_status_t *status)
+{
+    if (cJSON_AddStringToObject(ipv4, "mode", status->ipv4_static ? "static" : "dhcp") == NULL) {
+        return false;
+    }
+
+    slate_ipv4_config_t stored;
+    slate_store_ipv4_get(&stored);
+    if (stored.state == SLATE_IPV4_DHCP) {
+        return cJSON_AddNullToObject(ipv4, "static") != NULL;
+    }
+
+    char text[20];
+    cJSON *object = cJSON_AddObjectToObject(ipv4, "static");
+    bool ok = object != NULL &&
+              cJSON_AddStringToObject(object, "state", slate_ipv4_state_str(stored.state)) != NULL;
+
+    if (ok) {
+        /* The address carries its prefix, in the CIDR form `POST /wifi` accepts,
+         * so what comes back out of this endpoint can be sent straight back in.
+         * The setup page does exactly that after a revert. */
+        size_t len = strlen(quad(stored.address, text, sizeof(text)));
+        snprintf(text + len, sizeof(text) - len, "/%u", (unsigned) stored.prefix);
+        ok = cJSON_AddStringToObject(object, "address", text) != NULL &&
+             cJSON_AddStringToObject(object, "gateway",
+                                     quad(stored.gateway, text, sizeof(text))) != NULL;
+    }
+
+    cJSON *dns = ok ? cJSON_AddArrayToObject(object, "dns") : NULL;
+    ok = ok && dns != NULL;
+    for (unsigned i = 0; ok && i < stored.dns_count; i++) {
+        cJSON *server = cJSON_CreateString(quad(stored.dns[i], text, sizeof(text)));
+        ok = server != NULL && cJSON_AddItemToArray(dns, server);
+        if (!ok) {
+            cJSON_Delete(server);
+        }
+    }
+    return ok;
+}
+
 static cJSON *network_json(const slate_wifi_status_t *status)
 {
     cJSON *network = cJSON_CreateObject();
@@ -322,16 +387,8 @@ static cJSON *network_json(const slate_wifi_status_t *status)
                                              : (status->connected ? status->ip : NULL)) &&
               add_string_or_null(network, "sta_ssid", status->sta_ssid);
 
-    /*
-     * §4.1: `ipv4` is "where the station's address came from, and it is reported
-     * rather than echoed". In M1 there is one answer it can be — #63 implements
-     * the static half, and until then a static configuration is refused by
-     * `POST /wifi` rather than stored, so nothing can have come from one. The
-     * field lands now because ADR-4 makes its name contract and §4.1 settles the
-     * shape here rather than there.
-     */
     cJSON *ipv4 = ok ? cJSON_AddObjectToObject(network, "ipv4") : NULL;
-    ok = ok && ipv4 != NULL && cJSON_AddStringToObject(ipv4, "mode", "dhcp") != NULL &&
+    ok = ok && ipv4 != NULL && ipv4_json(ipv4, status) &&
          add_string_or_null(network, "last_error", slate_wifi_error_str(status->last_error));
     if (!ok) {
         cJSON_Delete(network);

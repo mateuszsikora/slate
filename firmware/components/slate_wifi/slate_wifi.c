@@ -25,8 +25,13 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_netif_net_stack.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+
+#include "lwip/dns.h"
+#include "lwip/etharp.h"
+#include "lwip/netif.h"
 
 static const char *TAG = "wifi";
 
@@ -62,6 +67,23 @@ static const uint32_t BACKOFF_MS[] = {1000, 2000, 4000, 8000, 15000, 30000};
  */
 #define ASSOC_TIMEOUT_MS 15000
 #define DHCP_TIMEOUT_MS  15000
+
+/*
+ * §9.6's trial, in three numbers.
+ *
+ * TRIAL_MS is the section's "roughly fifteen seconds", and it bounds the whole
+ * proof rather than either half of it: a duplicate address is found in the first
+ * second or it is not there, and everything after that is the gateway being
+ * given every chance to answer before a working configuration is thrown away.
+ *
+ * The conflict check is three ARP announcements, which is RFC 5227's count. The
+ * interval is its lower bound — the RFC's one-to-two seconds is written for a
+ * host that is about to claim an address it may keep for weeks, and this one is
+ * standing on a configuration a person is watching a panel for.
+ */
+#define TRIAL_MS            15000
+#define TRIAL_CONFLICT_TRIES 3
+#define TRIAL_TICK_MS       400
 
 /* How long to wait for the radio to report the disconnect we asked for. See
  * abandon_attempt(). */
@@ -114,6 +136,8 @@ const char *slate_wifi_error_str(slate_wifi_error_t err)
     case SLATE_WIFI_ERR_NOT_FOUND:    return "not_found";
     case SLATE_WIFI_ERR_NO_IP:        return "no_ip";
     case SLATE_WIFI_ERR_AUTH_TIMEOUT: return "auth_timeout";
+    case SLATE_WIFI_ERR_GATEWAY_UNREACHABLE: return "gateway_unreachable";
+    case SLATE_WIFI_ERR_ADDRESS_IN_USE:      return "address_in_use";
     case SLATE_WIFI_ERR_NONE:         break;
     }
     return NULL;
@@ -213,6 +237,18 @@ void slate_wifi_status(slate_wifi_status_t *out)
     if (slate_store_wifi_ssid_get(out->sta_ssid, sizeof(out->sta_ssid)) != ESP_OK) {
         out->sta_ssid[0] = '\0';
     }
+
+    /*
+     * §4.1's "reported rather than echoed", asked of the thing that actually
+     * knows: the DHCP client is running or it is not, and a static address is
+     * precisely the case where it is not. Read here rather than tracked in a
+     * field, so the answer cannot drift from the interface during the window
+     * §9.6's revert opens between the two.
+     */
+    esp_netif_dhcp_status_t dhcp = ESP_NETIF_DHCP_INIT;
+    out->ipv4_static = s_netif != NULL &&
+                       esp_netif_dhcpc_get_status(s_netif, &dhcp) == ESP_OK &&
+                       dhcp == ESP_NETIF_DHCP_STOPPED;
 
     /* Only meaningful while associated, and asking the driver for it while it
      * is not costs an error log on every poll of `/status`. */
@@ -319,6 +355,281 @@ static void ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     UNLOCK();
 
     send_msg(MSG_GOT_IP, 0);
+}
+
+/* --- §9.6: the address, and the interface it goes on -------------------- */
+
+/** A prefix length as the mask lwIP wants, in network byte order. */
+static uint32_t netmask_from_prefix(unsigned prefix)
+{
+    return esp_netif_htonl(0xFFFFFFFFu << (32 - prefix));
+}
+
+/**
+ * Clear every resolver on the station.
+ *
+ * lwIP keeps whatever was set until something overwrites that exact slot, so a
+ * configuration naming one server leaves the second and third from whatever the
+ * panel was on before — a resolver belonging to a network that is no longer
+ * within reach. The DHCP path clears them for free (esp_netif_dhcpc_start()
+ * does it), so this is only ever the static one.
+ */
+static esp_err_t clear_dns(void *ctx)
+{
+    (void) ctx;
+    for (u8_t slot = 0; slot < DNS_MAX_SERVERS; slot++) {
+        dns_setserver(slot, NULL);
+    }
+    return ESP_OK;
+}
+
+/** Put the station back on DHCP. Idempotent, and the state every panel boots in. */
+static esp_err_t apply_dhcp(void)
+{
+    esp_err_t err = esp_netif_dhcpc_stop(s_netif);
+    if (err != ESP_OK && err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+        return err;
+    }
+
+    /* Zeroed before the client starts, because §9.6's revert runs this on a
+     * live association: without it the DISCOVER would go out from a static
+     * address that has just been shown to belong to somebody else. */
+    const esp_netif_ip_info_t none = {0};
+    err = esp_netif_set_ip_info(s_netif, &none);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = esp_netif_dhcpc_start(s_netif);
+    if (err == ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED) {
+        err = ESP_OK;
+    }
+
+    /*
+     * After the client has been started, and not instead of what it does
+     * itself: esp_netif_dhcpc_start() clears the resolvers with
+     * dns_clear_servers(true), and the `true` is "keep the fallback" — which is
+     * the exact slot apply_static() puts a third static server in. Without this
+     * line a reverted configuration's third resolver outlives it.
+     */
+    esp_netif_tcpip_exec(clear_dns, NULL);
+    return err;
+}
+
+/** Put the stored static configuration on the station. */
+static esp_err_t apply_static(const slate_ipv4_config_t *cfg)
+{
+    esp_err_t err = esp_netif_dhcpc_stop(s_netif);
+    if (err != ESP_OK && err != ESP_ERR_ESP_NETIF_DHCP_ALREADY_STOPPED) {
+        return err;
+    }
+
+    const esp_netif_ip_info_t info = {
+        .ip.addr = esp_netif_htonl(cfg->address),
+        .netmask.addr = netmask_from_prefix(cfg->prefix),
+        .gw.addr = esp_netif_htonl(cfg->gateway),
+    };
+    err = esp_netif_set_ip_info(s_netif, &info);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    esp_netif_tcpip_exec(clear_dns, NULL);
+
+    static const esp_netif_dns_type_t SLOTS[SLATE_IPV4_DNS_MAX] = {
+        ESP_NETIF_DNS_MAIN, ESP_NETIF_DNS_BACKUP, ESP_NETIF_DNS_FALLBACK};
+    for (unsigned i = 0; i < cfg->dns_count && i < SLATE_IPV4_DNS_MAX; i++) {
+        esp_netif_dns_info_t dns = {.ip.type = ESP_IPADDR_TYPE_V4};
+        dns.ip.u_addr.ip4.addr = esp_netif_htonl(cfg->dns[i]);
+
+        esp_err_t dns_err = esp_netif_set_dns_info(s_netif, SLOTS[i], &dns);
+        if (dns_err != ESP_OK) {
+            /* Not fatal, and deliberately so: a panel that has an address and
+             * no resolver still answers `GET /info` at the number on the
+             * screen, which is where the person fixing it is looking. */
+            ESP_LOGW(TAG, "DNS server %u: %s", i + 1, esp_err_to_name(dns_err));
+        }
+    }
+    return ESP_OK;
+}
+
+/**
+ * Set up the interface for this attempt, and report what it ended up being.
+ *
+ * Read out of NVS every time for the reason the credentials are: this is the
+ * path `POST /wifi` changes, and a cached copy is the bug where a corrected
+ * address is stored, acknowledged and then not used.
+ */
+static void apply_addressing(slate_ipv4_config_t *out)
+{
+    slate_store_ipv4_get(out);
+
+    esp_err_t err;
+    if (slate_ipv4_state_is_applied(out->state)) {
+        err = apply_static(out);
+        if (err == ESP_OK) {
+            return;
+        }
+        /* The interface refused the address, so there is nothing to prove and
+         * nothing to prove it with. Falling back rather than failing the
+         * attempt keeps §9's promise about a reachable panel; the stored
+         * configuration is untouched, so a fixed firmware applies it again. */
+        ESP_LOGE(TAG, "applying the static address: %s — falling back to DHCP",
+                 esp_err_to_name(err));
+        out->state = SLATE_IPV4_DHCP;
+    }
+
+    err = apply_dhcp();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "returning the station to DHCP: %s", esp_err_to_name(err));
+    }
+}
+
+/* --- §9.6: proving the address before it is kept ------------------------ */
+
+/*
+ * ARP rather than ICMP, because gateways that drop pings are common enough that
+ * pinging one would revert configurations that work (§9.6). It answers the
+ * second question for free: a host already holding the address replies from a
+ * MAC that is not ours, which is duplicate address detection with no extra
+ * machinery.
+ *
+ * One deviation from RFC 5227, and it is forced. The RFC probes with a sender
+ * address of 0.0.0.0 *before* claiming the address; lwIP will not do that from
+ * the public API — etharp_request() always sends the interface's own address as
+ * the sender, and etharp_input() declines to cache anything at all while the
+ * interface has none, so a reply to such a probe is invisible from here. What is
+ * implemented instead is §2.4's ongoing detection: claim the address, announce
+ * it, and watch for somebody answering for it. The cost is that the panel holds
+ * a possibly-duplicate address for the second the check takes, which is the same
+ * exposure a host defending its address already has and is bounded by a revert
+ * that is already written.
+ */
+
+typedef struct {
+    struct netif *netif;
+    ip4_addr_t target;
+    struct eth_addr mac; /* out */
+    bool found;          /* out */
+} arp_ctx_t;
+
+static esp_err_t arp_forget_all(void *ctx)
+{
+    /* So the answer comes from this association rather than from a table entry
+     * left over from the network the panel was on before it. */
+    etharp_cleanup_netif(((arp_ctx_t *) ctx)->netif);
+    return ESP_OK;
+}
+
+static esp_err_t arp_ask(void *ctx)
+{
+    arp_ctx_t *arp = ctx;
+    return etharp_request(arp->netif, &arp->target) == ERR_OK ? ESP_OK : ESP_FAIL;
+}
+
+static esp_err_t arp_answer(void *ctx)
+{
+    arp_ctx_t *arp = ctx;
+    struct eth_addr *mac = NULL;
+    const ip4_addr_t *ip = NULL;
+
+    /* etharp_find_addr() reports stable entries only, so a pending one — a
+     * request sent and nothing back yet — is correctly not an answer. */
+    arp->found = etharp_find_addr(arp->netif, &arp->target, &mac, &ip) >= 0 && mac != NULL;
+    if (arp->found) {
+        arp->mac = *mac;
+    }
+    return ESP_OK;
+}
+
+typedef enum {
+    TRIAL_CONFIRMED,
+    TRIAL_ADDRESS_IN_USE,
+    TRIAL_GATEWAY_UNREACHABLE,
+    TRIAL_INTERRUPTED, /* something outranking the trial arrived; see the msg */
+} trial_t;
+
+/**
+ * Wait, unless a message arrives that the trial is not allowed to sit on.
+ *
+ * A lost association or a change of credentials both make the question the
+ * trial is asking irrelevant, and both have to reach the state machine rather
+ * than expire in here.
+ *
+ * @return true if `msg` was filled and the trial must stop.
+ */
+static bool trial_wait(uint32_t ms, msg_t *msg)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
+
+    for (;;) {
+        TickType_t now = xTaskGetTickCount();
+        if ((int32_t) (deadline - now) <= 0) {
+            return false;
+        }
+        if (xQueueReceive(s_queue, msg, deadline - now) != pdTRUE) {
+            continue;
+        }
+        /* The address arriving again is this trial's own subject, not news. */
+        if (msg->kind == MSG_GOT_IP || msg->kind == MSG_ASSOCIATED) {
+            continue;
+        }
+        return true;
+    }
+}
+
+/** §9.6's proof: nobody else holds the address, and the gateway answers. */
+static trial_t run_trial(const slate_ipv4_config_t *cfg, msg_t *interrupt)
+{
+    arp_ctx_t arp = {.netif = s_netif != NULL ? esp_netif_get_netif_impl(s_netif) : NULL};
+    uint8_t own_mac[ETH_HWADDR_LEN] = {0};
+
+    if (arp.netif == NULL || esp_wifi_get_mac(WIFI_IF_STA, own_mac) != ESP_OK) {
+        /* Nothing to ask with. Reverting rather than confirming, because §9.6
+         * keeps an address only when it has answered, and an unproven one is
+         * the failure the whole section is about. */
+        ESP_LOGE(TAG, "no interface to prove the static address on");
+        return TRIAL_GATEWAY_UNREACHABLE;
+    }
+
+    esp_netif_tcpip_exec(arp_forget_all, &arp);
+    int64_t deadline = esp_timer_get_time() + (int64_t) TRIAL_MS * 1000;
+
+    /* Is the address already somebody's? An announcement for our own address is
+     * a question its real owner has to answer. */
+    arp.target.addr = esp_netif_htonl(cfg->address);
+    for (unsigned try = 0; try < TRIAL_CONFLICT_TRIES; try++) {
+        esp_netif_tcpip_exec(arp_ask, &arp);
+        if (trial_wait(TRIAL_TICK_MS, interrupt)) {
+            return TRIAL_INTERRUPTED;
+        }
+        esp_netif_tcpip_exec(arp_answer, &arp);
+
+        if (arp.found && memcmp(arp.mac.addr, own_mac, ETH_HWADDR_LEN) != 0) {
+            ESP_LOGE(TAG, "the address is answered by %02x:%02x:%02x:%02x:%02x:%02x",
+                     arp.mac.addr[0], arp.mac.addr[1], arp.mac.addr[2], arp.mac.addr[3],
+                     arp.mac.addr[4], arp.mac.addr[5]);
+            return TRIAL_ADDRESS_IN_USE;
+        }
+    }
+
+    /* And does the next hop exist? This is the one a typo lands on, and the
+     * whole of the remaining budget goes to it: a gateway that answers slowly
+     * is a working configuration, and throwing one away is the more expensive
+     * of the two mistakes available here. */
+    arp.target.addr = esp_netif_htonl(cfg->gateway);
+    while (esp_timer_get_time() < deadline) {
+        esp_netif_tcpip_exec(arp_ask, &arp);
+        if (trial_wait(TRIAL_TICK_MS, interrupt)) {
+            return TRIAL_INTERRUPTED;
+        }
+        esp_netif_tcpip_exec(arp_answer, &arp);
+
+        if (arp.found) {
+            return TRIAL_CONFIRMED;
+        }
+    }
+    return TRIAL_GATEWAY_UNREACHABLE;
 }
 
 /* --- The state machine -------------------------------------------------- */
@@ -444,7 +755,18 @@ static outcome_t attempt_connect(void)
         return OUTCOME_FAILED;
     }
 
-    ESP_LOGI(TAG, "attempt %u: associating with \"%s\"", s_attempts + 1, ssid);
+    /*
+     * The address goes on before the association, not after. §9.6's trial is
+     * about a static address behaving on the network, and it can only behave on
+     * one it was brought up with: esp_netif posts IP_EVENT_STA_GOT_IP for a
+     * static configuration from the connected action, and only if the address
+     * is already on the interface by then.
+     */
+    slate_ipv4_config_t ipv4;
+    apply_addressing(&ipv4);
+
+    ESP_LOGI(TAG, "attempt %u: associating with \"%s\", addressing %s", s_attempts + 1, ssid,
+             slate_ipv4_state_str(ipv4.state));
 
     err = esp_wifi_connect();
     if (err != ESP_OK) {
@@ -471,6 +793,90 @@ static outcome_t attempt_connect(void)
             return abandon_attempt() ? OUTCOME_RESTART : OUTCOME_FAILED;
         }
 
+        /*
+         * §9.6, and this is the whole of it: an address that was just submitted
+         * has to answer for itself before it is kept. Only a pending one — the
+         * association after `POST /wifi` — is ever on trial. A confirmed
+         * configuration is sticky, because a router that is down at some later
+         * boot is an ordinary retry and discarding a working address over it
+         * would be a worse bug than the one this proves against.
+         *
+         * `associated` is part of the condition rather than an assertion about
+         * it. esp_netif posts IP_EVENT_STA_GOT_IP from esp_netif_set_ip_info()
+         * whenever the interface happens to still be up, so apply_addressing()
+         * can queue one before esp_wifi_connect() is even called — and ARPing
+         * for fifteen seconds on a link that is going down would condemn a
+         * configuration that was never given a network to prove itself on.
+         */
+        if (msg.kind == MSG_GOT_IP && associated && ipv4.state == SLATE_IPV4_STATIC_PENDING) {
+            msg_t interrupt;
+            trial_t verdict = run_trial(&ipv4, &interrupt);
+
+            if (verdict == TRIAL_CONFIRMED) {
+                esp_err_t store_err =
+                    slate_store_ipv4_set_state(&ipv4, SLATE_IPV4_STATIC_CONFIRMED);
+                ipv4.state = SLATE_IPV4_STATIC_CONFIRMED;
+                if (store_err != ESP_OK) {
+                    /* The address works; it is the record of that which did
+                     * not get written. Trying again next boot costs one more
+                     * trial, which is fifteen seconds, so this is not worth
+                     * refusing a working network over. */
+                    ESP_LOGE(TAG, "confirming the static address: %s",
+                             esp_err_to_name(store_err));
+                }
+                ESP_LOGI(TAG, "the static address answered — keeping it");
+                return OUTCOME_CONNECTED;
+            }
+
+            if (verdict != TRIAL_INTERRUPTED) {
+                bool in_use = verdict == TRIAL_ADDRESS_IN_USE;
+                slate_ipv4_state_t failed = in_use ? SLATE_IPV4_STATIC_ADDRESS_IN_USE
+                                                   : SLATE_IPV4_STATIC_GATEWAY_UNREACHABLE;
+                slate_wifi_error_t why = in_use ? SLATE_WIFI_ERR_ADDRESS_IN_USE
+                                                : SLATE_WIFI_ERR_GATEWAY_UNREACHABLE;
+                set_error(why);
+
+                /* Kept and marked, not erased: the setup page pre-fills the
+                 * form from it, and the recovery §9.6 describes is somebody
+                 * correcting one field of what they already typed. */
+                esp_err_t store_err = slate_store_ipv4_set_state(&ipv4, failed);
+                if (store_err != ESP_OK) {
+                    /* The record still says pending, so the next attempt will
+                     * put this address back and spend another fifteen seconds
+                     * proving it wrong again. Worth a line, because from the
+                     * outside that looks like a panel that is slow to boot. */
+                    ESP_LOGE(TAG, "marking the static address failed: %s",
+                             esp_err_to_name(store_err));
+                }
+                ipv4.state = failed;
+
+                ESP_LOGE(TAG, "the static address did not prove out (%s) — reverting to DHCP",
+                         slate_wifi_error_str(why));
+
+                LOCK();
+                s_ip[0] = '\0';
+                UNLOCK();
+
+                /*
+                 * On the live association rather than by disconnecting. Layer 2
+                 * succeeded — the passphrase was right and the network is in
+                 * range — and only the address was wrong, so this is a DHCP
+                 * client starting on a working link. A lease that does not
+                 * arrive lands on the timeout above as `no_ip`, which is §9.6's
+                 * "if DHCP does not answer either" and needs no new state.
+                 */
+                if (apply_dhcp() != ESP_OK) {
+                    return abandon_attempt() ? OUTCOME_RESTART : OUTCOME_FAILED;
+                }
+                deadline = xTaskGetTickCount() + pdMS_TO_TICKS(DHCP_TIMEOUT_MS);
+                continue;
+            }
+
+            /* Something that outranks the trial arrived. It is handled below
+             * exactly as it would have been had the trial not been running. */
+            msg = interrupt;
+        }
+
         if (is_restart(&msg)) {
             abandon_attempt();
             return OUTCOME_RESTART;
@@ -483,7 +889,16 @@ static outcome_t attempt_connect(void)
             break;
 
         case MSG_GOT_IP:
-            return OUTCOME_CONNECTED;
+            /* esp_netif_set_ip_info() can post this while a previous link is
+             * still settling. It is not proof that the association started by
+             * this attempt has an address, and for a pending static address it
+             * must never bypass the ARP trial above. The connected event is
+             * queued first on a real association, so a current GOT_IP always
+             * arrives with `associated` already true. */
+            if (associated) {
+                return OUTCOME_CONNECTED;
+            }
+            break;
 
         case MSG_DISCONNECTED: {
             slate_wifi_error_t reason = error_from_reason(msg.reason);
@@ -553,6 +968,16 @@ static void station_task(void *arg)
         if (!slate_store_wifi_is_configured()) {
             ESP_LOGI(TAG, "no credentials — setup access point");
             reset_attempts();
+
+            /*
+             * `DELETE /wifi` took the addressing with the credentials (§9.5), so
+             * the interface must stop holding an address that belonged to a
+             * network the panel has been told to forget. Without this the DHCP
+             * client stays stopped for the whole setup session and
+             * `/info.network.ipv4` reports `static` against a `static` object of
+             * `null` — a shape §4.1 does not have.
+             */
+            apply_dhcp();
             set_state(SLATE_WIFI_STATE_UNCONFIGURED);
             request_setup(SLATE_WIFI_SETUP_NO_CREDENTIALS);
             ever_connected = false;
@@ -578,7 +1003,20 @@ static void station_task(void *arg)
         if (outcome == OUTCOME_CONNECTED) {
             LOCK();
             s_attempts = 0;
-            s_last_error = SLATE_WIFI_ERR_NONE;
+            /*
+             * §9.6's two errors survive the connection they caused; every other
+             * one is cleared by it. The difference is what the word means. The
+             * other four say "the station is not connected", so being connected
+             * answers them. These two say "the address you typed was thrown
+             * away", and that stays true on a panel which is connected — over
+             * DHCP, at an address nobody asked for — until somebody submits
+             * something else. Clearing them here would leave §9.3's table with
+             * two rows nothing can ever put in it.
+             */
+            if (s_last_error != SLATE_WIFI_ERR_GATEWAY_UNREACHABLE &&
+                s_last_error != SLATE_WIFI_ERR_ADDRESS_IN_USE) {
+                s_last_error = SLATE_WIFI_ERR_NONE;
+            }
             s_state = SLATE_WIFI_STATE_CONNECTED;
             UNLOCK();
 
@@ -732,14 +1170,30 @@ esp_err_t slate_wifi_init(void)
     return ESP_OK;
 }
 
-esp_err_t slate_wifi_connect(const char *ssid, const char *password)
+esp_err_t slate_wifi_connect(const char *ssid, const char *password,
+                             const slate_ipv4_config_t *ipv4)
 {
-    esp_err_t err = slate_store_wifi_set(ssid, password);
+    /* Pending whatever the caller said, because §9.6's trial "covers only a
+     * configuration that has just been submitted" and this function is the only
+     * way one is. Forced here rather than asked of `POST /wifi`, so a second
+     * caller cannot store a static address that skipped its proof. */
+    slate_ipv4_config_t pending;
+    if (ipv4 != NULL && ipv4->state == SLATE_IPV4_DHCP) {
+        ipv4 = NULL; /* DHCP is the absence of a stored configuration, not one */
+    }
+    if (ipv4 != NULL) {
+        pending = *ipv4;
+        pending.state = SLATE_IPV4_STATIC_PENDING;
+        ipv4 = &pending;
+    }
+
+    esp_err_t err = slate_store_wifi_set(ssid, password, ipv4);
     if (err != ESP_OK) {
         return err;
     }
 
-    ESP_LOGI(TAG, "credentials for \"%s\" stored — applying", ssid);
+    ESP_LOGI(TAG, "credentials for \"%s\" stored (%s) — applying", ssid,
+             ipv4 != NULL ? "static address, on trial" : "dhcp");
     send_msg(MSG_APPLY, 0);
     return ESP_OK;
 }

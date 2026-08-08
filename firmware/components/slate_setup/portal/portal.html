@@ -17,9 +17,12 @@
   2. It does not sweep the band per view. `GET /wifi/scan` serves a cache and the
      refresh button says what it costs before it is pressed.
 
-  From M1 it carries the WiFi form and nothing else. §9.1 grows it into the
-  editor's pairing view rather than replacing it, and §55 keeps addressing out of
-  it — the static half is #63, and it arrives behind a disclosure triangle.
+  §9.1 grows this into the editor's pairing view rather than replacing it.
+  Addressing (§9.6) sits behind a disclosure triangle, closed and set to DHCP,
+  because it is the setting almost nobody needs and the one that can make a panel
+  unreachable. It opens by itself in exactly one case: a stored static
+  configuration that failed its trial, where the whole recovery is correcting one
+  field of what is already in the form.
 -->
 <html lang="en">
 <head>
@@ -66,12 +69,14 @@ li + li { border-top: 1px solid var(--surface-alt); }
 .bars i:nth-child(1) { height: 30%; } .bars i:nth-child(2) { height: 55%; }
 .bars i:nth-child(3) { height: 78%; } .bars i:nth-child(4) { height: 100%; }
 label { display: block; margin: 16px 0 6px; color: var(--text-lo); font-size: .9rem; }
-input {
+input, select {
   width: 100%; min-height: 48px; padding: 10px 12px; border-radius: 10px;
   border: 1px solid var(--surface-alt); background: var(--bg); color: var(--text-hi);
   font: inherit;
 }
-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+details { margin-top: 20px; border-top: 1px solid var(--surface-alt); padding-top: 12px; }
+summary { color: var(--text-lo); font-size: .9rem; cursor: pointer; min-height: 32px; }
 button.action {
   min-height: 48px; padding: 12px 18px; border: 0; border-radius: 12px; font: inherit;
   font-weight: 600; cursor: pointer; background: var(--accent); color: #0b0d12;
@@ -115,6 +120,33 @@ button.link {
                maxlength="32" hidden>
         <label for="password" id="passwordLabel">Password</label>
         <input id="password" name="password" type="password" autocomplete="off" maxlength="63">
+
+        <details id="addr">
+          <summary>Addressing</summary>
+          <p class="hint" id="addrWhy" style="color:var(--warn)" hidden></p>
+          <label for="mode">How this panel gets its address</label>
+          <select id="mode">
+            <option value="dhcp">Automatically, from the router</option>
+            <option value="static">A fixed address I choose</option>
+          </select>
+          <div id="fixed" hidden>
+            <label for="address">Address and prefix</label>
+            <input id="address" placeholder="192.168.1.42/24" autocapitalize="none"
+                   autocomplete="off" spellcheck="false" inputmode="text">
+            <label for="gateway">Gateway</label>
+            <input id="gateway" placeholder="192.168.1.1" autocapitalize="none"
+                   autocomplete="off" spellcheck="false" inputmode="text">
+            <label for="dns">DNS servers, separated by commas</label>
+            <input id="dns" placeholder="192.168.1.1" autocapitalize="none"
+                   autocomplete="off" spellcheck="false" inputmode="text">
+            <p class="hint" style="margin-top:12px">
+              The panel proves this before keeping it. If the gateway does not answer
+              within about fifteen seconds, or the address is already taken, it goes
+              back to an automatic one and says which on its screen.
+            </p>
+          </div>
+        </details>
+
         <p class="hint" id="formError" style="color:var(--warn)" hidden></p>
         <p style="margin:20px 0 0"><button class="action" id="submit" type="submit">Join network</button></p>
       </div>
@@ -137,25 +169,57 @@ button.link {
 "use strict";
 var api = "/api/v1";
 var chosen = null;          /* the selected scan row, or null for a typed name */
+var configuredSsid = null;  /* the only SSID whose omitted password may be kept */
+var storedStatic = null;    /* pre-filled, but never carried onto another SSID */
+var addressingTouched = false;
 var el = function (id) { return document.getElementById(id); };
 
 /* §9.3's vocabulary, which is also `/info.network.last_error`. One table, so the
-   page and the panel cannot word the same failure differently. */
+   page and the panel cannot word the same failure differently.
+
+   The two addressing failures are given the address they are about, out of the
+   stored configuration `/info.network.ipv4.static` reports — which is what the
+   panel prints beside them on its own screen. */
 var ERRORS = {
   bad_password: function (n) { return "Wrong password for " + n + "."; },
   not_found: function (n) { return n + " is not in range."; },
   no_ip: function (n) { return "Joined " + n + " but the router gave no address."; },
   auth_timeout: function (n) { return n + " did not answer."; },
-  gateway_unreachable: function (n) { return "Joined " + n + " but the gateway did not answer."; },
-  address_in_use: function (n) { return "That address is already taken on " + n + "."; }
+  gateway_unreachable: function (n, s) {
+    return "Joined " + n + " but " + (s && s.gateway || "the gateway") + " did not answer.";
+  },
+  address_in_use: function (n, s) {
+    return host(s) + " is already taken on " + n + ".";
+  }
 };
+
+/* What became of a stored static configuration, when it is not in use. Nothing
+   for `pending` or `confirmed`: one of those is a panel that is about to answer
+   and the other is a panel that already does, and neither needs explaining to
+   somebody who is looking at this form for a different reason. */
+var STATIC_STATES = {
+  gateway_unreachable: function (s) {
+    return "The panel could not reach " + (s.gateway || "the gateway") +
+      ", so it went back to an automatic address. Correct the gateway and submit again.";
+  },
+  address_in_use: function (s) {
+    return host(s) + " is already in use on that network, so the panel went back to an " +
+      "automatic address. Pick a different address.";
+  }
+};
+
+/* The address without its prefix. §9.3 words both failures with a plain host
+   address, and `192.168.1.42/24 is already taken` reads as a subnet. */
+function host(s) {
+  return s && s.address ? String(s.address).split("/")[0] : "That address";
+}
 
 /* What `POST /wifi` can refuse with. */
 var REFUSALS = {
   ssid_required: "Enter a network name.",
+  password_required: "Enter the password for that network.",
   ssid_too_long: "That name is longer than a network name can be.",
   password_too_long: "That password is longer than WPA2 allows.",
-  static_unsupported: "This firmware cannot use a fixed address yet.",
   bad_ipv4: "The addressing in that request is not valid.",
   bad_ipv4_mode: "The addressing in that request is not valid.",
   bad_address: "That address is not a host address on its own subnet.",
@@ -193,13 +257,73 @@ function bars(rssi) {
 function showLast(network) {
   var name = network.sta_ssid || network.ssid;
   var say = ERRORS[network.last_error];
+  var stored = network.ipv4 && network.ipv4.static;
   if (!say || !name) { return; }
 
   var box = el("last");
-  box.innerHTML = "<p><b></b></p>" +
-    '<p class="hint">The password is still stored, so correcting it is one field.</p>';
-  text(box.querySelector("b"), say(name));
+  box.innerHTML = '<p><b></b></p><p class="hint"></p>';
+  text(box.querySelector("b"), say(name, stored));
+  text(box.querySelector(".hint"),
+    "Everything you typed is still stored, so correcting it is one field.");
   box.hidden = false;
+}
+
+/* §9.6: a stored static configuration comes back into the form it was typed
+   into. Opened only when it failed — that is the case where somebody is here to
+   change it, and the rest of the time this section is noise in front of the one
+   field that matters. */
+function showAddressing(network) {
+  var stored = network.ipv4 && network.ipv4.static;
+  if (!stored) { return; }
+  storedStatic = stored;
+
+  el("address").value = stored.address || "";
+  el("gateway").value = stored.gateway || "";
+  el("dns").value = (stored.dns || []).join(", ");
+
+  var say = STATIC_STATES[stored.state];
+  if (say) {
+    /* This is the one case where opening on static is recovery rather than a
+       surprising default. Choosing another SSID below returns it to DHCP. */
+    el("mode").value = "static";
+    modeChanged();
+    text(el("addrWhy"), say(stored));
+    el("addrWhy").hidden = false;
+    el("addr").open = true;
+  }
+}
+
+function modeChanged() {
+  el("fixed").hidden = el("mode").value !== "static";
+}
+
+/* A static address belongs to the network it was proved on. Preserve it while
+   correcting that same SSID, including its password; never carry it silently
+   onto a different router. An explicit change in the disclosure wins. */
+function chooseAddressingFor(ssid) {
+  if (addressingTouched) { return; }
+  var same = !!storedStatic && !!configuredSsid && ssid === configuredSsid;
+  el("mode").value = same ? "static" : "dhcp";
+  modeChanged();
+
+  var failed = storedStatic && STATIC_STATES[storedStatic.state];
+  el("addrWhy").hidden = !failed || !same;
+  if (failed && same) { el("addr").open = true; }
+  if (!same) { el("addr").open = false; }
+}
+
+/* An empty field is an absent one, not an empty string: `POST /wifi` refuses a
+   static configuration without a gateway by name, and that is a better answer
+   than one built out of "". */
+function addressing() {
+  if (el("mode").value !== "static") { return {mode: "dhcp"}; }
+
+  var servers = el("dns").value.split(",").map(function (s) { return s.trim(); })
+    .filter(function (s) { return s.length > 0; });
+  var out = {mode: "static", address: el("address").value.trim(),
+             gateway: el("gateway").value.trim()};
+  if (servers.length) { out.dns = servers; }
+  return out;
 }
 
 function renderNetworks(data) {
@@ -244,6 +368,7 @@ function choose(net, button) {
   el("password").hidden = open;
   el("passwordLabel").hidden = open;
   el("formError").hidden = true;
+  chooseAddressingFor(net.ssid);
   if (!open) { el("password").focus(); }
 }
 
@@ -256,6 +381,7 @@ function manual() {
   el("password").hidden = false;
   el("passwordLabel").hidden = false;
   el("formError").hidden = true;
+  chooseAddressingFor(el("ssid").value.trim());
   el("ssid").focus();
 }
 
@@ -276,9 +402,16 @@ function submit(event) {
   event.preventDefault();
   var ssid = chosen ? chosen.ssid : el("ssid").value.trim();
   if (!ssid) { return fail("ssid_required"); }
+  chooseAddressingFor(ssid);
 
-  var body = {ssid: ssid, ipv4: {mode: "dhcp"}};
-  if (!el("password").hidden && el("password").value) { body.password = el("password").value; }
+  var body = {ssid: ssid, ipv4: addressing()};
+  if (el("password").hidden) {
+    body.password = ""; /* explicit open network; do not preserve a stale key */
+  } else if (el("password").value) {
+    body.password = el("password").value;
+  } else if (ssid !== configuredSsid) {
+    return fail("password_required");
+  }
 
   el("submit").disabled = true;
   text(el("submit"), "Sending…");
@@ -314,6 +447,8 @@ function fail(code) {
 el("manual").onclick = manual;
 el("rescan").onclick = rescan;
 el("form").onsubmit = submit;
+el("mode").onchange = function () { addressingTouched = true; modeChanged(); };
+el("ssid").oninput = function () { chooseAddressingFor(el("ssid").value.trim()); };
 el("again").onclick = function () {
   el("sent").hidden = true;
   el("pick").hidden = false;
@@ -322,7 +457,14 @@ el("again").onclick = function () {
 get("/info").then(function (info) {
   text(el("name"), info.name || "Slate");
   document.title = (info.name || "Slate") + " setup";
-  if (info.network) { showLast(info.network); }
+  if (info.network) {
+    configuredSsid = info.network.sta_ssid || null;
+    showLast(info.network);
+    showAddressing(info.network);
+    /* The scan and info requests run concurrently. If a quick user selected a
+       row before /info returned, apply the now-known SSID relationship too. */
+    chooseAddressingFor(chosen ? chosen.ssid : el("ssid").value.trim());
+  }
 }).catch(function () {});
 
 get("/wifi/scan").then(renderNetworks).catch(function () {

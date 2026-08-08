@@ -43,7 +43,39 @@ static const char *TAG = "store";
  */
 #define KEY_HA_TOKEN  "ha_token"
 #define KEY_WIFI_PASS "wifi_pass"
+#define KEY_WIFI_REV  "wifi_rev"
 #define KEY_FS_READY  "fs_ready"
+
+/*
+ * §9.6's addressing, as one blob rather than a key per field.
+ *
+ * Private because nothing outside this component names it: the accessors take
+ * a slate_ipv4_config_t and the encoding never leaves this file. That is what
+ * makes the record a single NVS write — five keys would be five writes and four
+ * power cuts that leave an address with somebody else's gateway, which is
+ * exactly the configuration §9.6 exists to stop the panel from applying.
+ */
+#define KEY_IPV4 "ipv4"
+
+/*
+ * The stored form, versioned because it is the one record here that is not a
+ * string and cannot be read leniently. A blob written by a firmware that
+ * numbered these states differently would otherwise be applied as an address:
+ * an unrecognised version reports DHCP, which is the addressing every panel can
+ * fall back to.
+ */
+#define IPV4_RECORD_VERSION 2
+
+typedef struct {
+    uint8_t version;
+    uint8_t state;
+    uint8_t prefix;
+    uint8_t dns_count;
+    uint32_t generation;
+    uint32_t address;
+    uint32_t gateway;
+    uint32_t dns[SLATE_IPV4_DNS_MAX];
+} ipv4_record_t;
 
 /*
  * The device token alphabet, and the reason it is exactly 64 characters long.
@@ -82,9 +114,12 @@ static volatile bool s_rf_active;
  *
  * Recursive because the composite operations legitimately re-enter: a factory
  * reset mints a token, which takes the same lock. NVS has its own internal
- * lock, so this one is not there to protect NVS — it is there for the token
- * buffer, the cached predicates, and the filesystem lifecycle, none of which
- * anything else serialises.
+ * lock, but it cannot make a read/compare/write across two handles atomic. This
+ * one therefore also serialises the WiFi tuple with a static-address verdict:
+ * a completed trial must not stamp its state onto a replacement configuration
+ * that `POST /wifi` committed underneath it. It still protects the token
+ * buffer, cached predicates and filesystem lifecycle, none of which anything
+ * else serialises.
  */
 static SemaphoreHandle_t s_lock;
 
@@ -596,7 +631,174 @@ esp_err_t slate_store_ha_clear(void)
     return url_err != ESP_OK ? url_err : token_err;
 }
 
-esp_err_t slate_store_wifi_set(const char *ssid, const char *password)
+/* -------------------------------------------------------------------------
+ * Station addressing (§9.6)
+ * ------------------------------------------------------------------------- */
+
+const char *slate_ipv4_state_str(slate_ipv4_state_t state)
+{
+    switch (state) {
+    case SLATE_IPV4_DHCP:                   return "dhcp";
+    case SLATE_IPV4_STATIC_PENDING:         return "pending";
+    case SLATE_IPV4_STATIC_CONFIRMED:       return "confirmed";
+    case SLATE_IPV4_STATIC_GATEWAY_UNREACHABLE: return "gateway_unreachable";
+    case SLATE_IPV4_STATIC_ADDRESS_IN_USE:  return "address_in_use";
+    }
+    return "dhcp";
+}
+
+bool slate_ipv4_state_is_applied(slate_ipv4_state_t state)
+{
+    /* §9.6: a configuration that has failed its trial stays stored and stops
+     * being used. Written as the affirmative list rather than "not one of the
+     * failures", so a state added later has to be classified deliberately
+     * instead of being applied to the network by default. */
+    return state == SLATE_IPV4_STATIC_PENDING || state == SLATE_IPV4_STATIC_CONFIRMED;
+}
+
+/** Read the record, or report DHCP. NULL `out` is a valid existence check. */
+static bool ipv4_record_read(ipv4_record_t *out)
+{
+    nvs_handle_t nvs;
+    if (nvs_open_ns(NVS_READONLY, &nvs) != ESP_OK) {
+        return false;
+    }
+
+    ipv4_record_t record = {0};
+    size_t len = sizeof(record);
+    esp_err_t err = nvs_get_blob(nvs, KEY_IPV4, &record, &len);
+    nvs_close(nvs);
+
+    if (err != ESP_OK || len != sizeof(record) || record.version != IPV4_RECORD_VERSION) {
+        return false;
+    }
+
+    /*
+     * A record that says DHCP is not one — the absence of a record is how DHCP
+     * is stored, and anything claiming otherwise did not come from
+     * slate_store_wifi_set(). Same for a prefix outside what `POST /wifi`
+     * accepts: this is the value that decides what subnet the panel thinks it
+     * is on, and a blob whose bytes moved must not be able to answer that.
+     */
+    if (!slate_ipv4_state_is_applied(record.state) &&
+        record.state != SLATE_IPV4_STATIC_GATEWAY_UNREACHABLE &&
+        record.state != SLATE_IPV4_STATIC_ADDRESS_IN_USE) {
+        return false;
+    }
+    if (record.generation == 0 || record.prefix < 8 || record.prefix > 30 ||
+        record.dns_count > SLATE_IPV4_DNS_MAX) {
+        return false;
+    }
+
+    if (out != NULL) {
+        *out = record;
+    }
+    return true;
+}
+
+void slate_store_ipv4_get(slate_ipv4_config_t *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+
+    ipv4_record_t record;
+    LOCK();
+    bool found = ipv4_record_read(&record);
+    UNLOCK();
+    if (!found) {
+        out->state = SLATE_IPV4_DHCP;
+        return;
+    }
+
+    out->state = (slate_ipv4_state_t) record.state;
+    out->address = record.address;
+    out->gateway = record.gateway;
+    out->generation = record.generation;
+    out->prefix = record.prefix;
+    out->dns_count = record.dns_count;
+    memcpy(out->dns, record.dns, sizeof(out->dns));
+}
+
+/** Write the record, or erase it for DHCP. The caller holds the store lock. */
+static esp_err_t ipv4_record_write(nvs_handle_t nvs, const slate_ipv4_config_t *ipv4,
+                                   uint32_t generation)
+{
+    if (ipv4 == NULL || ipv4->state == SLATE_IPV4_DHCP) {
+        esp_err_t err = nvs_erase_key(nvs, KEY_IPV4);
+        return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+    }
+
+    ipv4_record_t record = {
+        .version = IPV4_RECORD_VERSION,
+        .state = (uint8_t) ipv4->state,
+        .prefix = ipv4->prefix,
+        .dns_count = ipv4->dns_count > SLATE_IPV4_DNS_MAX ? SLATE_IPV4_DNS_MAX : ipv4->dns_count,
+        .generation = generation,
+        .address = ipv4->address,
+        .gateway = ipv4->gateway,
+    };
+    memcpy(record.dns, ipv4->dns, sizeof(record.dns));
+
+    return nvs_set_blob(nvs, KEY_IPV4, &record, sizeof(record));
+}
+
+esp_err_t slate_store_ipv4_set_state(const slate_ipv4_config_t *tried, slate_ipv4_state_t state)
+{
+    if (tried == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (state != SLATE_IPV4_STATIC_CONFIRMED &&
+        state != SLATE_IPV4_STATIC_GATEWAY_UNREACHABLE &&
+        state != SLATE_IPV4_STATIC_ADDRESS_IN_USE) {
+        /* Not a way to switch a panel to DHCP. §9.6 keeps a failed configuration
+         * stored so the setup page can pre-fill it, and the only thing that
+         * erases one is somebody asking for DHCP through `POST /wifi`. */
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK();
+
+    ipv4_record_t record;
+    if (!ipv4_record_read(&record)) {
+        UNLOCK();
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    /* The generation is the identity; the fields are checked as a defensive
+     * invariant so a corrupted or partially copied snapshot is never stamped.
+     * The state is deliberately excluded because changing it is this call's
+     * whole purpose. */
+    if (record.generation != tried->generation || record.address != tried->address ||
+        record.gateway != tried->gateway ||
+        record.prefix != tried->prefix || record.dns_count != tried->dns_count ||
+        memcmp(record.dns, tried->dns, sizeof(record.dns)) != 0) {
+        UNLOCK();
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (record.state == (uint8_t) state) {
+        /* The confirmed case on every reconnect of a sticky configuration.
+         * Flash has a finite number of erases and this is the hot path. */
+        UNLOCK();
+        return ESP_OK;
+    }
+    record.state = (uint8_t) state;
+
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open_ns(NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        UNLOCK();
+        return err;
+    }
+    err = nvs_finish(nvs, nvs_set_blob(nvs, KEY_IPV4, &record, sizeof(record)));
+    UNLOCK();
+    return err;
+}
+
+esp_err_t slate_store_wifi_set(const char *ssid, const char *password,
+                               const slate_ipv4_config_t *ipv4)
 {
     if (ssid == NULL || ssid[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
@@ -606,18 +808,54 @@ esp_err_t slate_store_wifi_set(const char *ssid, const char *password)
         return ESP_ERR_INVALID_SIZE;
     }
 
+    LOCK();
     nvs_handle_t nvs;
     esp_err_t err = nvs_open_ns(NVS_READWRITE, &nvs);
     if (err != ESP_OK) {
+        UNLOCK();
         return err;
     }
 
-    err = nvs_set_str(nvs, SLATE_KEY_WIFI_SSID, ssid);
+    /* Identity for the whole WiFi tuple, not only for records that happen to be
+     * static. It survives DHCP and DELETE /wifi, closing the ABA case where a
+     * pending trial is erased and an identical static record is submitted
+     * before its old verdict lands. The increment is in the tuple's one NVS
+     * commit, so readers can never see the new generation with old fields. */
+    uint32_t generation = 0;
+    esp_err_t generation_err = nvs_get_u32(nvs, KEY_WIFI_REV, &generation);
+    if (generation_err == ESP_ERR_NVS_NOT_FOUND) {
+        generation = 0;
+    } else if (generation_err != ESP_OK) {
+        nvs_close(nvs);
+        UNLOCK();
+        return generation_err;
+    }
+    generation++;
+    if (generation == 0) {
+        generation = 1;
+    }
+    err = nvs_set_u32(nvs, KEY_WIFI_REV, generation);
+
+    bool keep_password = false;
+    if (password == NULL) {
+        char current_ssid[SLATE_WIFI_SSID_BUF_LEN] = {0};
+        size_t current_len = sizeof(current_ssid);
+        keep_password = nvs_get_str(nvs, SLATE_KEY_WIFI_SSID, current_ssid, &current_len) ==
+                            ESP_OK &&
+                        strcmp(current_ssid, ssid) == 0;
+    }
+
     if (err == ESP_OK) {
-        /* An open network stores no passphrase rather than an empty one, so
-         * the reader's ESP_ERR_NOT_FOUND means "open" and never "written as
-         * blank by a form that submitted an untouched field". */
-        if (password == NULL || password[0] == '\0') {
+        err = nvs_set_str(nvs, SLATE_KEY_WIFI_SSID, ssid);
+    }
+    if (err == ESP_OK) {
+        /* Missing and empty are deliberately different. Missing preserves the
+         * secret only for this same SSID; empty is an explicit open network.
+         * Both a new SSID with no password and an explicit empty string erase
+         * the old key, so a passphrase can never leak across networks. */
+        if (password == NULL && keep_password) {
+            /* The key already in this transaction is exactly the wanted one. */
+        } else if (password == NULL || password[0] == '\0') {
             err = nvs_erase_key(nvs, KEY_WIFI_PASS);
             if (err == ESP_ERR_NVS_NOT_FOUND) {
                 err = ESP_OK;
@@ -626,13 +864,15 @@ esp_err_t slate_store_wifi_set(const char *ssid, const char *password)
             err = nvs_set_str(nvs, KEY_WIFI_PASS, password);
         }
     }
+    if (err == ESP_OK) {
+        err = ipv4_record_write(nvs, ipv4, generation);
+    }
     err = nvs_finish(nvs, err);
 
     if (err == ESP_OK) {
-        LOCK();
         s_wifi_configured = true;
-        UNLOCK();
     }
+    UNLOCK();
     return err;
 }
 
@@ -661,17 +901,21 @@ esp_err_t slate_store_wifi_password_get(char *out, size_t out_len)
 
 esp_err_t slate_store_wifi_clear(void)
 {
-    /* Secret first, and both attempted before either is reported — the order
+    /* Secret first, and all three attempted before any is reported — the order
      * slate_store_ha_clear() uses, for the same reason. */
+    LOCK();
     esp_err_t pass_err = erase_raw(KEY_WIFI_PASS);
     esp_err_t ssid_err = erase_raw(SLATE_KEY_WIFI_SSID);
+    esp_err_t ipv4_err = erase_raw(KEY_IPV4);
 
     if (ssid_err == ESP_OK) {
-        LOCK();
         s_wifi_configured = false;
-        UNLOCK();
     }
-    return pass_err != ESP_OK ? pass_err : ssid_err;
+    UNLOCK();
+    if (pass_err != ESP_OK) {
+        return pass_err;
+    }
+    return ssid_err != ESP_OK ? ssid_err : ipv4_err;
 }
 
 /* -------------------------------------------------------------------------
