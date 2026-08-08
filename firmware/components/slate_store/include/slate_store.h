@@ -299,23 +299,133 @@ esp_err_t slate_store_ha_token_get(char *out, size_t out_len);
 /** @brief Forget the Home Assistant URL and token. */
 esp_err_t slate_store_ha_clear(void);
 
+/* --- Station addressing (§9.6, §4.1) ------------------------------------ */
+
+/* lwIP resolves against three servers and ignores the rest, so three is the
+ * number `POST /wifi` accepts and the number this stores. */
+#define SLATE_IPV4_DNS_MAX 3
+
+/**
+ * @brief Where the station's address comes from, and what became of it.
+ *
+ * §9.6 makes a freshly submitted static configuration *pending* rather than
+ * committed, because a wrong gateway associates perfectly and answers nothing.
+ * That is one fact with four outcomes, and it is one field rather than a mode
+ * plus a pair of booleans so that no combination of them can describe a state
+ * the design does not have.
+ *
+ * The two failed members carry their reason rather than pointing at a separate
+ * one, for §9.3's rule that the screen and the API share a vocabulary: they map
+ * onto `gateway_unreachable` and `address_in_use` exactly, and a reason stored
+ * beside the state is a second thing to keep in step with it.
+ *
+ * A failed configuration is kept, not erased. It is what the setup page
+ * pre-fills the form with, and the whole recovery path of §9.6 is somebody
+ * correcting one field of what they already typed.
+ */
+typedef enum {
+    SLATE_IPV4_DHCP = 0,                   /**< nothing stored — the default */
+    SLATE_IPV4_STATIC_PENDING,             /**< submitted, not yet proven */
+    SLATE_IPV4_STATIC_CONFIRMED,           /**< proven; sticky from here on */
+    SLATE_IPV4_STATIC_GATEWAY_UNREACHABLE, /**< proven wrong, reverted to DHCP */
+    SLATE_IPV4_STATIC_ADDRESS_IN_USE,      /**< proven wrong, reverted to DHCP */
+} slate_ipv4_state_t;
+
+/** @brief `dhcp`, `pending`, `confirmed`, `gateway_unreachable`, `address_in_use`. */
+const char *slate_ipv4_state_str(slate_ipv4_state_t state);
+
+/** @brief Whether this state means the static address is the one to apply. */
+bool slate_ipv4_state_is_applied(slate_ipv4_state_t state);
+
+/**
+ * @brief §4.1's `ipv4` object, parsed.
+ *
+ * Numbers rather than strings, in host byte order, because the one place that
+ * has to be strict about the text is `POST /wifi` — it is the front door for a
+ * value that can make the panel unreachable — and a second parser reading these
+ * back out of NVS would be a second chance to disagree with the first.
+ *
+ * `prefix` is the CIDR length, 8 to 30. Meaningless when `state` is
+ * SLATE_IPV4_DHCP, and so is everything below it.
+ *
+ * `generation` is an opaque store identity, not part of the JSON contract.
+ * Callers that read a configuration and later submit a trial verdict must copy
+ * it unchanged. It distinguishes two identical `POST /wifi` requests, so the
+ * first one's verdict can never confirm the second one's record.
+ */
+typedef struct {
+    slate_ipv4_state_t state;
+    uint32_t address;
+    uint32_t gateway;
+    uint32_t dns[SLATE_IPV4_DNS_MAX];
+    uint32_t generation;
+    uint8_t prefix;
+    uint8_t dns_count;
+} slate_ipv4_config_t;
+
+/**
+ * @brief Read the stored addressing. `state` is SLATE_IPV4_DHCP when there is none.
+ *
+ * Never fails in a way the caller has to handle: an unreadable or unrecognised
+ * record reports DHCP, which is the addressing every panel can fall back to and
+ * the one §9.4 already knows how to rescue.
+ */
+void slate_store_ipv4_get(slate_ipv4_config_t *out);
+
+/**
+ * @brief Record what the trial of §9.6 decided about `tried`.
+ *
+ * The only thing that moves a stored configuration between the pending, the
+ * confirmed and the two failed states. It rewrites the record rather than
+ * taking a second key beside it, so a reader can never see a confirmed state
+ * against an address that was replaced under it.
+ *
+ * `tried` is the configuration the verdict is about, and it is checked against
+ * what is stored rather than trusted. A `POST /wifi` landing in the last
+ * milliseconds of a trial replaces the record between the verdict and this
+ * call, and stamping the old verdict on the new address is the worst outcome
+ * this component has: a configuration marked confirmed without ever having been
+ * proven is applied on every boot and never trialled again, which is exactly
+ * the unreachable panel §9.6 exists to prevent.
+ *
+ * ESP_ERR_NOT_FOUND if there is no stored configuration to mark, and
+ * ESP_ERR_INVALID_STATE if the one stored is no longer `tried`. Neither is a
+ * failure the caller can do anything about: both mean the verdict was about a
+ * configuration nobody is using any more.
+ */
+esp_err_t slate_store_ipv4_set_state(const slate_ipv4_config_t *tried,
+                                     slate_ipv4_state_t state);
+
 /* --- Station credentials (§12) ------------------------------------------ */
 
 /**
- * @brief Persist the station SSID and passphrase together.
+ * @brief Persist the station SSID, passphrase and addressing together.
  *
  * `POST /wifi` (#55) writes them; #8's state machine reads them at boot and
  * after a change. One NVS commit, for the reason slate_store_ha_set() gives:
  * a power cut must not leave an SSID with a stale passphrase, which is a
- * configured-looking panel that reports `bad_password` forever.
+ * configured-looking panel that reports `bad_password` forever. The addressing
+ * is in the same commit for the sharper version of the same reason — an address
+ * left behind with somebody else's gateway is §9.6's failure arriving without
+ * anybody having typed it.
  *
- * `password` may be NULL or empty for an open network — the distinction the
- * store keeps is "configured or not", and that is the SSID's job alone.
+ * `password == NULL` preserves the stored passphrase when `ssid` is unchanged.
+ * This is the setup page's recovery path: a static-address failure returns all
+ * non-secret fields to the form, while the passphrase remains in NVS. NULL for
+ * a different SSID means an open network because there is no matching secret
+ * to preserve. An explicit empty string always erases the passphrase, including
+ * when an SSID changed from protected to open.
+ *
+ * `ipv4` may be NULL, and NULL means DHCP: the stored addressing is erased
+ * rather than left for the next association to pick up. §4.1's "an absent
+ * `ipv4` means `dhcp`" is a statement about the request, and a request that
+ * says DHCP is a request to stop using the address that is stored.
  *
  * ESP_ERR_INVALID_SIZE if either value exceeds what 802.11 allows; the caller
  * validates shape, not this.
  */
-esp_err_t slate_store_wifi_set(const char *ssid, const char *password);
+esp_err_t slate_store_wifi_set(const char *ssid, const char *password,
+                               const slate_ipv4_config_t *ipv4);
 
 /**
  * @brief Read the configured station SSID. ESP_ERR_NOT_FOUND if unconfigured.
@@ -345,10 +455,13 @@ bool slate_store_wifi_is_configured(void);
 esp_err_t slate_store_wifi_password_get(char *out, size_t out_len);
 
 /**
- * @brief Forget the station credentials — `DELETE /wifi` (§9.5).
+ * @brief Forget the station credentials and the addressing — `DELETE /wifi` (§9.5).
  *
  * The passphrase is erased first, so an interrupted clear cannot leave the
- * secret behind an SSID that is already gone.
+ * secret behind an SSID that is already gone. The addressing goes with them:
+ * §9.5 is "changing a router must never require reflashing", and a panel that
+ * kept a static address belonging to the network it was just told to forget
+ * would join the next one and be unreachable on it.
  */
 esp_err_t slate_store_wifi_clear(void);
 

@@ -336,6 +336,24 @@ static void log_setup_card(slate_wifi_setup_reason_t reason)
         ESP_LOGW(TAG, "  was configured for \"%s\", last error %s", station.sta_ssid,
                  last_error != NULL ? last_error : "none");
     }
+
+    /*
+     * §9.6: a static configuration that failed its trial is kept and reported,
+     * because the correction is one field of what is already stored and the
+     * person reading this is the one who typed it. The panel is on a DHCP
+     * address by the time this prints — that is what the revert did — so this
+     * says what was asked for, not where the panel is.
+     */
+    slate_ipv4_config_t ipv4;
+    slate_store_ipv4_get(&ipv4);
+    if (ipv4.state != SLATE_IPV4_DHCP) {
+        ESP_LOGW(TAG, "  static address %u.%u.%u.%u/%u via %u.%u.%u.%u — %s",
+                 (unsigned) (ipv4.address >> 24 & 0xFF), (unsigned) (ipv4.address >> 16 & 0xFF),
+                 (unsigned) (ipv4.address >> 8 & 0xFF), (unsigned) (ipv4.address & 0xFF),
+                 (unsigned) ipv4.prefix, (unsigned) (ipv4.gateway >> 24 & 0xFF),
+                 (unsigned) (ipv4.gateway >> 16 & 0xFF), (unsigned) (ipv4.gateway >> 8 & 0xFF),
+                 (unsigned) (ipv4.gateway & 0xFF), slate_ipv4_state_str(ipv4.state));
+    }
 }
 
 static void raise_ap(slate_wifi_setup_reason_t reason)

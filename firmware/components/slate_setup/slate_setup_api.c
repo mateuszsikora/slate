@@ -4,7 +4,12 @@
  * design.md §4.1 (the routes), §4.3 (why three of them need no token on the
  * access point), §9.2 (the cached scan, the compiled-in page), §9.3 (why
  * `POST /wifi` cannot answer the question it is asked), §9.6 and §4.1 (the
- * `ipv4` object, whose shape is settled here and whose `static` half is #63).
+ * `ipv4` object, both modes of it).
+ *
+ * This file validates the addressing and hands it on. It does not apply it and
+ * cannot report whether it worked: §9.6's trial takes an ARP exchange on an
+ * association that does not exist yet, and §9.3's one radio has already dropped
+ * the browser by the time there is an answer. slate_wifi owns both.
  */
 
 #include <stdbool.h>
@@ -43,8 +48,11 @@ extern const uint8_t _binary_portal_html_gz_end[];
 #define BODY_MAX 512
 
 /* lwIP resolves against three servers and ignores the rest, so accepting a
- * fourth would be accepting a value that is silently dropped. */
-#define DNS_SERVERS_MAX 3
+ * fourth would be accepting a value that is silently dropped. Spelled as the
+ * store's number rather than as three, because the parsed servers go straight
+ * into a slate_ipv4_config_t and the two limits being the same is what makes
+ * that safe. */
+#define DNS_SERVERS_MAX SLATE_IPV4_DNS_MAX
 
 /* --- Refusals ----------------------------------------------------------- */
 
@@ -307,20 +315,26 @@ static void clear_json_strings(cJSON *item)
 }
 
 /**
- * Validate §4.1's `ipv4` object and report the mode it asks for.
+ * Validate §4.1's `ipv4` object and parse what the station will apply.
  *
  * @return NULL if it is coherent, otherwise the `error` string to answer with.
+ *
+ * `out->state` reports the mode asked for — SLATE_IPV4_DHCP or, for `static`,
+ * SLATE_IPV4_STATIC_PENDING, which is the state §9.6 says a freshly submitted
+ * configuration starts in. The address fields are parsed whichever mode it is,
+ * because the checks run before fields alongside `"dhcp"` are refused: a bad
+ * address still gets its specific error rather than being silently ignored.
  *
  * The checks are the cheap ones that catch a typo before it can cost anything:
  * a prefix between 8 and 30, an address that is a host on the subnet its own
  * prefix implies rather than that subnet's network or broadcast address, and a
- * gateway on the same subnet. They run whatever the mode says, because §55 asks
- * for exactly that — an address a client sends alongside `"dhcp"` is worth
- * refusing now rather than accepting into a field that #63 will start applying.
+ * gateway on the same subnet. What they cannot catch — a gateway that is a
+ * perfectly good host address and simply is not the router — is what the trial
+ * of §9.6 is for.
  */
-static const char *validate_ipv4(const cJSON *ipv4, bool *is_static)
+static const char *validate_ipv4(const cJSON *ipv4, slate_ipv4_config_t *out)
 {
-    *is_static = false;
+    memset(out, 0, sizeof(*out));
 
     /* §4.1: "An absent `ipv4` means `dhcp`." That default is what makes the
      * field addable without a version, so absent and null both mean the same
@@ -332,13 +346,14 @@ static const char *validate_ipv4(const cJSON *ipv4, bool *is_static)
         return "bad_ipv4";
     }
 
+    bool is_static = false;
     const cJSON *mode_item = cJSON_GetObjectItemCaseSensitive(ipv4, "mode");
     if (mode_item != NULL && !cJSON_IsNull(mode_item)) {
         const char *mode = cJSON_IsString(mode_item) ? mode_item->valuestring : NULL;
         if (mode == NULL || (strcmp(mode, "dhcp") != 0 && strcmp(mode, "static") != 0)) {
             return "bad_ipv4_mode";
         }
-        *is_static = strcmp(mode, "static") == 0;
+        is_static = strcmp(mode, "static") == 0;
     }
 
     const char *address_text = NULL;
@@ -350,8 +365,8 @@ static const char *validate_ipv4(const cJSON *ipv4, bool *is_static)
         return "bad_gateway";
     }
 
-    if (*is_static && (address_text == NULL || gateway_text == NULL)) {
-        /* A static configuration without both of these is not one. #63 resolves
+    if (is_static && (address_text == NULL || gateway_text == NULL)) {
+        /* A static configuration without both of these is not one. §9.6 resolves
          * the gateway over ARP to decide whether to keep the address at all, so
          * there is nothing for it to prove without one. */
         return address_text == NULL ? "bad_address" : "bad_gateway";
@@ -372,6 +387,9 @@ static const char *validate_ipv4(const cJSON *ipv4, bool *is_static)
              * described. Both associate perfectly and answer nothing. */
             return "bad_address";
         }
+
+        out->address = address;
+        out->prefix = (uint8_t) prefix;
     }
 
     if (gateway_text != NULL) {
@@ -390,6 +408,7 @@ static const char *validate_ipv4(const cJSON *ipv4, bool *is_static)
                 return "bad_gateway";
             }
         }
+        out->gateway = gateway;
     }
 
     const cJSON *dns = cJSON_GetObjectItemCaseSensitive(ipv4, "dns");
@@ -399,13 +418,36 @@ static const char *validate_ipv4(const cJSON *ipv4, bool *is_static)
         }
         const cJSON *server = NULL;
         cJSON_ArrayForEach(server, dns) {
-            uint32_t ignored = 0;
-            if (!cJSON_IsString(server) || !parse_address(server->valuestring, &ignored)) {
+            uint32_t resolver = 0;
+            if (!cJSON_IsString(server) || !parse_address(server->valuestring, &resolver)) {
                 return "bad_dns";
             }
+            out->dns[out->dns_count++] = resolver;
         }
     }
 
+    /* DHCP is the absence of a static configuration, not a mode that makes its
+     * fields inert. Accepting a coherent address here would be worse than only
+     * accepting a malformed one: a client typo would receive 202 even though
+     * the panel discarded exactly the setting it meant to change. Validate
+     * first, above, so a malformed field keeps the most useful error. */
+    if (!is_static) {
+        if (address_text != NULL) {
+            return "bad_address";
+        }
+        if (gateway_text != NULL) {
+            return "bad_gateway";
+        }
+        if (dns != NULL && !cJSON_IsNull(dns)) {
+            return "bad_dns";
+        }
+    }
+
+    /* Last, so that everything above returns with the state still DHCP and a
+     * caller cannot act on a half-parsed static configuration. */
+    if (is_static) {
+        out->state = SLATE_IPV4_STATIC_PENDING;
+    }
     return NULL;
 }
 
@@ -460,7 +502,7 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
     const char *ssid = string_field(root, "ssid");
     const char *password = NULL;
     const char *error = NULL;
-    bool is_static = false;
+    slate_ipv4_config_t ipv4 = {0};
 
     if (ssid == NULL || ssid[0] == '\0') {
         error = "ssid_required";
@@ -473,21 +515,7 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
     }
 
     if (error == NULL) {
-        error = validate_ipv4(cJSON_GetObjectItemCaseSensitive(root, "ipv4"), &is_static);
-    }
-
-    /*
-     * The mode is refused last, after the addressing has been checked for
-     * coherence. A client that sends `"static"` with a typo in the gateway hears
-     * about the typo, which is the more useful of the two answers and is the
-     * ordering §55 asks for: the shape is settled in M1 so that the validation
-     * exists before the feature does.
-     */
-    if (error == NULL && is_static) {
-        /* §9.6: until #35's ten-second press and #36's `POST /factory_reset`
-         * exist, a wrong static address has no rescue that does not go through
-         * the router's admin page. The field is accepted, the mode is not. */
-        error = "static_unsupported";
+        error = validate_ipv4(cJSON_GetObjectItemCaseSensitive(root, "ipv4"), &ipv4);
     }
 
     esp_err_t err = ESP_OK;
@@ -496,7 +524,7 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
          * built. Keep the accepted value rather than borrowing freed cJSON
          * storage on the success path. */
         strlcpy(accepted_ssid, ssid, sizeof(accepted_ssid));
-        err = slate_wifi_connect(ssid, password);
+        err = slate_wifi_connect(ssid, password, &ipv4);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "storing credentials for \"%s\": %s", ssid, esp_err_to_name(err));
         }
@@ -529,11 +557,16 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
      * The body echoes what was accepted rather than what is now true. That is
      * the opposite of `/info.network.ipv4`, which §4.1 makes a report of where
      * the address actually came from — and the two differ precisely because this
-     * one is an acknowledgement and that one is an observation.
+     * one is an acknowledgement and that one is an observation. With a static
+     * configuration the gap between them is the point: this says `static` the
+     * moment it is stored, and §9.6 may still have reverted it to `dhcp` fifteen
+     * seconds later.
      */
     cJSON *response = cJSON_CreateObject();
-    cJSON *ipv4 = cJSON_AddObjectToObject(response, "ipv4");
-    bool ok = ipv4 != NULL && cJSON_AddStringToObject(ipv4, "mode", "dhcp") != NULL &&
+    cJSON *echo = cJSON_AddObjectToObject(response, "ipv4");
+    bool ok = echo != NULL &&
+              cJSON_AddStringToObject(echo, "mode",
+                                      ipv4.state == SLATE_IPV4_DHCP ? "dhcp" : "static") != NULL &&
               cJSON_AddStringToObject(response, "ssid", accepted_ssid) != NULL;
     if (!ok) {
         cJSON_Delete(response);
@@ -777,11 +810,19 @@ esp_err_t slate_setup_selftest(void)
     static const char PROBE[] = "GET /hotspot-detect.html HTTP/1.0\r\nHost: captive.apple.com"
                                 "\r\nConnection: close\r\n\r\n";
 
-    /* Every body below is a refusal, so nothing here can change what network
-     * the panel is trying to join. */
-    static const char STATIC_COHERENT[] =
+    /*
+     * Every body below is a refusal, so nothing here can change what network the
+     * panel is trying to join. That rules out the one case worth the most —
+     * a coherent static configuration being accepted — because accepting it is
+     * exactly what it would do, on a device whose real credentials are in the
+     * same two keys. §9.6's happy path is verified on hardware against a real
+     * router, and there is no honest way to do it from in here.
+     */
+    static const char STATIC_BAD_DNS[] =
         "{\"ssid\":\"selftest\",\"password\":\"selftest\",\"ipv4\":{\"mode\":\"static\","
-        "\"address\":\"192.168.1.42/24\",\"gateway\":\"192.168.1.1\"}}";
+        "\"address\":\"192.168.1.42/24\",\"gateway\":\"192.168.1.1\",\"dns\":[\"192.168.1\"]}}";
+    static const char STATIC_NO_GATEWAY[] =
+        "{\"ssid\":\"selftest\",\"ipv4\":{\"mode\":\"static\",\"address\":\"192.168.1.42/24\"}}";
     static const char STATIC_BAD_GATEWAY[] =
         "{\"ssid\":\"selftest\",\"password\":\"selftest\",\"ipv4\":{\"mode\":\"static\","
         "\"address\":\"192.168.1.42/24\",\"gateway\":\"10.0.0.1\"}}";
@@ -800,6 +841,11 @@ esp_err_t slate_setup_selftest(void)
         "{\"ssid\":\"selftest\",\"ipv4\":{\"mode\":\"dhcp\",\"address\":42}}";
     static const char BAD_GATEWAY_TYPE[] =
         "{\"ssid\":\"selftest\",\"ipv4\":{\"mode\":\"dhcp\",\"gateway\":false}}";
+    static const char DHCP_WITH_ADDRESS[] =
+        "{\"ssid\":\"selftest\",\"ipv4\":{\"mode\":\"dhcp\","
+        "\"address\":\"192.168.1.42/24\",\"gateway\":\"192.168.1.1\"}}";
+    static const char DHCP_WITH_DNS[] =
+        "{\"ssid\":\"selftest\",\"ipv4\":{\"mode\":\"dhcp\",\"dns\":[\"192.168.1.1\"]}}";
 
     int failures = 0;
 
@@ -809,8 +855,10 @@ esp_err_t slate_setup_selftest(void)
     failures += !expect("GET /wifi/scan needs no token on the AP", SLATE_SETUP_AP_ADDRESS, SCAN,
                         200, "\"networks\":");
     failures += !expect_post("POST /wifi needs no token on the AP", SLATE_SETUP_AP_ADDRESS,
-                             STATIC_COHERENT, 400, "\"error\":\"static_unsupported\"");
-    failures += !expect_post("a bad gateway is named before the mode", SLATE_SETUP_AP_ADDRESS,
+                             STATIC_BAD_DNS, 400, "\"error\":\"bad_dns\"");
+    failures += !expect_post("a static address needs a gateway", SLATE_SETUP_AP_ADDRESS,
+                             STATIC_NO_GATEWAY, 400, "\"error\":\"bad_gateway\"");
+    failures += !expect_post("a gateway on another subnet is refused", SLATE_SETUP_AP_ADDRESS,
                              STATIC_BAD_GATEWAY, 400, "\"error\":\"bad_gateway\"");
     failures += !expect_post("the network address is not a gateway", SLATE_SETUP_AP_ADDRESS,
                              STATIC_NETWORK_GATEWAY, 400, "\"error\":\"bad_gateway\"");
@@ -825,6 +873,12 @@ esp_err_t slate_setup_selftest(void)
                              BAD_ADDRESS_TYPE, 400, "\"error\":\"bad_address\"");
     failures += !expect_post("a non-string gateway is refused", SLATE_SETUP_AP_ADDRESS,
                              BAD_GATEWAY_TYPE, 400, "\"error\":\"bad_gateway\"");
+    failures += !expect_post("DHCP does not silently discard a static address",
+                             SLATE_SETUP_AP_ADDRESS, DHCP_WITH_ADDRESS, 400,
+                             "\"error\":\"bad_address\"");
+    failures += !expect_post("DHCP does not silently discard static DNS",
+                             SLATE_SETUP_AP_ADDRESS, DHCP_WITH_DNS, 400,
+                             "\"error\":\"bad_dns\"");
 
     /* And nothing else. §12: "a panel moved to a hostile network still holds
      * every secret behind a token that only the screen has shown." */

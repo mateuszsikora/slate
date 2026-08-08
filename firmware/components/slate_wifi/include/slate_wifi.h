@@ -21,6 +21,18 @@
  * know about the other.
  *
  *
+ * IT ALSO OWNS THE ADDRESS
+ *
+ * §9.6: a static configuration is applied as pending and has to prove itself
+ * over ARP before it is kept, because a wrong gateway associates perfectly and
+ * answers nothing — and §9.4's fallback is keyed on the station not connecting,
+ * so nothing else in the firmware would ever notice. The proof and the revert
+ * live here rather than in #55 for the same reason the retry loop does: they are
+ * steps in one attempt, and an attempt that succeeded at layer 2 and failed at
+ * layer 3 is not something a second component can be told about halfway
+ * through.
+ *
+ *
  * THE PROPERTY THIS COMPONENT EXISTS TO GUARANTEE
  *
  * §9.4: "raising the access point must never stop the station trying." The
@@ -65,10 +77,21 @@ typedef enum {
     SLATE_WIFI_ERR_NOT_FOUND,
     SLATE_WIFI_ERR_NO_IP,
     SLATE_WIFI_ERR_AUTH_TIMEOUT,
+
+    /*
+     * The two §9.6 adds, and they only ever arise from a static configuration.
+     * Both describe an association that succeeded — layer 2 is fine and the
+     * passphrase was right — which is why neither is a reason to stop trying
+     * this network. They are set at the moment the trial gives up, and the
+     * addressing has already reverted to DHCP by the time anything reads them.
+     */
+    SLATE_WIFI_ERR_GATEWAY_UNREACHABLE,
+    SLATE_WIFI_ERR_ADDRESS_IN_USE,
 } slate_wifi_error_t;
 
 /**
- * @brief `bad_password`, `not_found`, `no_ip`, `auth_timeout`, or NULL.
+ * @brief `bad_password`, `not_found`, `no_ip`, `auth_timeout`,
+ *        `gateway_unreachable`, `address_in_use`, or NULL.
  *
  * NULL rather than `"none"` for SLATE_WIFI_ERR_NONE, because §4.1 serialises
  * that case as JSON `null` and a sentinel string would have to be special-cased
@@ -107,6 +130,16 @@ typedef struct {
     int rssi;                                  /**< dBm; 0 when not connected */
     slate_wifi_error_t last_error;
     unsigned attempts;                         /**< consecutive failures since the last address */
+
+    /*
+     * §4.1: `ipv4` is "where the station's address came from, and it is reported
+     * rather than echoed". So this is read off the interface — the DHCP client
+     * is either running or it is not — and never from what was asked for. After
+     * §9.6's revert the stored configuration still says `static` and this says
+     * false, and the difference between those two is the whole point of the
+     * field.
+     */
+    bool ipv4_static;
 } slate_wifi_status_t;
 
 void slate_wifi_status(slate_wifi_status_t *out);
@@ -189,9 +222,22 @@ esp_err_t slate_wifi_init(void);
  * drops the browser that submitted the form. The result reaches the person
  * through the screen and through `/info.network`.
  *
- * `password` may be NULL or empty for an open network.
+ * `password == NULL` keeps the stored passphrase when `ssid` is unchanged;
+ * for a different SSID it means an open network. An explicit empty string
+ * always selects an open network. This distinction lets the setup page correct
+ * a static address without asking for a secret the API deliberately cannot
+ * return.
+ *
+ * `ipv4` may be NULL for DHCP. A static one is applied as *pending* whatever
+ * state the caller put in it (§9.6: "the trial covers only a configuration that
+ * has just been submitted"), because this function is only ever reached from
+ * `POST /wifi` and everything that arrives through it has just been submitted
+ * by definition. Confirming it is the state machine's job and takes an ARP
+ * exchange this function does not wait for, for the same reason it does not
+ * wait for the association.
  */
-esp_err_t slate_wifi_connect(const char *ssid, const char *password);
+esp_err_t slate_wifi_connect(const char *ssid, const char *password,
+                             const slate_ipv4_config_t *ipv4);
 
 /**
  * @brief Forget the credentials and disconnect — the primitive under

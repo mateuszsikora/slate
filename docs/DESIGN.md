@@ -213,12 +213,24 @@ Network state appears in `/info` as well as `/status`, because a browser that ha
 
 ```json
 {"network": {"mode": "ap", "ssid": "slate-a1b2c3", "ip": "192.168.4.1", "sta_ssid": null,
-             "ipv4": {"mode": "dhcp"}, "last_error": "bad_password"}}
+             "ipv4": {"mode": "dhcp", "static": null}, "last_error": "bad_password"}}
 ```
 
 `mode` is `sta` or `ap`; `ssid` is the network the device is currently on or offering; `sta_ssid` is the configured station network, which exists even while the access point is up. `last_error` is the reason the station is not connected, and it is the same string the setup screen prints — one vocabulary, so a report from the panel and a report from the API cannot disagree.
 
-`ipv4` is where the station's address came from, and it is reported rather than echoed: after a static configuration fails and the device falls back (section 9.6) the mode here is `dhcp`, because that is what the address on the screen actually is. A field that repeated the request instead would make the setup page show a number meaning two different things.
+`ipv4.mode` is where the station's address came from, and it is reported rather than echoed: after a static configuration fails and the device falls back (section 9.6) the mode here is `dhcp`, because that is what the address on the screen actually is. A field that repeated the request instead would make the setup page show a number meaning two different things.
+
+`ipv4.static` is the other half of that, and it is the stored configuration rather than the live one — what was asked for, and what became of it. It is `null` on a panel that has never been given one:
+
+```json
+{"ipv4": {"mode": "dhcp",
+          "static": {"state": "gateway_unreachable", "address": "192.168.1.42/24",
+                     "gateway": "192.168.1.1", "dns": ["192.168.1.1"]}}}
+```
+
+`state` is `pending`, `confirmed`, `gateway_unreachable` or `address_in_use` — section 9.6's trial, before and after. The last two are the case the two fields exist to describe together: the mode says `dhcp` because that is the address the panel is answering on, and `static` says what was typed, so the setup page can put it back in the form with the reason above it. A page that could see only the mode would have nothing to pre-fill and would be asking somebody to retype an address they have already typed once.
+
+`address` carries its prefix, in the same CIDR form `POST /wifi` accepts, so what comes out of this endpoint can be sent straight back into that one.
 
 The same object is what `POST /wifi` accepts:
 
@@ -230,9 +242,19 @@ The same object is what `POST /wifi` accepts:
           "gateway": "192.168.1.1", "dns": ["192.168.1.1"]}}
 ```
 
-An absent `ipv4` means `dhcp`. That default is what makes the field addable without a version — section 3.1's rule that unknown fields are ignored points the same way for a client written against a firmware that predates it — and it is why the shape is settled here rather than when the feature is built. M1 accepts `dhcp` and refuses `static` with a named error, for the reason section 9.6 gives.
+An absent or `null` `password` preserves the stored passphrase only when `ssid`
+is unchanged. That is the recovery path: the setup page can correct a failed
+static address without receiving or asking for the secret that remains in NVS.
+For a different SSID there is no matching secret to preserve, so an absent
+password means an open network. An explicit empty string always means open and
+erases the stored passphrase, including when a router keeps its SSID while its
+security changes.
 
-`POST /wifi` answers `202`, because the status has to say what the body cannot: the credentials are stored and are being applied, and section 9.3 is why the outcome is not knowable here. Its refusals are `400` unless noted: `empty_body`, `invalid_json`, `truncated`, `too_large` (`413`), `ssid_required`, `ssid_too_long`, `password_too_long`, `bad_ipv4`, `bad_ipv4_mode`, `bad_address`, `bad_gateway`, `bad_dns`, `static_unsupported`, and `store_failed` (`500`). The addressing is checked for coherence before the mode is refused, so a typed gateway that is on the wrong subnet is reported as `bad_gateway` rather than disappearing behind `static_unsupported` — the validation exists in M1 precisely so that it runs before the feature does.
+An absent `ipv4` means `dhcp`. That default is what makes the field addable without a version — section 3.1's rule that unknown fields are ignored points the same way for a client written against a firmware that predates it. A request that says `dhcp` is a request to *stop* using a stored static address, not merely one that declines to set one: the stored configuration is erased, which is what makes the setup page's addressing control able to undo itself.
+
+A static configuration submitted here is always on trial, whatever state a previous one reached. Section 9.6's stickiness is a property of a configuration that has proved itself, and something that has just been typed has not.
+
+`POST /wifi` answers `202`, because the status has to say what the body cannot: the credentials are stored and are being applied, and section 9.3 is why the outcome is not knowable here. With a static address the gap is wider than it looks — the `202` says the configuration is stored, and section 9.6 may have reverted it fifteen seconds later. Its refusals are `400` unless noted: `empty_body`, `invalid_json`, `truncated`, `too_large` (`413`), `ssid_required`, `ssid_too_long`, `password_too_long`, `bad_ipv4`, `bad_ipv4_mode`, `bad_address`, `bad_gateway`, `bad_dns`, and `store_failed` (`500`). The addressing is validated whichever mode is asked for, so an address sent alongside `"dhcp"` is refused rather than quietly ignored.
 
 A gateway must be a different host on the address's subnet. The subnet's network and broadcast addresses, and the panel's own address, are refused as `bad_gateway`: all three are valid dotted quads, but none can answer the ARP proof section 9.6 requires.
 
@@ -618,7 +640,11 @@ So the device proves the configuration before it keeps it, the way network equip
 
 The trial covers only a configuration that has just been submitted. Once confirmed, a static address is sticky: a router that is down at some later boot is an ordinary retry. Discarding a working address because of a five-minute outage would be a worse bug than the one this section prevents.
 
-The contract is M1 and the implementation is M7, alongside the recovery paths of section 9.5 that stand behind it. Until the 10-second press and `POST /factory_reset` exist there is no rescue from a bad static address that does not go through the router, so M1 accepts the field and refuses the mode.
+The contract is M1 and the implementation is M7, alongside the recovery paths of section 9.5 that stand behind it.
+
+One deviation from RFC 5227, forced by what lwIP exposes and recorded here because it is a real difference. The RFC probes with a sender address of `0.0.0.0` *before* claiming the address; `etharp_request()` always sends the interface's own address as the sender, and `etharp_input()` caches nothing at all while the interface has none, so an answer to such a probe cannot be seen from the application. What the firmware does instead is section 2.4's ongoing detection: claim the address, announce it, and watch for somebody answering for it. The panel therefore holds a possibly-duplicate address for the second or so the check takes — the same exposure a host defending its address already has, and bounded by a revert that is written anyway.
+
+Its other limit is worth stating rather than discovering: an access point doing proxy ARP answers for addresses it does not own, and a free address on such a network reads as `address_in_use`. The panel is still reachable when that happens — it reverts to DHCP and says why — so the failure mode is a refusal to use a static address, not a panel that has gone quiet.
 
 ## 10. Editor
 
