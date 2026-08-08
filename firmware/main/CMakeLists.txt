@@ -1,8 +1,8 @@
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES slate_api slate_ota slate_setup slate_store slate_wifi slate_time app_update
-             esp_system esp_event
+    REQUIRES slate_api slate_coredump slate_ota slate_setup slate_store slate_wifi slate_time
+             app_update esp_system esp_event
 )
 
 #
@@ -18,6 +18,12 @@ idf_component_register(
 #                              the running image is pending verification. OTA
 #                              this build to prove unattended rollback; a serial
 #                              flash or the restored image does not panic.
+#   -DSLATE_COREDUMP_SELFTEST=1
+#                              panic at the end of startup, but only when the
+#                              coredump partition is empty. §11.3's forced crash:
+#                              OTA this build and the panel writes a dump, rolls
+#                              back to the previous slot, and serves the dump
+#                              from there. Erasing the partition re-arms it.
 #
 #   -DSLATE_SETUP_AP_PASSWORD='"..."'  §9.2's optional WPA2 passphrase for the
 #                                      setup access point, which lives in NVS and
@@ -35,7 +41,7 @@ idf_component_register(
 # `POST /wifi` and the setup page are what M1 exists to replace that with.
 #
 foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_OTA_ROLLBACK_SELFTEST
-             SLATE_SETUP_AP_PASSWORD SLATE_TIMEZONE)
+             SLATE_COREDUMP_SELFTEST SLATE_SETUP_AP_PASSWORD SLATE_TIMEZONE)
     if(DEFINED ${knob})
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${knob}=${${knob}})
     endif()
