@@ -37,6 +37,13 @@ typedef enum {
      * GET /wifi/scan and POST /wifi; #55 selects it for those handlers.
      */
     SLATE_API_AUTH_SETUP_AP,
+
+    /**
+     * The HTTP upgrade is public and the device token is required in the first
+     * WebSocket text frame (§4.2). Registration is restricted to GET /ws in the
+     * same way the two policies above are restricted to their exact routes.
+     */
+    SLATE_API_AUTH_WS_FIRST_FRAME,
 } slate_api_auth_t;
 
 /** @brief Start the HTTP server and register GET /info and GET /status. */

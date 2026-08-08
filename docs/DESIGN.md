@@ -311,12 +311,25 @@ A transfer that stops part-way is the one outcome with no error document, becaus
 
 ### 4.2 WebSocket `/api/v1/ws`
 
-Event channel for the editor and for remote diagnostics. Token sent in the first frame.
+Event channel for the editor and for remote diagnostics. The HTTP upgrade does not carry a
+credential: putting the device token in the URL would leave it in browser history and access
+logs, while requiring an `Authorization` header would exclude the browser WebSocket API. The
+client therefore authenticates with its first text frame, within five seconds of the upgrade:
+
+```json
+{"type": "auth", "token": "<32-character device token>"}
+```
+
+Success is `{"type":"auth_ok"}` followed by the retained log backlog and a current `status`
+frame. A malformed first frame or a wrong token receives `{"type":"auth_invalid"}` and a
+WebSocket policy-violation close (1008). The same close is sent if no first frame arrives within
+five seconds. No other application frame is accepted before `auth_ok`.
 
 Device → client:
 
 ```json
-{"type": "status",   "ha": "connected", "wifi": -54, "heap_free": 142000}
+{"type": "status",   "ha": "connected", "wifi": -54, "heap_free": 142000,
+                       "lvgl_heap_free": 2088632, "lvgl_frag_pct": 1}
 {"type": "log",      "level": "warn", "msg": "entity light.x unavailable"}
 {"type": "reloaded", "schema": 1, "tiles": 7}
 ```
@@ -328,7 +341,10 @@ Client → device:
 {"type": "mode", "mode": "edit"}
 ```
 
-Heartbeat every 15 s. No ping for 60 s while in edit mode returns the device to normal.
+The device sends `status` as its heartbeat every 15 s. The client sends the JSON `ping` above;
+WebSocket control ping/pong remains a transport mechanism and has no application semantics.
+No client ping for 60 s while in edit mode returns the device to normal. Missing pings do not
+disconnect a diagnostics client that is otherwise still connected.
 
 ### 4.3 Authentication
 

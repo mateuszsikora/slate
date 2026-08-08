@@ -20,6 +20,7 @@
 #include "lwip/sockets.h"
 
 #include "slate_store.h"
+#include "slate_display.h"
 #include "slate_wifi.h"
 
 static const char *TAG = "api";
@@ -145,6 +146,7 @@ static esp_err_t dispatch(httpd_req_t *req)
     set_common_headers(req);
 
     bool allowed = route->auth == SLATE_API_AUTH_PUBLIC ||
+                   route->auth == SLATE_API_AUTH_WS_FIRST_FRAME ||
                    (route->auth == SLATE_API_AUTH_SETUP_AP && request_is_on_setup_ap(req)) ||
                    bearer_token_matches(req);
     if (!allowed) {
@@ -177,7 +179,7 @@ static esp_err_t dispatch(httpd_req_t *req)
 esp_err_t slate_api_register_uri(const httpd_uri_t *uri, slate_api_auth_t auth)
 {
     if (uri == NULL || uri->uri == NULL || uri->handler == NULL ||
-        auth > SLATE_API_AUTH_SETUP_AP) {
+        auth > SLATE_API_AUTH_WS_FIRST_FRAME) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s_server == NULL) {
@@ -201,6 +203,12 @@ esp_err_t slate_api_register_uri(const httpd_uri_t *uri, slate_api_auth_t auth)
          strcmp(uri->uri, SLATE_API_BASE_PATH "/wifi/scan") == 0) ||
         (uri->method == HTTP_POST && strcmp(uri->uri, SLATE_API_BASE_PATH "/wifi") == 0);
     if (auth == SLATE_API_AUTH_SETUP_AP && !setup_ap_route) {
+        return ESP_ERR_NOT_ALLOWED;
+    }
+
+    bool first_frame_ws_route = uri->method == HTTP_GET && uri->is_websocket &&
+                                strcmp(uri->uri, SLATE_API_BASE_PATH "/ws") == 0;
+    if (auth == SLATE_API_AUTH_WS_FIRST_FRAME && !first_frame_ws_route) {
         return ESP_ERR_NOT_ALLOWED;
     }
 
@@ -492,14 +500,18 @@ static esp_err_t status_handler(httpd_req_t *req)
                                        esp_timer_get_time() / 1000000) != NULL &&
          cJSON_AddNumberToObject(root, "heap_free", esp_get_free_heap_size()) != NULL;
 
-    /* #6 has not created LVGL's allocator yet. The fields land now because
-     * ADR-4 makes their names contract; null says "not available" without
-     * inventing a healthy-looking zero. #6 replaces these with lv_mem_monitor
-     * values once an allocator exists. */
-    ok = ok && cJSON_AddNullToObject(root, "lvgl_heap_free") != NULL &&
-         cJSON_AddNullToObject(root, "lvgl_heap_total") != NULL &&
-         cJSON_AddNullToObject(root, "lvgl_frag_pct") != NULL &&
-         cJSON_AddStringToObject(root, "reset_reason",
+    slate_display_heap_metrics_t lvgl;
+    slate_display_heap_metrics(&lvgl);
+    if (ok && lvgl.available) {
+        ok = cJSON_AddNumberToObject(root, "lvgl_heap_free", lvgl.free_size) != NULL &&
+             cJSON_AddNumberToObject(root, "lvgl_heap_total", lvgl.total_size) != NULL &&
+             cJSON_AddNumberToObject(root, "lvgl_frag_pct", lvgl.frag_pct) != NULL;
+    } else if (ok) {
+        ok = cJSON_AddNullToObject(root, "lvgl_heap_free") != NULL &&
+             cJSON_AddNullToObject(root, "lvgl_heap_total") != NULL &&
+             cJSON_AddNullToObject(root, "lvgl_frag_pct") != NULL;
+    }
+    ok = ok && cJSON_AddStringToObject(root, "reset_reason",
                                  reset_reason_str(esp_reset_reason())) != NULL &&
          cJSON_AddNumberToObject(root, "reboot_count", slate_store_boot_count()) != NULL &&
          cJSON_AddNumberToObject(root, "entity_count", 0) != NULL &&
