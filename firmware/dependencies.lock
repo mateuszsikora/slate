@@ -1,4 +1,28 @@
 dependencies:
+  espressif/esp-lib-utils:
+    component_hash: 9e81fa27e3a8292bed95d91754ebcb8f27f47117328b0b646446f29fc5a847fb
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.1'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.2.3
+  espressif/esp32_io_expander:
+    component_hash: c34d64ac6022fb351dc8e2a24eff5b60884c91fd8c50f96dd7d1b1728fae16d8
+    dependencies:
+    - name: espressif/esp-lib-utils
+      registry_url: https://components.espressif.com
+      require: public
+      version: 0.2.*
+    - name: idf
+      require: private
+      version: '>=5.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.1.1
   idf:
     source:
       type: idf
@@ -13,9 +37,18 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.22.3
+  lvgl/lvgl:
+    component_hash: 184e532558c1c45fefed631f3e235423d22582aafb4630f3e8885c35281a49ae
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 9.5.0
 direct_dependencies:
+- espressif/esp32_io_expander
 - idf
 - joltwallet/littlefs
-manifest_hash: fa39fc7888d15c74a1ebc747759789a8f3638aac3e5107744dcaff9660a4e940
+- lvgl/lvgl
+manifest_hash: 53370507f683fb92f4072bb167d7219e1bbd03522849b5fe7ad55b6ad6d6811d
 target: esp32s3
 version: 2.0.0

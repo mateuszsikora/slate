@@ -91,12 +91,42 @@ CONFIG_ESP_COREDUMP_CHECK_BOOT=n
 # server up as those land. The default 3584 B is not enough headroom for that.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# CONFIG_FREERTOS_HZ is deliberately left alone. The argument for raising it is
-# that LVGL's timer and the §6.2 VSYNC gate resolve in single-digit
-# milliseconds, which the default 100 Hz quantises — and that is a display
-# argument, on display evidence, so it belongs to #6 along with the measurement
-# that justifies it. It is not inherited from the spikes: neither S-2 nor S-3
-# records a tick rate.
+# --- Display and LVGL (design.md §6.1–§6.2, issue #6) ---
+# S-2 measured frame time with these cache settings. The RGB peripheral reads
+# two 800×480 RGB565 framebuffers continuously from PSRAM; the 64-byte line and
+# 64 KiB data cache are the geometry Espressif recommends for that path.
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# The LVGL task waits at most 10 ms between timer passes and synchronises a
+# framebuffer switch to a 26.4 ms panel scan. A 100 Hz RTOS tick turns both into
+# 10 ms steps; S-2 used 1 kHz to keep the scheduler out of the display timing.
+CONFIG_FREERTOS_HZ=1000
+
+# The widget allocator is a fixed 2 MiB pool in PSRAM. firmware/CMakeLists.txt
+# supplies LV_MEM_POOL_ALLOC because LVGL has no Kconfig setting for where that
+# pool is allocated. Keeping the built-in allocator also preserves
+# lv_mem_monitor(), which §4.1 exposes later.
+CONFIG_LV_USE_BUILTIN_MALLOC=y
+CONFIG_LV_MEM_SIZE_KILOBYTES=2048
+CONFIG_LV_USE_ASSERT_MALLOC=y
+CONFIG_LV_COLOR_DEPTH_16=y
+
+# 33 ms is 30.3 Hz and beats visibly against this panel's measured 37.82 Hz.
+# At 10 ms LVGL is ready before each scan; the flush gate makes VSYNC, rather
+# than this timer, decide when the next rendered frame may begin.
+CONFIG_LV_DEF_REFR_PERIOD=10
+
+# #21 owns Slate's real bpp:4 type scale. The bring-up pattern needs one small
+# built-in face only, and cannot depend on generated theme assets that do not
+# exist in the firmware tree yet.
+CONFIG_LV_FONT_MONTSERRAT_14=y
+
+# The firmware consumes LVGL as a runtime, not as an example gallery. These do
+# not survive the linker when unused, but disabling them keeps clean builds from
+# compiling hundreds of irrelevant translation units.
+CONFIG_LV_BUILD_EXAMPLES=n
+CONFIG_LV_BUILD_DEMOS=n
 
 # --- Clock (§6.1) ---
 # The router's own NTP server arrives with the DHCP lease and is preferred over

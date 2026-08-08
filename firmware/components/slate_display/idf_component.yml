@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.5"
+  # The versions S-2 measured and S-3 resolved together.
+  lvgl/lvgl: "9.5.0"
+  # CH422G lives in this package; there is no standalone CH422G component.
+  espressif/esp32_io_expander: "1.1.1"

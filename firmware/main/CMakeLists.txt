@@ -1,8 +1,8 @@
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES slate_api slate_coredump slate_ota slate_setup slate_store slate_wifi slate_time
-             app_update esp_system esp_event
+    REQUIRES slate_api slate_coredump slate_display slate_ota slate_setup slate_store slate_wifi
+             slate_time app_update esp_system esp_event
 )
 
 #
