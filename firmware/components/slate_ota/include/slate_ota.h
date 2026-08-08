@@ -1,9 +1,9 @@
 /*
- * Slate — development OTA (§11.1).
+ * Slate — development OTA and boot health (§11.1, §11.2).
  *
- * design.md §11.1 (the endpoint), §4.1 (the route table), §4.3 and §14 (the
- * token applies to every write, development OTA included), §6.3 (the two
- * application slots this writes between).
+ * design.md §11.1 (the endpoint), §11.2 (rollback), §4.1 (the route table),
+ * §4.3 and §14 (the token applies to every write, development OTA included),
+ * §6.3 (the two application slots this writes between).
  *
  *
  * WHAT THIS COMPONENT IS FOR
@@ -50,13 +50,15 @@
  * what an upload gets while the running image is still unverified.
  *
  *
- * WHAT IT DELIBERATELY DOES NOT DO
+ * BOOT HEALTH BOUNDARY
  *
- * It does not mark the new image valid and it does not enable rollback. §11.2
- * is #12, and it lands as a boot health check in whatever owns the boot, not
- * as a flag flipped by the code that happened to write the image. Until it
- * lands, a firmware that boot-loops still costs a USB cable — which is why
- * §11.2 calls rollback a precondition for the scheme rather than hardening.
+ * With rollback enabled, a newly uploaded image starts in PENDING_VERIFY. A
+ * short-lived task waits for either the station or setup access point to own an
+ * IPv4 address, then makes a real GET /api/v1/info request to that address. A
+ * 200 marks the image valid; no answer within 60 seconds marks it invalid and
+ * reboots into the previous slot. Home Assistant and station connectivity are
+ * deliberately absent from that decision: a reachable setup AP can accept the
+ * next OTA just as the station can.
  *
  * It is not §11.4's release OTA: no manifest, no versioning, no HTTPS, no
  * daily check, no reboot the device decides on by itself.
@@ -64,12 +66,15 @@
  *
  * THREADING
  *
- * slate_ota_init() is called once from app_main, after slate_api_init(). The
- * upload runs on the HTTP server's task and occupies it for the duration, so
- * the rest of the API does not answer while an image is arriving. That is
- * accepted rather than worked around: an upload is tens of seconds of a
- * development cycle, and a second worker would cost more DIRAM than #55 can
- * spare for its access point (§6.2).
+ * slate_ota_init() is called once from app_main, after slate_api_init(), to
+ * register the upload route. slate_ota_start_boot_health() is called separately
+ * after every API and network startup attempt, so an HTTP startup failure cannot
+ * accidentally disarm the check whose job is to detect it. Only a pending image
+ * creates the health task. The upload runs on the HTTP server's task and occupies
+ * it for the duration, so the rest of the API does not answer while an image is
+ * arriving. That is accepted rather than worked around: an upload is tens of
+ * seconds of a development cycle, and a second HTTP worker would cost more DIRAM
+ * than #55 can spare for its access point (§6.2).
  *
  * Accepted, but bounded — otherwise "does not answer for a while" is a client
  * away from "does not answer". Two wall-clock deadlines run over the request:
@@ -89,10 +94,18 @@ extern "C" {
 /**
  * @brief Register `POST /api/v1/ota/upload`.
  *
- * Call after slate_api_init(). Returns what the registration returned; there
- * is no state to bring up beyond the route.
+ * Call after slate_api_init().
  */
 esp_err_t slate_ota_init(void);
+
+/**
+ * @brief Start the §11.2 health check when this boot is pending verification.
+ *
+ * Call after the API and network have both attempted startup. The 60-second
+ * deadline is measured from boot, not from this call. A normal or already-valid
+ * image returns ESP_OK without creating a task.
+ */
+esp_err_t slate_ota_start_boot_health(void);
 
 #ifdef __cplusplus
 }

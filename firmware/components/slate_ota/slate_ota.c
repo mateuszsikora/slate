@@ -1,23 +1,32 @@
 /*
- * Slate — development OTA. See include/slate_ota.h for what this is and is not.
+ * Slate — development OTA and boot health. See include/slate_ota.h for the
+ * integration contract.
  *
- * design.md §11.1, §4.1, §4.3.
+ * design.md §11.1, §11.2, §4.1, §4.3.
  */
 
 #include "slate_ota.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "lwip/inet.h"
+#include "lwip/sockets.h"
 
 #include "slate_api.h"
 
@@ -61,6 +70,321 @@ _Static_assert(CHUNK_BYTES >= IMAGE_PREFIX_BYTES,
  */
 #define UPLOAD_STALL_US  (30 * 1000000LL)
 #define UPLOAD_BUDGET_US (300 * 1000000LL)
+
+/* --- Boot health -------------------------------------------------------- */
+
+/* Measured from boot rather than from task creation: §11.2 gives the whole
+ * image 60 seconds, not 60 seconds after whichever initializer reached it. */
+#define HEALTH_DEADLINE_US   (60 * 1000000LL)
+#define HEALTH_RETRY_MS      250
+#define HEALTH_IO_TIMEOUT_MS 1000
+#define HEALTH_TASK_STACK    4096
+#define HEALTH_TASK_PRIORITY 4
+
+typedef struct {
+    bool found;
+    esp_ip4_addr_t address;
+    char ifkey[16];
+} health_endpoint_t;
+
+/* esp_netif pointers cannot safely escape the TCP/IP task: the setup component
+ * destroys WIFI_AP_DEF as soon as the station returns. Copy the address and key
+ * while iteration is serialised with that destruction. STA wins while both are
+ * briefly up; AP remains the fallback when the router is absent. */
+static esp_err_t snapshot_health_endpoint(void *ctx)
+{
+    health_endpoint_t *endpoint = ctx;
+    health_endpoint_t ap = {0};
+
+    for (esp_netif_t *netif = esp_netif_next_unsafe(NULL); netif != NULL;
+        netif = esp_netif_next_unsafe(netif)) {
+        const char *key = esp_netif_get_ifkey(netif);
+        if (key == NULL) {
+            continue;
+        }
+        bool station = strcmp(key, "WIFI_STA_DEF") == 0;
+        bool setup_ap = strcmp(key, "WIFI_AP_DEF") == 0;
+        if ((!station && !setup_ap) || !esp_netif_is_netif_up(netif)) {
+            continue;
+        }
+
+        esp_netif_ip_info_t ip = {0};
+        if (esp_netif_get_ip_info(netif, &ip) != ESP_OK || ip.ip.addr == 0) {
+            continue;
+        }
+
+        health_endpoint_t candidate = {
+            .found = true,
+            .address = ip.ip,
+        };
+        strlcpy(candidate.ifkey, key, sizeof(candidate.ifkey));
+        if (station) {
+            *endpoint = candidate;
+            return ESP_OK;
+        }
+        ap = candidate;
+    }
+
+    if (ap.found) {
+        *endpoint = ap;
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+static bool wait_for_socket(int fd, bool writable, int64_t deadline_us)
+{
+    while (true) {
+        int64_t remaining_us = deadline_us - esp_timer_get_time();
+        if (remaining_us <= 0) {
+            return false;
+        }
+
+        fd_set read_fds;
+        fd_set write_fds;
+        FD_ZERO(&read_fds);
+        FD_ZERO(&write_fds);
+        if (writable) {
+            FD_SET(fd, &write_fds);
+        } else {
+            FD_SET(fd, &read_fds);
+        }
+        struct timeval timeout = {
+            .tv_sec = remaining_us / 1000000,
+            .tv_usec = remaining_us % 1000000,
+        };
+
+        int ready = select(fd + 1, writable ? NULL : &read_fds,
+                           writable ? &write_fds : NULL, NULL, &timeout);
+        if (ready > 0) {
+            return true;
+        }
+        if (ready == 0 || errno != EINTR) {
+            return false;
+        }
+    }
+}
+
+static bool connect_until(int fd, const struct sockaddr_in *address, int64_t deadline_us)
+{
+    if (connect(fd, (const struct sockaddr *) address, sizeof(*address)) == 0) {
+        return true;
+    }
+    if (errno != EINPROGRESS && errno != EWOULDBLOCK) {
+        return false;
+    }
+    if (!wait_for_socket(fd, true, deadline_us)) {
+        return false;
+    }
+
+    int socket_error = 0;
+    socklen_t error_len = sizeof(socket_error);
+    return getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_len) == 0 &&
+           socket_error == 0;
+}
+
+static bool send_all_until(int fd, const char *data, size_t len, int64_t deadline_us)
+{
+    while (len > 0) {
+        int sent = send(fd, data, len, 0);
+        if (sent > 0) {
+            data += sent;
+            len -= sent;
+            continue;
+        }
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
+            wait_for_socket(fd, true, deadline_us)) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool receive_response_until(int fd, int64_t deadline_us)
+{
+    char headers[512] = {0};
+    size_t headers_used = 0;
+    size_t header_bytes = 0;
+    size_t content_length = 0;
+    size_t total_received = 0;
+    bool headers_complete = false;
+    char response[256];
+
+    while (esp_timer_get_time() < deadline_us) {
+        int received = recv(fd, response, sizeof(response), 0);
+        if (received > 0) {
+            total_received += received;
+            if (!headers_complete) {
+                size_t copy = sizeof(headers) - headers_used - 1;
+                if (copy > (size_t) received) {
+                    copy = received;
+                }
+                memcpy(headers + headers_used, response, copy);
+                headers_used += copy;
+
+                char *headers_end = strstr(headers, "\r\n\r\n");
+                if (headers_end == NULL) {
+                    if (copy < (size_t) received || headers_used == sizeof(headers) - 1) {
+                        return false;
+                    }
+                    continue;
+                }
+
+                bool status_ok = strncmp(headers, "HTTP/1.0 200 ", 13) == 0 ||
+                                 strncmp(headers, "HTTP/1.1 200 ", 13) == 0;
+                char *length_value = strstr(headers, "\r\nContent-Length: ");
+                if (!status_ok || length_value == NULL) {
+                    return false;
+                }
+                length_value += sizeof("\r\nContent-Length: ") - 1;
+                char *length_end = NULL;
+                unsigned long long parsed_length = strtoull(length_value, &length_end, 10);
+                if (length_end == length_value || strncmp(length_end, "\r\n", 2) != 0 ||
+                    parsed_length > SIZE_MAX) {
+                    return false;
+                }
+
+                header_bytes = headers_end + 4 - headers;
+                content_length = parsed_length;
+                headers_complete = true;
+            }
+            if (headers_complete && total_received - header_bytes >= content_length) {
+                return true;
+            }
+            continue;
+        }
+        if (received == 0) {
+            return headers_complete && total_received - header_bytes >= content_length;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if ((errno == EAGAIN || errno == EWOULDBLOCK) &&
+            wait_for_socket(fd, false, deadline_us)) {
+            continue;
+        }
+        return false;
+    }
+    return false;
+}
+
+static bool make_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return false;
+    }
+    return true;
+}
+
+/* A flag that slate_api_init() returned would prove registration, not that the
+ * HTTP task can answer. This traverses lwIP and the real public route on the
+ * address a second machine would use, which is exactly §11.2's criterion. */
+static bool info_answers(const health_endpoint_t *endpoint, int64_t deadline_us)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (fd < 0) {
+        return false;
+    }
+
+    struct sockaddr_in address = {
+        .sin_family = AF_INET,
+        .sin_port = htons(80),
+        .sin_addr.s_addr = endpoint->address.addr,
+    };
+    static const char REQUEST[] =
+        "GET " SLATE_API_BASE_PATH "/info HTTP/1.0\r\n"
+        "Host: slate\r\nConnection: close\r\n\r\n";
+
+    bool complete = make_nonblocking(fd) && connect_until(fd, &address, deadline_us) &&
+                    send_all_until(fd, REQUEST, sizeof(REQUEST) - 1, deadline_us) &&
+                    receive_response_until(fd, deadline_us);
+    close(fd);
+
+    /* Drain the whole response, but never past the attempt's absolute deadline.
+     * Reading only the status would
+     * make the server's send of the JSON body fail with ECONNRESET even though
+     * the health check passed — noise that looks like a sick API in the exact
+     * log this check exists to make trustworthy. Reading the announced body
+     * length also proves the one HTTP task finished /info and is free to accept
+     * the next OTA, without depending on the server closing a persistent TCP
+     * connection. */
+    return complete;
+}
+
+static void rollback_now(void)
+{
+    ESP_LOGE(TAG, "boot health deadline expired — rolling back");
+    esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+
+    /* Success never returns. If marking failed, a reset while PENDING_VERIFY is
+     * still the bootloader's automatic rollback path; do not leave the bad
+     * image running indefinitely merely because the explicit path failed. */
+    ESP_LOGE(TAG, "marking the image invalid failed: %s — restarting pending image",
+             esp_err_to_name(err));
+    esp_restart();
+}
+
+static void boot_health_task(void *arg)
+{
+    (void) arg;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    ESP_LOGW(TAG, "%s is pending verification; GET /info must answer within 60 s",
+             running->label);
+
+    while (esp_timer_get_time() < HEALTH_DEADLINE_US) {
+        health_endpoint_t endpoint = {0};
+        int64_t attempt_deadline = esp_timer_get_time() + HEALTH_IO_TIMEOUT_MS * 1000LL;
+        if (attempt_deadline > HEALTH_DEADLINE_US) {
+            attempt_deadline = HEALTH_DEADLINE_US;
+        }
+        if (esp_netif_tcpip_exec(snapshot_health_endpoint, &endpoint) == ESP_OK &&
+            info_answers(&endpoint, attempt_deadline) &&
+            esp_timer_get_time() < HEALTH_DEADLINE_US) {
+            int64_t elapsed_ms = esp_timer_get_time() / 1000;
+            esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+            if (err == ESP_OK) {
+                char address[16];
+                esp_ip4addr_ntoa(&endpoint.address, address, sizeof(address));
+                ESP_LOGI(TAG, "boot health passed on %s at %s after %" PRId64
+                              " ms — %s is valid",
+                         endpoint.ifkey, address, elapsed_ms, running->label);
+                vTaskDelete(NULL);
+                return;
+            }
+            ESP_LOGE(TAG, "marking the healthy image valid: %s", esp_err_to_name(err));
+        }
+        vTaskDelay(pdMS_TO_TICKS(HEALTH_RETRY_MS));
+    }
+
+    rollback_now();
+}
+
+esp_err_t slate_ota_start_boot_health(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    esp_err_t err = esp_ota_get_state_partition(running, &state);
+    if (err == ESP_ERR_NOT_FOUND || (err == ESP_OK && state != ESP_OTA_IMG_PENDING_VERIFY)) {
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "reading OTA state for %s: %s", running->label, esp_err_to_name(err));
+        return err;
+    }
+
+    if (xTaskCreate(boot_health_task, "ota_health", HEALTH_TASK_STACK, NULL,
+                    HEALTH_TASK_PRIORITY, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "no memory for the boot health task");
+        rollback_now();
+        return ESP_ERR_NO_MEM; /* rollback_now does not return on a working platform */
+    }
+    return ESP_OK;
+}
 
 /* --- Reboot ------------------------------------------------------------- */
 

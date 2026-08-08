@@ -2,10 +2,8 @@
  * Slate — firmware entry point.
  *
  * At this point in M1 the application is the store, the WiFi station and the
- * clock, the HTTP API, development OTA and the setup access point. The display
- * (#6) and OTA rollback (#12) each attach here as they land, in that order,
- * because each one depends on the one before it having somewhere to keep its
- * state.
+ * clock, the HTTP API, development OTA with rollback and the setup access
+ * point. The display (#6) attaches here when it lands.
  *
  * The boot report below is the only user interface the firmware currently has.
  * It exists to answer the questions the landed issues are judged on — is the
@@ -24,6 +22,7 @@
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
 #include "esp_system.h"
 
 #include "slate_api.h"
@@ -34,6 +33,27 @@
 #include "slate_wifi.h"
 
 static const char *TAG = "slate";
+
+#ifdef SLATE_OTA_ROLLBACK_SELFTEST
+/*
+ * The honest negative control for §11.2: fail before the HTTP server or either
+ * network interface exists, so a rollback cannot be credited to a convenient
+ * network outage. Restricted to PENDING_VERIFY so a serial flash of the test
+ * build does not create an unrecoverable boot loop.
+ */
+static void ota_rollback_selftest(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    esp_err_t err = esp_ota_get_state_partition(running, &state);
+    if (err == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY) {
+        ESP_LOGE(TAG, "rollback selftest: panicking before API and network startup");
+        abort();
+    }
+    ESP_LOGW(TAG, "rollback selftest: %s is not pending verification; continuing",
+             running->label);
+}
+#endif
 
 #ifdef SLATE_STORE_SELFTEST
 static int s_failures;
@@ -286,6 +306,10 @@ static void start_api(void)
 
 void app_main(void)
 {
+#ifdef SLATE_OTA_ROLLBACK_SELFTEST
+    ota_rollback_selftest();
+#endif
+
     /*
      * Not ESP_ERROR_CHECK. §9 says there is no combination of circumstances in
      * which a powered panel is unreachable, and aborting here would reboot into
@@ -338,4 +362,12 @@ void app_main(void)
      * station has an opinion about whether one is needed. */
     start_api();
     start_network();
+
+    /* Keep this independent of both initializers' return values. A pending
+     * image whose HTTP server or radio failed to start is exactly the image the
+     * 60-second health deadline must reject. */
+    esp_err_t health_err = slate_ota_start_boot_health();
+    if (health_err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA boot health unavailable: %s", esp_err_to_name(health_err));
+    }
 }

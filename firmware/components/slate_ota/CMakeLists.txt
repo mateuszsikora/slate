@@ -11,5 +11,6 @@
 idf_component_register(
     SRCS "slate_ota.c"
     INCLUDE_DIRS "include"
-    REQUIRES slate_api app_update bootloader_support esp_app_format esp_partition esp_timer json
+    REQUIRES slate_api app_update bootloader_support esp_app_format esp_netif esp_partition
+             esp_system esp_timer freertos json lwip
 )
