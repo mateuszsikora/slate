@@ -3,7 +3,7 @@
  *
  * At this point in M1 the application is the store, the WiFi station and the
  * clock, the HTTP API, development OTA with rollback, core dump retrieval and
- * the setup access point. The display (#6) attaches here when it lands.
+ * the setup access point and the display.
  *
  * The boot report below is the only user interface the firmware currently has.
  * It exists to answer the questions the landed issues are judged on — is the
@@ -27,6 +27,7 @@
 
 #include "slate_api.h"
 #include "slate_coredump.h"
+#include "slate_display.h"
 #include "slate_ota.h"
 #include "slate_setup.h"
 #include "slate_store.h"
@@ -434,6 +435,18 @@ static void start_api(void)
     }
 }
 
+static void start_display(void)
+{
+    /* A display allocation or bus failure is not made recoverable by rebooting
+     * into the same failure. Keep the API and setup access point alive so the
+     * next firmware can still arrive without a cable; the backlight remains
+     * off and the exact error stays in the boot log. */
+    esp_err_t err = slate_display_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "display degraded: %s — continuing headless", esp_err_to_name(err));
+    }
+}
+
 void app_main(void)
 {
 #ifdef SLATE_OTA_ROLLBACK_SELFTEST
@@ -493,6 +506,12 @@ void app_main(void)
 #endif
 
     provision_setup_ap();
+
+    /* Before the radio, so the task and its queue are already present when
+     * slate_wifi begins posting the state changes that later screens consume.
+     * S-2's done-when load is still real: the test pattern keeps animating
+     * while the station or setup access point runs underneath it. */
+    start_display();
 
     /* The API and the setup portal come up before the radio, so that the setup
      * access point has a page to serve and a subscriber in place by the time the
