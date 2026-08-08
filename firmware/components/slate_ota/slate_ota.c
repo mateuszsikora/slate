@@ -1,7 +1,8 @@
 /*
- * Slate — development OTA. See include/slate_ota.h for what this is and is not.
+ * Slate — development OTA and boot health. See include/slate_ota.h for the
+ * integration contract.
  *
- * design.md §11.1, §4.1, §4.3.
+ * design.md §11.1, §11.2, §4.1, §4.3.
  */
 
 #include "slate_ota.h"
@@ -10,14 +11,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "esp_app_desc.h"
 #include "esp_app_format.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "lwip/inet.h"
+#include "lwip/sockets.h"
 
 #include "slate_api.h"
 
@@ -61,6 +68,198 @@ _Static_assert(CHUNK_BYTES >= IMAGE_PREFIX_BYTES,
  */
 #define UPLOAD_STALL_US  (30 * 1000000LL)
 #define UPLOAD_BUDGET_US (300 * 1000000LL)
+
+/* --- Boot health -------------------------------------------------------- */
+
+/* Measured from boot rather than from task creation: §11.2 gives the whole
+ * image 60 seconds, not 60 seconds after whichever initializer reached it. */
+#define HEALTH_DEADLINE_US   (60 * 1000000LL)
+#define HEALTH_RETRY_MS      250
+#define HEALTH_IO_TIMEOUT_MS 1000
+#define HEALTH_TASK_STACK    4096
+#define HEALTH_TASK_PRIORITY 4
+
+typedef struct {
+    bool found;
+    esp_ip4_addr_t address;
+    char ifkey[16];
+} health_endpoint_t;
+
+/* esp_netif pointers cannot safely escape the TCP/IP task: the setup component
+ * destroys WIFI_AP_DEF as soon as the station returns. Copy the address and key
+ * while iteration is serialised with that destruction. STA wins while both are
+ * briefly up; AP remains the fallback when the router is absent. */
+static esp_err_t snapshot_health_endpoint(void *ctx)
+{
+    health_endpoint_t *endpoint = ctx;
+    health_endpoint_t ap = {0};
+
+    for (esp_netif_t *netif = esp_netif_next_unsafe(NULL); netif != NULL;
+        netif = esp_netif_next_unsafe(netif)) {
+        const char *key = esp_netif_get_ifkey(netif);
+        if (key == NULL) {
+            continue;
+        }
+        bool station = strcmp(key, "WIFI_STA_DEF") == 0;
+        bool setup_ap = strcmp(key, "WIFI_AP_DEF") == 0;
+        if ((!station && !setup_ap) || !esp_netif_is_netif_up(netif)) {
+            continue;
+        }
+
+        esp_netif_ip_info_t ip = {0};
+        if (esp_netif_get_ip_info(netif, &ip) != ESP_OK || ip.ip.addr == 0) {
+            continue;
+        }
+
+        health_endpoint_t candidate = {
+            .found = true,
+            .address = ip.ip,
+        };
+        strlcpy(candidate.ifkey, key, sizeof(candidate.ifkey));
+        if (station) {
+            *endpoint = candidate;
+            return ESP_OK;
+        }
+        ap = candidate;
+    }
+
+    if (ap.found) {
+        *endpoint = ap;
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
+static bool send_all(int fd, const char *data, size_t len)
+{
+    while (len > 0) {
+        int sent = send(fd, data, len, 0);
+        if (sent <= 0) {
+            return false;
+        }
+        data += sent;
+        len -= sent;
+    }
+    return true;
+}
+
+/* A flag that slate_api_init() returned would prove registration, not that the
+ * HTTP task can answer. This traverses lwIP and the real public route on the
+ * address a second machine would use, which is exactly §11.2's criterion. */
+static bool info_answers(const health_endpoint_t *endpoint)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (fd < 0) {
+        return false;
+    }
+
+    struct timeval timeout = {
+        .tv_sec = HEALTH_IO_TIMEOUT_MS / 1000,
+        .tv_usec = (HEALTH_IO_TIMEOUT_MS % 1000) * 1000,
+    };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    struct sockaddr_in address = {
+        .sin_family = AF_INET,
+        .sin_port = htons(80),
+        .sin_addr.s_addr = endpoint->address.addr,
+    };
+    static const char REQUEST[] =
+        "GET " SLATE_API_BASE_PATH "/info HTTP/1.0\r\n"
+        "Host: slate\r\nConnection: close\r\n\r\n";
+
+    char status_line[64] = {0};
+    bool ok = connect(fd, (struct sockaddr *) &address, sizeof(address)) == 0 &&
+              send_all(fd, REQUEST, sizeof(REQUEST) - 1);
+    size_t status_used = 0;
+    char response[256];
+    int received = -1;
+    while (ok && (received = recv(fd, response, sizeof(response), 0)) > 0) {
+        size_t copy = sizeof(status_line) - status_used - 1;
+        if (copy > (size_t) received) {
+            copy = received;
+        }
+        if (copy > 0) {
+            memcpy(status_line + status_used, response, copy);
+            status_used += copy;
+        }
+    }
+    close(fd);
+
+    /* Drain the whole response before closing. Reading only the status would
+     * make the server's send of the JSON body fail with ECONNRESET even though
+     * the health check passed — noise that looks like a sick API in the exact
+     * log this check exists to make trustworthy. */
+    return status_used > 0 &&
+           (strncmp(status_line, "HTTP/1.0 200 ", 13) == 0 ||
+            strncmp(status_line, "HTTP/1.1 200 ", 13) == 0);
+}
+
+static void rollback_now(void)
+{
+    ESP_LOGE(TAG, "boot health deadline expired — rolling back");
+    esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+
+    /* Success never returns. If marking failed, a reset while PENDING_VERIFY is
+     * still the bootloader's automatic rollback path; do not leave the bad
+     * image running indefinitely merely because the explicit path failed. */
+    ESP_LOGE(TAG, "marking the image invalid failed: %s — restarting pending image",
+             esp_err_to_name(err));
+    esp_restart();
+}
+
+static void boot_health_task(void *arg)
+{
+    (void) arg;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    ESP_LOGW(TAG, "%s is pending verification; GET /info must answer within 60 s",
+             running->label);
+
+    while (esp_timer_get_time() < HEALTH_DEADLINE_US) {
+        health_endpoint_t endpoint = {0};
+        if (esp_netif_tcpip_exec(snapshot_health_endpoint, &endpoint) == ESP_OK &&
+            info_answers(&endpoint) && esp_timer_get_time() < HEALTH_DEADLINE_US) {
+            int64_t elapsed_ms = esp_timer_get_time() / 1000;
+            esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+            if (err == ESP_OK) {
+                char address[16];
+                esp_ip4addr_ntoa(&endpoint.address, address, sizeof(address));
+                ESP_LOGI(TAG, "boot health passed on %s at %s after %" PRId64
+                              " ms — %s is valid",
+                         endpoint.ifkey, address, elapsed_ms, running->label);
+                vTaskDelete(NULL);
+                return;
+            }
+            ESP_LOGE(TAG, "marking the healthy image valid: %s", esp_err_to_name(err));
+        }
+        vTaskDelay(pdMS_TO_TICKS(HEALTH_RETRY_MS));
+    }
+
+    rollback_now();
+}
+
+esp_err_t slate_ota_start_boot_health(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    esp_err_t err = esp_ota_get_state_partition(running, &state);
+    if (err == ESP_ERR_NOT_FOUND || (err == ESP_OK && state != ESP_OTA_IMG_PENDING_VERIFY)) {
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "reading OTA state for %s: %s", running->label, esp_err_to_name(err));
+        return err;
+    }
+
+    if (xTaskCreate(boot_health_task, "ota_health", HEALTH_TASK_STACK, NULL,
+                    HEALTH_TASK_PRIORITY, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "no memory for the boot health task");
+        rollback_now();
+        return ESP_ERR_NO_MEM; /* rollback_now does not return on a working platform */
+    }
+    return ESP_OK;
+}
 
 /* --- Reboot ------------------------------------------------------------- */
 
