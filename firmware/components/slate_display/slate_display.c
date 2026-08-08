@@ -86,7 +86,10 @@ static SemaphoreHandle_t s_vsync;
 static TaskHandle_t s_task;
 static esp_lcd_panel_handle_t s_panel;
 static esp_io_expander_handle_t s_expander;
+static void *s_lvgl_pool;
 static esp_err_t s_init_result = ESP_ERR_INVALID_STATE;
+static bool s_i2c_installed;
+static bool s_lvgl_initialized;
 static bool s_ready;
 static bool s_backlight_on;
 
@@ -99,9 +102,8 @@ static volatile uint32_t s_vsync_count;
 
 void *slate_display_lvgl_pool_alloc(size_t size)
 {
-    void *pool = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    ESP_LOGI(TAG, "LVGL pool %u B at %p in PSRAM", (unsigned) size, pool);
-    return pool;
+    ESP_LOGI(TAG, "LVGL pool %u B at %p in PSRAM", (unsigned) size, s_lvgl_pool);
+    return s_lvgl_pool;
 }
 
 static esp_err_t i2c_init(void)
@@ -118,7 +120,11 @@ static esp_err_t i2c_init(void)
         .master.clk_speed = SLATE_I2C_HZ,
     };
     ESP_RETURN_ON_ERROR(i2c_param_config(SLATE_I2C_PORT, &config), TAG, "I2C config");
-    return i2c_driver_install(SLATE_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
+    esp_err_t err = i2c_driver_install(SLATE_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
+    if (err == ESP_OK) {
+        s_i2c_installed = true;
+    }
+    return err;
 }
 
 static esp_err_t expander_init(void)
@@ -238,25 +244,56 @@ static void backlight_enable(void)
     }
 }
 
+static uint32_t vsync_generation(void)
+{
+    uint32_t generation;
+    portENTER_CRITICAL(&s_vsync_lock);
+    generation = s_vsync_count;
+    portEXIT_CRITICAL(&s_vsync_lock);
+    return generation;
+}
+
+static bool wait_for_vsync_after(uint32_t generation)
+{
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(SLATE_DISPLAY_VSYNC_TIMEOUT_MS);
+    const TickType_t started = xTaskGetTickCount();
+
+    /* Remove a wake-up represented by `generation`. If a new VSYNC arrives
+     * between the snapshot and this take, the generation check below still
+     * observes it, so draining the binary semaphore cannot lose the event. */
+    xSemaphoreTake(s_vsync, 0);
+
+    while (vsync_generation() == generation) {
+        const TickType_t elapsed = xTaskGetTickCount() - started;
+        if (elapsed >= timeout_ticks ||
+            xSemaphoreTake(s_vsync, timeout_ticks - elapsed) != pdTRUE) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
     (void) area;
 
     if (lv_display_flush_is_last(display)) {
-        /* A binary semaphore can hold an old VSYNC while LVGL is idle. Drain it
-         * before requesting the buffer switch, otherwise the wait could return
-         * for the boundary before the switch rather than the one after it. */
-        xSemaphoreTake(s_vsync, 0);
         esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, 0,
                                                   SLATE_LCD_H_RES, SLATE_LCD_V_RES,
                                                   pixels);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "flush: %s", esp_err_to_name(err));
-        } else if (xSemaphoreTake(s_vsync,
-                                  pdMS_TO_TICKS(SLATE_DISPLAY_VSYNC_TIMEOUT_MS)) != pdTRUE) {
-            ESP_LOGE(TAG, "VSYNC timeout after framebuffer switch");
         } else {
-            backlight_enable();
+            /* Snapshot after draw_bitmap has selected the new framebuffer. A
+             * VSYNC from before that call can never satisfy this generation
+             * wait, including the narrow ISR race that a drain-before-submit
+             * semaphore scheme leaves open. */
+            const uint32_t submitted_generation = vsync_generation();
+            if (!wait_for_vsync_after(submitted_generation)) {
+                ESP_LOGE(TAG, "VSYNC timeout after framebuffer switch");
+            } else {
+                backlight_enable();
+            }
         }
     }
     lv_display_flush_ready(display);
@@ -269,7 +306,16 @@ static uint32_t tick_ms(void)
 
 static esp_err_t lvgl_display_init(void)
 {
+    /* Allocate before lv_init() calls the configured pool hook. A failed 2 MiB
+     * reservation can then degrade to headless operation instead of entering
+     * TLSF with a null pool and aborting the firmware. */
+    s_lvgl_pool = heap_caps_malloc(LV_MEM_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_lvgl_pool) {
+        return ESP_ERR_NO_MEM;
+    }
+
     lv_init();
+    s_lvgl_initialized = true;
 
     lv_display_t *display = lv_display_create(SLATE_LCD_H_RES, SLATE_LCD_V_RES);
     if (!display) {
@@ -291,6 +337,49 @@ static esp_err_t lvgl_display_init(void)
                            SLATE_LCD_FRAME_BYTES, LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_tick_set_cb(tick_ms);
     return ESP_OK;
+}
+
+static void cleanup_error(const char *resource, esp_err_t err)
+{
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "cleanup %s: %s", resource, esp_err_to_name(err));
+    }
+}
+
+static void display_resources_deinit(void)
+{
+    /* The expander must still have its bus while the glass is made dark. */
+    if (s_expander) {
+        cleanup_error("backlight", esp_io_expander_set_level(s_expander, SLATE_EXIO_DISP, 0));
+        s_backlight_on = false;
+    }
+
+    if (s_lvgl_initialized) {
+        lv_deinit();
+        s_lvgl_initialized = false;
+    }
+    if (s_lvgl_pool) {
+        heap_caps_free(s_lvgl_pool);
+        s_lvgl_pool = NULL;
+    }
+
+    /* Deleting the RGB panel stops DMA and removes its ISR before the VSYNC
+     * semaphore can be destroyed by the caller. */
+    if (s_panel) {
+        const esp_lcd_rgb_panel_event_callbacks_t no_callbacks = {0};
+        cleanup_error("RGB callbacks",
+                      esp_lcd_rgb_panel_register_event_callbacks(s_panel, &no_callbacks, NULL));
+        cleanup_error("RGB panel", esp_lcd_panel_del(s_panel));
+        s_panel = NULL;
+    }
+    if (s_expander) {
+        cleanup_error("CH422G", esp_io_expander_del(s_expander));
+        s_expander = NULL;
+    }
+    if (s_i2c_installed) {
+        cleanup_error("I2C", i2c_driver_delete(SLATE_I2C_PORT));
+        s_i2c_installed = false;
+    }
 }
 
 static lv_obj_t *solid_rect(lv_obj_t *parent, int32_t x, int32_t y,
@@ -413,11 +502,11 @@ static void display_task(void *ctx)
         ESP_LOGI(TAG, "display ready: %u B internal DMA-capable, %u B PSRAM free",
                  (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
                  (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    }
-    xSemaphoreGive(s_init_done);
-
-    if (!s_ready) {
+        xSemaphoreGive(s_init_done);
+    } else {
+        display_resources_deinit();
         s_task = NULL;
+        xSemaphoreGive(s_init_done);
         vTaskDelete(NULL);
         return;
     }
@@ -441,6 +530,13 @@ esp_err_t slate_display_init(void)
     if (s_task || s_work_queue || s_ready) {
         return ESP_ERR_INVALID_STATE;
     }
+
+    s_init_result = ESP_ERR_INVALID_STATE;
+    portENTER_CRITICAL(&s_vsync_lock);
+    s_vsync_last_us = 0;
+    s_vsync_period_us = 0;
+    s_vsync_count = 0;
+    portEXIT_CRITICAL(&s_vsync_lock);
 
     s_work_queue = xQueueCreate(SLATE_DISPLAY_QUEUE_LEN, sizeof(slate_display_work_t));
     s_init_done = xSemaphoreCreateBinary();
@@ -477,7 +573,14 @@ esp_err_t slate_display_init(void)
     if (xSemaphoreTake(s_init_done, pdMS_TO_TICKS(SLATE_DISPLAY_INIT_TIMEOUT_MS)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
+
+    vSemaphoreDelete(s_init_done);
+    s_init_done = NULL;
     if (s_init_result != ESP_OK) {
+        vQueueDelete(s_work_queue);
+        vSemaphoreDelete(s_vsync);
+        s_work_queue = NULL;
+        s_vsync = NULL;
         return s_init_result;
     }
 
