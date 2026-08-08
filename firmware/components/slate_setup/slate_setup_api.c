@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "cJSON.h"
 #include "esp_log.h"
@@ -294,6 +295,17 @@ static bool optional_string_field(const cJSON *object, const char *name, const c
     return true;
 }
 
+/** Wipe parsed string values before cJSON returns their allocations to the heap. */
+static void clear_json_strings(cJSON *item)
+{
+    for (cJSON *current = item; current != NULL; current = current->next) {
+        clear_json_strings(current->child);
+        if (current->valuestring != NULL) {
+            explicit_bzero(current->valuestring, strlen(current->valuestring));
+        }
+    }
+}
+
 /**
  * Validate §4.1's `ipv4` object and report the mode it asks for.
  *
@@ -367,10 +379,16 @@ static const char *validate_ipv4(const cJSON *ipv4, bool *is_static)
         if (!parse_address(gateway_text, &gateway)) {
             return "bad_gateway";
         }
-        /* Only checkable against an address that was given. A gateway on its own
-         * has no subnet to be outside of. */
-        if (address_text != NULL && (gateway & mask) != (address & mask)) {
-            return "bad_gateway";
+        if (address_text != NULL) {
+            uint32_t gateway_host = gateway & ~mask;
+            if ((gateway & mask) != (address & mask) || gateway_host == 0 ||
+                gateway_host == (~mask & 0xFFFFFFFFu) || gateway == address) {
+                /* A gateway has to be another host on this subnet. Its network
+                 * and broadcast addresses are syntactically valid dotted quads,
+                 * but neither can answer the ARP proof §9.6 requires; the panel's
+                 * own address cannot be its next hop either. */
+                return "bad_gateway";
+            }
         }
     }
 
@@ -431,9 +449,10 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
     cJSON *root = cJSON_Parse(body);
     /* The passphrase was in this buffer; §12 keeps it out of everything that is
      * not NVS, and a task stack is where §11.3's core dump would find it. */
-    memset(body, 0, sizeof(body));
+    explicit_bzero(body, sizeof(body));
 
     if (!cJSON_IsObject(root)) {
+        clear_json_strings(root);
         cJSON_Delete(root);
         return refuse(req, "invalid_json");
     }
@@ -483,6 +502,11 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
         }
     }
 
+    /* cJSON parses strings into separate heap allocations. Clearing only `body`
+     * leaves the passphrase in a freed heap block, so wipe that copy before the
+     * tree gives the allocation back. Do this on refusals too: an invalid SSID or
+     * IPv4 object does not make the password beside it less secret. */
+    clear_json_strings(root);
     cJSON_Delete(root);
 
     if (error != NULL) {
@@ -761,6 +785,15 @@ esp_err_t slate_setup_selftest(void)
     static const char STATIC_BAD_GATEWAY[] =
         "{\"ssid\":\"selftest\",\"password\":\"selftest\",\"ipv4\":{\"mode\":\"static\","
         "\"address\":\"192.168.1.42/24\",\"gateway\":\"10.0.0.1\"}}";
+    static const char STATIC_NETWORK_GATEWAY[] =
+        "{\"ssid\":\"selftest\",\"ipv4\":{\"mode\":\"static\","
+        "\"address\":\"192.168.1.42/24\",\"gateway\":\"192.168.1.0\"}}";
+    static const char STATIC_BROADCAST_GATEWAY[] =
+        "{\"ssid\":\"selftest\",\"ipv4\":{\"mode\":\"static\","
+        "\"address\":\"192.168.1.42/24\",\"gateway\":\"192.168.1.255\"}}";
+    static const char STATIC_SELF_GATEWAY[] =
+        "{\"ssid\":\"selftest\",\"ipv4\":{\"mode\":\"static\","
+        "\"address\":\"192.168.1.42/24\",\"gateway\":\"192.168.1.42\"}}";
     static const char BAD_PASSWORD_TYPE[] =
         "{\"ssid\":\"selftest\",\"password\":false}";
     static const char BAD_ADDRESS_TYPE[] =
@@ -779,6 +812,12 @@ esp_err_t slate_setup_selftest(void)
                              STATIC_COHERENT, 400, "\"error\":\"static_unsupported\"");
     failures += !expect_post("a bad gateway is named before the mode", SLATE_SETUP_AP_ADDRESS,
                              STATIC_BAD_GATEWAY, 400, "\"error\":\"bad_gateway\"");
+    failures += !expect_post("the network address is not a gateway", SLATE_SETUP_AP_ADDRESS,
+                             STATIC_NETWORK_GATEWAY, 400, "\"error\":\"bad_gateway\"");
+    failures += !expect_post("the broadcast address is not a gateway", SLATE_SETUP_AP_ADDRESS,
+                             STATIC_BROADCAST_GATEWAY, 400, "\"error\":\"bad_gateway\"");
+    failures += !expect_post("the panel is not its own gateway", SLATE_SETUP_AP_ADDRESS,
+                             STATIC_SELF_GATEWAY, 400, "\"error\":\"bad_gateway\"");
     failures += !expect_post("a non-string password is not treated as absent",
                              SLATE_SETUP_AP_ADDRESS, BAD_PASSWORD_TYPE, 400,
                              "\"error\":\"invalid_json\"");
