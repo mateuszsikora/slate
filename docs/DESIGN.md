@@ -18,6 +18,7 @@ Slate aims for both: a runtime that accepts a declarative config and a curated s
 
 This is a personal project published as open source. There is no commercial roadmap and no support commitment. Practical consequences:
 
+- "Universal" means that one flashed runtime accepts dashboard configuration and state/actions from more than one automation system. It does not mean arbitrary UI primitives or immediate support for every board.
 - Milestones are ordered so a usable panel is on the wall as early as possible. The main risk to a project like this is abandonment, not missing features.
 - The maintainer's own dashboard is the first test case. Edge cases surface on real data within the first week rather than in speculation.
 - Hardware support is limited to one board. Others may be added only if someone brings the board and is willing to test.
@@ -40,15 +41,13 @@ Consequence: improving a component in firmware improves every user's dashboard w
 
 Second consequence: anything not anticipated cannot be built. This is intentional.
 
-### ADR-3: The device is the only Home Assistant client
+### ADR-3: Integrations are providers behind a neutral core
 
-The browser talks exclusively to the device. The device holds the token, subscribes to entities, calls services and exposes its own API.
+The UI runtime does not know Home Assistant, MQTT or any other automation protocol. It consumes normalized resource state and emits semantic actions through a narrow provider interface. The bundled `direct` provider and the Home Assistant provider implement that interface.
 
-```
-browser ⇄ device ⇄ Home Assistant
-```
+Consequence: a component asks to `toggle` a light; it never constructs a Home Assistant `call_service` frame. Adding another system means writing an adapter, not forking the component library or the configuration parser. Home Assistant is the first production integration, not a runtime dependency.
 
-Consequence: CORS is configured on the device, where we have control. The Home Assistant token never passes through the browser after initial entry. The editor works with no backend of any kind.
+Integrations still terminate on the device. The browser talks exclusively to the device, and provider credentials remain there. The Home Assistant token never passes through the browser after initial entry. CORS is configured on the device, where we have control, and the editor works with no backend of any kind.
 
 ### ADR-4: The device API is a public contract
 
@@ -82,19 +81,22 @@ Consequence: no asset versioning, cache invalidation or flash management. New ic
 │                                          │
 │ UI Runtime      parser → LVGL tree       │
 │ Components      light / cover / sensor…  │
-│ State Store     last known entity state  │
-│ HA Client       WS, subscriptions, calls │
+│ State Store     normalized resources     │
+│ Action Bus      semantic actions/results │
+│ Providers       direct / Home Assistant  │
 │ Config Store    NVS + LittleFS           │
 │ HAL             LCD, touch, backlight    │
-└───────────────┬──────────────────────────┘
-                │ WebSocket API (long-lived token)
-                ▼
-┌──────────────────────────────────────────┐
-│ Home Assistant                           │
-└──────────────────────────────────────────┘
+└───────┬──────────────────────────┬───────┘
+        │ device API               │ HA WebSocket API
+        │ (device token)           │ (long-lived token)
+        ▼                          ▼
+┌──────────────────┐      ┌──────────────────┐
+│ script / Node-RED│      │ Home Assistant   │
+│ direct provider  │      │ HA provider      │
+└──────────────────┘      └──────────────────┘
 ```
 
-A custom backend connects to the same device API as the editor. The firmware cannot tell whether the other side is a browser or a script.
+The direct provider is the smallest useful interoperability path: a script or Node-RED flow publishes normalized state over HTTP and receives semantic actions over the device WebSocket. It needs no broker, cloud service or companion process. Home Assistant uses an in-firmware adapter because its compressed subscriptions and service calls are valuable enough to support directly.
 
 ## 3. Configuration format
 
@@ -144,7 +146,7 @@ Twelve cells is also the performance answer, not only a layout choice: S-2 measu
           "type": "light",
           "pos": [0, 0],
           "size": [2, 1],
-          "entity": "light.living_room",
+          "binding": {"provider": "direct", "resource": "living-room"},
           "label": "Living room"
         },
         {
@@ -152,21 +154,25 @@ Twelve cells is also the performance answer, not only a layout choice: S-2 measu
           "type": "cover",
           "pos": [2, 0],
           "size": [1, 2],
-          "entity": "cover.living_room_blind"
+          "binding": {"provider": "ha", "resource": "cover.living_room_blind"}
         },
         {
           "id": "t3",
           "type": "sensor",
           "pos": [3, 0],
           "size": [1, 1],
-          "entity": "sensor.living_room_temperature"
+          "binding": {"provider": "ha", "resource": "sensor.living_room_temperature"}
         },
         {
           "id": "t4",
           "type": "scene",
           "pos": [0, 2],
           "size": [4, 1],
-          "entities": ["scene.relax", "scene.goodnight", "scene.away"]
+          "bindings": [
+            {"provider": "ha", "resource": "scene.relax"},
+            {"provider": "ha", "resource": "scene.goodnight"},
+            {"provider": "ha", "resource": "scene.away"}
+          ]
         }
       ]
     }
@@ -174,7 +180,11 @@ Twelve cells is also the performance answer, not only a layout choice: S-2 measu
 }
 ```
 
-Fields common to every tile: `id`, `type`, `pos`, `size`, plus optional `label` (overrides `friendly_name` from Home Assistant) and `icon` (overrides the component default).
+Fields common to every tile: `id`, `type`, `pos`, `size`, plus optional `label` (overrides the normalized resource name) and `icon` (overrides the component default).
+
+Most tiles carry one `binding`; a component such as the scene bar carries `bindings`. A binding is always the pair `provider` + `resource`. Resource ids are opaque outside their provider: `light.living_room` has meaning to the HA adapter, while `living-room` may name the same light in the direct provider. The pair is stored and compared as two strings; firmware never infers a provider from punctuation or from a component type.
+
+The provider owns the mapping between its native data and the semantic type named by the component. A `light` tile therefore renders an incompatible-binding placeholder if its resource arrives with normalized kind `sensor`, but neither the parser nor the component needs to know how that mismatch was represented upstream. A malformed binding is a validation error; an unknown provider id is accepted and renders a missing-provider placeholder, preserving forward compatibility with configurations created on newer firmware.
 
 `timezone` is a IANA zone name mapped to a POSIX TZ string in firmware; the clock and the night schedule depend on it. `screen_off_after` is in minutes; `0` means never.
 
@@ -196,13 +206,14 @@ Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: B
 | GET    | `/config`          | current UI configuration |
 | PUT    | `/config`          | replace configuration; validates, rebuilds the UI, persists. With `?transient=1` (edit mode only) the rebuild happens in RAM and nothing is written to flash — this is what live preview uses, so a drag session does not wear the flash. |
 | POST   | `/config/validate` | validate without saving — returns errors keyed by `tile.id` |
-| GET    | `/entities`        | entities from HA: `entity_id`, `friendly_name`, `domain`, `area`, `state`, `supported_features` |
-| GET    | `/areas`           | areas from HA |
-| POST   | `/ha`              | set HA URL and token; connection is tested before saving |
+| GET    | `/providers`       | available providers: id, status and resource count |
+| GET    | `/resources?provider=<id>` | normalized resources available from one provider; used by the picker |
+| POST   | `/direct/state`    | publish one normalized resource snapshot through the direct provider |
+| POST   | `/ha`              | configure the HA provider; connection is tested before saving |
 | GET    | `/wifi/scan`       | nearby networks: `ssid`, `rssi`, `channel`, `auth`. Cached — see section 9.2 |
 | POST   | `/wifi`            | set station credentials and, optionally, the IPv4 addressing; persist, then apply. Answers before the result is known (section 9.3) |
 | DELETE | `/wifi`            | forget the credentials and raise the setup access point |
-| GET    | `/status`          | network state, HA state, RSSI, uptime, free heap, reset reason, reboot counter, entity count |
+| GET    | `/status`          | network and provider states, RSSI, uptime, free heap, reset reason, reboot counter, resource count |
 | POST   | `/mode`            | `{"mode": "normal"\|"edit"}` |
 | POST   | `/identify`        | flashes the screen — for telling panels apart |
 | POST   | `/ota/upload`      | development OTA; raw `.bin` body (section 11.1) |
@@ -287,7 +298,10 @@ The complete M1 response shapes are:
 {
   "network": {"mode": "sta", "ssid": "home", "ip": "192.168.1.42", "sta_ssid": "home",
               "ipv4": {"mode": "dhcp"}, "last_error": null},
-  "ha": "unconfigured",
+  "providers": [
+    {"id": "direct", "status": "degraded", "resource_count": 0},
+    {"id": "ha", "status": "unconfigured", "resource_count": 0}
+  ],
   "rssi": -54,
   "uptime_s": 120,
   "heap_free": 294631,
@@ -296,12 +310,12 @@ The complete M1 response shapes are:
   "lvgl_frag_pct": null,
   "reset_reason": "power_on",
   "reboot_count": 3,
-  "entity_count": 0,
+  "resource_count": 0,
   "storage_reset": false
 }
 ```
 
-`ha` is `unconfigured`, `disconnected` or `connected`. The three LVGL values are numbers once the LVGL allocator exists and `null` before display bring-up or when it is unavailable; reporting zero would look like a completely exhausted allocator. `reset_reason` uses stable lowercase names rather than exposing ESP-IDF enum values. `storage_reset` says that boot recovery erased corrupt NVS or reformatted LittleFS, which is different from a factory-fresh empty store even though both may have no configuration.
+Provider `status` is `unconfigured`, `connecting`, `online`, `degraded`, `offline` or `error`. `unconfigured` is valid for providers that need credentials; `offline` is a transient loss that marks its resources stale; `error` needs user intervention. `degraded` means a provider can still serve part of its contract and does not blanket-stale its resources. The always-present direct provider is `degraded` while it can accept state but has no attached WebSocket action consumer, and `online` while one is attached. `resource_count` at the top is the number of distinct normalized resources held by the store, not the sum of provider catalogs, which may contain resources the active dashboard never references. The three LVGL values are numbers once the LVGL allocator exists and `null` before display bring-up or when it is unavailable; reporting zero would look like a completely exhausted allocator. `reset_reason` uses stable lowercase names rather than exposing ESP-IDF enum values. `storage_reset` says that boot recovery erased corrupt NVS or reformatted LittleFS, which is different from a factory-fresh empty store even though both may have no configuration.
 
 `GET /coredump` is the one route whose success is not JSON. It answers `200 application/octet-stream` with the core dump exactly as the panic handler wrote it to flash — ESP-IDF's header, the ELF, and the trailing checksum — which is what `esp-coredump --core-format raw` reads and also what `idf.py coredump-info` pulls over a cable. One artifact for both transports rather than one per transport. Its refusals are §4's `{"error": "..."}`: `no_coredump` (`404`) when nothing has crashed since the partition was last erased, `corrupt_coredump` (`500`) when a dump is present and fails its checksum, `coredump_read_failed` (`500`) when flash or the partition table will not cooperate, and `out_of_memory` (`500`).
 
@@ -311,14 +325,15 @@ A transfer that stops part-way is the one outcome with no error document, becaus
 
 ### 4.2 WebSocket `/api/v1/ws`
 
-Event channel for the editor and for remote diagnostics. Token sent in the first frame.
+Event channel for the editor, remote diagnostics and direct-provider actions. Token sent in the first frame. An integration client that wants to receive direct-provider actions attaches after authentication; only one such client may be attached at a time, so two processes cannot both operate the same light.
 
 Device → client:
 
 ```json
-{"type": "status",   "ha": "connected", "wifi": -54, "heap_free": 142000}
-{"type": "log",      "level": "warn", "msg": "entity light.x unavailable"}
+{"type": "status",   "providers": {"direct": "online", "ha": "unconfigured"}, "wifi": -54, "heap_free": 142000}
+{"type": "log",      "level": "warn", "msg": "resource direct:living-room unavailable"}
 {"type": "reloaded", "schema": 1, "tiles": 7}
+{"type": "action",   "id": 42, "provider": "direct", "resource": "living-room", "action": "toggle", "params": {}}
 ```
 
 Client → device:
@@ -326,9 +341,11 @@ Client → device:
 ```json
 {"type": "ping"}
 {"type": "mode", "mode": "edit"}
+{"type": "provider_attach", "provider": "direct"}
+{"type": "action_result", "id": 42, "success": true}
 ```
 
-Heartbeat every 15 s. No ping for 60 s while in edit mode returns the device to normal.
+Heartbeat every 15 s. No ping for 60 s while in edit mode returns the device to normal. A failed `action_result` reverts immediately; a successful one only acknowledges delivery. A matching state snapshot is the confirmation that clears the pending presentation, because a command accepted by an integration is not necessarily a physical state change.
 
 ### 4.3 Authentication
 
@@ -342,31 +359,127 @@ The editor persists it in `localStorage`. Requests without it receive 401. A new
 
 This handles device discovery and authorization in a single step. Because the stored token outlives a DHCP lease, the device also advertises itself over mDNS as `slate-<mac>.local`; the editor falls back to it when the remembered IP stops answering, and the error screen always shows the current address. mDNS is advertised on the setup access point too, so the same name works before the panel has ever joined a network.
 
-There is one exception to the token, and it is narrow. While the setup access point is up, the setup page itself and the three endpoints it needs — `GET /wifi/scan`, `POST /wifi`, `GET /info` — are served **without a token, on the access point interface only**. Everything else answers 401 there exactly as it does on the station interface. The reasoning is that a token the browser must be told, when the browser has just joined an open network whose name is printed on the same screen as the token, is a step that buys nothing and costs the one flow that must not have steps. The exposure this accepts is bounded and worth stating plainly: someone within radio range can move the panel to a different network. They cannot read the Home Assistant token, write a configuration or upload firmware. Section 12 carries the same point from the security side.
+There is one exception to the token, and it is narrow. While the setup access point is up, the setup page itself and the three endpoints it needs — `GET /wifi/scan`, `POST /wifi`, `GET /info` — are served **without a token, on the access point interface only**. Everything else answers 401 there exactly as it does on the station interface. The reasoning is that a token the browser must be told, when the browser has just joined an open network whose name is printed on the same screen as the token, is a step that buys nothing and costs the one flow that must not have steps. The exposure this accepts is bounded and worth stating plainly: someone within radio range can move the panel to a different network. They cannot read provider credentials, publish direct-provider state, write a configuration or upload firmware. Section 12 carries the same point from the security side.
 
-## 5. Home Assistant integration
+## 5. Provider integrations
 
-### 5.1 Connection
+### 5.1 Provider boundary
 
-Home Assistant's WebSocket API at `/api/websocket`, authenticated with a long-lived access token from the user profile. The token should belong to a dedicated account in the `system-users` group — see §12, which says why that group specifically and not the read-only one.
+A provider is the adapter between one upstream system and the runtime. Version 1 has two provider ids: `direct`, which is always present, and `ha`, which is present but `unconfigured` until it has credentials. The common core knows only five operations:
 
-Reconnect with exponential backoff: 1 s → 2 → 4 → 8 → 15 → 30 s (ceiling).
+1. report lifecycle status;
+2. accept the set of resource ids referenced by the active configuration;
+3. deliver normalized resource snapshots or diffs into the state store;
+4. accept a semantic action request from the action bus;
+5. report whether that request failed or was accepted while a later state update confirms the result.
 
-### 5.2 State subscription
+Provider callbacks post work onto the UI task's queue; they never touch LVGL. Provider-native payloads are parsed and discarded at the adapter boundary. In particular, an HA entity object or `call_service` frame cannot appear in a component header.
 
-`subscribe_entities` with an explicit `entity_ids` list derived from the configuration — never the full instance state. It returns compressed diffs, which keeps both bandwidth and parsing cost negligible at typical dashboard sizes.
+The active configuration is the memory bound. After validation, firmware groups bindings by provider and replaces each provider's subscription set atomically with the UI tree. A provider may discover more resources for the editor, but the runtime state store holds only resources referenced by the active configuration. Removing the last binding removes the state on the same rebuild.
 
-Re-subscription follows any `PUT /config` that changes the entity set.
+### 5.2 Normalized resources and state
 
-### 5.3 Entity picker
+Every snapshot has common identity and presentation fields plus kind-specific state:
 
-`GET /entities` requires the registries: `config/entity_registry/list` and `config/area_registry/list`. Neither needs an administrator — S-4 measured both from a `system-users` and a `system-read-only` token and got payloads byte-identical to the administrator's, and no release checked, back to 2020.12.0, admin-gates a registry `list`. Only the mutating commands are gated.
+```json
+{
+  "provider": "direct",
+  "resource": "living-room",
+  "kind": "light",
+  "name": "Living room",
+  "area": "Downstairs",
+  "available": true,
+  "state": {"power": "on", "brightness": 62},
+  "capabilities": {
+    "toggle": true,
+    "set_power": true,
+    "set_brightness": {"min": 0, "max": 100}
+  }
+}
+```
 
-The picker therefore degrades on **failure, not on privilege**: firmware issues the command and falls back if it fails, for whatever reason — an older or unusual instance, a transport error, a future Home Assistant that tightens this. It does not predict a permission in advance and it does not check one. The fallback is a flat list derived from `subscribe_entities` with no area grouping, which yields every field of §4.1 except `area`.
+`provider`, `resource`, `kind`, `available` and `state` are required. `name`, `area` and `capabilities` are optional; absent capabilities mean read-only. A complete snapshot replaces the previous one. Internal diffs are allowed between an adapter and the store, but the store always exposes a complete current value to components.
+
+`kind` is semantic, not the native upstream domain. Version 1 defines the shapes needed by the component library:
+
+- `light`: `state.power` is `on` or `off`; optional `brightness` and `color_temperature` exist only with matching capabilities.
+- `cover`: position and movement state; actions are `toggle`, `open`, `stop` and `close` when advertised.
+- `sensor`: numeric or textual `value`, optional `unit`, and optional `measurement` such as `temperature`, `humidity`, `pressure` or `power`.
+- `scene`: stateless; the only action is `activate`.
+
+Unknown state fields and capabilities are ignored. An unavailable resource keeps its last known values but renders stale; a resource that has never produced a snapshot renders the missing placeholder from §7.5. A provider becoming `offline` marks only that provider's resources stale — an unavailable HA instance must not dim tiles supplied by `direct`. `degraded` does not imply stale: a read-only direct sensor remains fresh even when no action consumer is attached.
+
+`GET /providers` returns the same provider entries used in `/status`, without unrelated device health:
+
+```json
+{"providers": [
+  {"id": "direct", "status": "degraded", "resource_count": 2},
+  {"id": "ha", "status": "unconfigured", "resource_count": 0}
+]}
+```
+
+`GET /resources?provider=<id>` returns this normalized vocabulary for the picker as `{"resources":[...]}`. The HA provider can list its full discovered catalog; `direct` lists only resources already referenced and published since boot. A provider-specific detail may be added under an `extensions` object namespaced by provider, but components and the generic picker cannot depend on it. Missing, unknown and unconfigured provider queries return `400 provider_required`, `404 provider_not_found` and `409 provider_unconfigured` respectively.
+
+### 5.3 Actions and optimistic state
+
+Components emit semantic actions against their binding:
+
+```json
+{"id": 42, "provider": "direct", "resource": "living-room",
+ "action": "set_brightness", "params": {"value": 40}}
+```
+
+The action bus validates the action against the resource capabilities and routes it to the selected provider. Transport names are not semantic action names: `set_brightness` may become an HA `light.turn_on`, an MQTT publish in a future adapter or a WebSocket event in the direct provider.
+
+Optimistic updates are mandatory. A valid action immediately applies its expected normalized state and marks the tile pending with a subtle pulse. A matching real state update confirms it. Explicit failure or no confirmation within 3 s reverts to the last confirmed state and shows a brief error. A provider reporting success means only that it accepted the request; it does not confirm physical state. Late confirmations become ordinary state updates, duplicate results are ignored, and a real update that disagrees with the optimistic value wins immediately.
+
+### 5.4 Direct provider
+
+The direct provider makes the neutral contract usable without Home Assistant and proves that provider neutrality is more than a mock. A script or Node-RED flow first pushes the configuration, then publishes complete snapshots for its bound resource ids:
+
+```http
+POST /api/v1/direct/state
+Authorization: Bearer <device_token>
+Content-Type: application/json
+```
+
+The body is the snapshot from §5.2 without `provider`, which is fixed to `direct` by the endpoint:
+
+```json
+{"resource":"living-room","kind":"light","name":"Living room","available":true,
+ "state":{"power":"on","brightness":62},
+ "capabilities":{"toggle":true,"set_brightness":{"min":0,"max":100}}}
+```
+
+After validation and enqueueing, the endpoint returns `202 {"resource":"living-room"}`. Publishing an id not referenced by the active configuration returns `404 resource_not_bound`; this prevents an unbounded LAN client from filling PSRAM. A kind different from the active component binding returns `409 kind_mismatch`. Malformed common or kind-specific state returns `400 invalid_state`. None disturbs the last confirmed value.
+
+To receive actions, one authenticated device-WebSocket client sends `{"type":"provider_attach","provider":"direct"}`. A second attachment receives `{"type":"error","error":"provider_busy"}`. The device then sends the `action` event from §4.2. `action_result` with `success:false` and an optional stable `error` string reverts immediately; `success:true` acknowledges delivery, and the next published snapshot confirms state. If the attached client disconnects, the provider becomes `degraded`: published state remains valid, while new actions fail immediately rather than waiting three seconds.
+
+This path deliberately has no broker, callback URL, persistence or discovery protocol. It is sufficient for scripts, test fixtures and Node-RED, and is the reference adapter for M2. A richer standard such as MQTT is added only when a real integration needs it.
+
+### 5.5 Home Assistant connection
+
+The HA provider uses Home Assistant's WebSocket API at `/api/websocket`, authenticated with a long-lived access token from the user profile. The token should belong to a dedicated account in the `system-users` group — see §12, which says why that group specifically and not the read-only one.
+
+Reconnect with exponential backoff: 1 s → 2 → 4 → 8 → 15 → 30 s (ceiling). `auth_invalid` is not retried forever: it moves the provider to `error` until credentials change. A network or HA restart moves it through `offline` and `connecting` while the last confirmed states remain visible as stale.
+
+### 5.6 Home Assistant state mapping
+
+Use `subscribe_entities` with the explicit HA entity ids in the HA provider's subscription set — never the full instance state. It returns compressed diffs, which keeps bandwidth and parsing cost negligible at typical dashboard sizes. The adapter expands those diffs, maps HA domains, states and attributes into §5.2, and only then updates the common store.
+
+Re-subscription follows any successful `PUT /config` that changes the HA binding set and every reconnect. The existing UI tree does not care why a fresh snapshot arrived.
+
+### 5.7 Home Assistant resource picker
+
+`GET /resources?provider=ha` requires `config/entity_registry/list_for_display`, `config/area_registry/list`, `config/device_registry/list` and `get_states`. None needs an administrator — S-4 measured the underlying registry reads from a `system-users` and a `system-read-only` token and got payloads byte-identical to the administrator's. Only mutating registry commands are gated. `list_for_display` is used instead of the full entity registry: on the measured instance it was 83 KB rather than 635 KB and had already removed disabled entities that cannot back a tile.
+
+The normalized `name` comes from the already-composed `friendly_name` in live state, not from the sparse registry name fields. HA domain and state attributes map to `kind`, state and capabilities inside the adapter. This discovery fetch is deliberately broader than the runtime subscription in §5.6: it happens for the picker, not continuously.
+
+The picker degrades on **failure, not on privilege**: firmware issues the registry commands and falls back if they fail, for whatever reason — an older or unusual instance, a transport error, a future Home Assistant that tightens this. It does not predict a permission in advance. `get_states` still yields a flat normalized list with no `area`, so registry failure changes grouping rather than the public API shape.
 
 This path must be implemented, not assumed away — and it is needed more often than that reads. On the instance S-4 measured, 63 % of registry entries resolve to no area at all, so the flat ungrouped list is what the picker shows for the majority of a real installation regardless of permissions. It is a first-class presentation, not an error state, and the editor (§10) must make it look deliberate.
 
-`area` resolves through the **device**, not the entity:
+HA `area` resolves through the **device**, not usually the entity:
 
 ```
 entity_registry.area_id
@@ -374,26 +487,28 @@ entity_registry.area_id
   → area_registry[area_id].name
 ```
 
-Zero of 1 045 entities on the measured instance carried `area_id` directly; all 387 area assignments came from the device. A `GET /entities` that reads only the entity registry returns a null `area` for every entity and looks like a bug, so `config/device_registry/list` is a third mandatory fetch.
+Zero of 1 045 entities on the measured instance carried `area_id` directly; all 387 area assignments came from the device. Omitting the device registry therefore produces a null normalized `area` for every entity and looks like a generic-picker bug.
 
-Registries are fetched once per connection and cached in RAM, not NVS. That RAM is PSRAM: the registry, device and state payloads together are hundreds of kilobytes on the wire and several times that once parsed, which does not fit internal RAM.
+Registries are fetched once per connection and cached in PSRAM, not NVS. The registry, device and state payloads together are hundreds of kilobytes on the wire and several times that once parsed, which does not fit internal RAM.
 
-### 5.4 Service calls
+### 5.8 Home Assistant action mapping
+
+The HA provider maps semantic actions to service calls. For example, light `toggle` becomes:
 
 ```json
 {"id": 42, "type": "call_service", "domain": "light", "service": "toggle",
  "target": {"entity_id": "light.living_room"}}
 ```
 
-Optimistic updates are mandatory. A tap immediately reflects the expected state and marks the tile pending with a subtle pulse. If no confirming state arrives within 3 s, the tile reverts and shows a brief error. Without this the panel feels broken on any latency.
+`set_brightness` becomes `light.turn_on` with `brightness_pct`; cover actions and scene `activate` map similarly. HA result ids remain inside the adapter. A failed result is passed to the common action bus, while confirmation comes from the normalized state update produced by the subscription. A read-only HA account returns `home_assistant_error` with message `Unauthorized`, not the `unauthorized` code, so the adapter must preserve that distinction when reporting the useful failure.
 
 ## 6. Firmware
 
 ### 6.1 Stack
 
-ESP-IDF 5.x, LVGL 9.3+, `esp_lcd` with an RGB panel, GT911 over I²C, CH422G as IO expander, `esp_websocket_client` for Home Assistant, `esp_http_server` for the API and for the setup page, `esp_wifi` in station and SoftAP modes with a small DNS responder for the captive portal (§9.2), cJSON for configuration, SNTP for time (the system bar clock and the night schedule are meaningless without it).
+ESP-IDF 5.x, LVGL 9.3+, `esp_lcd` with an RGB panel, GT911 over I²C, CH422G as IO expander, `esp_websocket_client` inside the HA provider, `esp_http_server` for the device/direct-provider API and for the setup page, `esp_wifi` in station and SoftAP modes with a small DNS responder for the captive portal (§9.2), cJSON for configuration, SNTP for time (the system bar clock and the night schedule are meaningless without it).
 
-All LVGL access happens on one task; API handlers and the HA client post work to it through a queue rather than touching the tree directly.
+All LVGL access happens on one task; API handlers and every provider post normalized work to it through a queue rather than touching the tree directly.
 
 ### 6.2 Memory budget
 
@@ -402,7 +517,7 @@ All LVGL access happens on one task; API handlers and the HA client post work to
 - Bounce buffer in internal SRAM — required, otherwise WiFi activity causes visible artifacts. The artifact is worth naming, because no counter on the CPU side shows it: the picture rolls vertically, with the bottom of the screen appearing at the top. That is the DMA losing its race to read the framebuffer out of PSRAM while the radio and the renderer compete for the same bus. S-2 measured frames as 4 % *cheaper* without the bounce buffer, and the display unusable.
 - LVGL draw buffer: ~1/10 screen, internal SRAM — but only in a single-framebuffer configuration, which is not the one above. LVGL wants two such buffers so rendering and flushing overlap, and 2 × 76 800 B does not fit: S-2 measured 104 167 B of internal DMA-capable memory free once WiFi is up. Size any internal draw buffer from what is actually free after `esp_wifi_start()`, not from the screen.
 - LVGL heap: 2 MB in PSRAM — the entire widget tree budget.
-- State store: sized from the configuration, ~256 B per entity. Even a config saturating the 64 KB limit stays in the tens of KB.
+- State store: sized from the configuration, ~256 B per bound resource plus kind-specific state. Even a config saturating the 64 KB limit stays in the tens of KB. Discovery catalogs used by the editor live separately in PSRAM and may be much larger.
 - Configuration: ≤64 KB, parsed into structs then freed.
 - The setup access point (§9) costs internal SRAM where there is least of it. S-2 measured 104 167 B of internal DMA-capable memory free with the station alone; `WIFI_MODE_APSTA` adds a second interface's buffers on top. It is raised on demand and torn down as soon as the station associates, never left running as a permanent second interface. `APSTA` is the intended mode and §9.4 depends on it: the station must keep trying while the access point is up, which is what lets an unattended panel recover on its own. If it does not fit, that is a budget problem to solve — not a behaviour to drop; §9.4 names the degraded shape it may not fall below.
 
@@ -424,9 +539,9 @@ The layout lives in `firmware/partitions.csv`:
 
 The sizes follow measurements rather than round numbers:
 
-- **6 MB per application slot.** S-3 measured the skeleton at 1.34 MiB release and 1.48 MiB development (`-Og`), and §11.1 makes the development image the one that travels over the wire daily. That figure is a lower bound — no UI runtime, no component library, no Home Assistant client, no configuration parser — so the slot is sized for growth rather than for today's image.
+- **6 MB per application slot.** S-3 measured the skeleton at 1.34 MiB release and 1.48 MiB development (`-Og`), and §11.1 makes the development image the one that travels over the wire daily. That figure is a lower bound — no UI runtime, no component library, no provider implementations, no configuration parser — so the slot is sized for growth rather than for today's image.
 - **3.75 MB of LittleFS.** The editor bundle (§10) targets under 400 KB gzipped and a configuration is capped at 64 KB (§3.1). The remainder is room for the deferred asset manager (§15), which would otherwise arrive as a reflash.
-- **128 KB of coredump.** An ELF dump of a twelve-task image resembling M1's — WiFi, lwIP, HTTP server, plus the LVGL and Home Assistant tasks — measures 21 KB. A dump stores each task's *used* stack, so the ceiling is the sum of the allocated ones: around 50 KB for that task set, and still inside 128 KB once M1 fills them. §11.3 depends on the dump surviving a panic, and a partition that truncates it is worse than no partition at all. #14 measured the real thing across three forced panics in `app_main` at slightly different points in startup: **21 988 B to 26 020 B, 16.8 % to 19.9 % of the partition**, with up to thirteen tasks alive (`main`, both idles, `ipc0`, `ipc1`, `esp_timer`, `sys_evt`, `tiT`, `wifi`, `httpd`, `slate_wifi`, `slate_setup`, `ota_health`) — M1 without the display. The spread is the point: a dump stores each task's used stack, so *when* the panel crashes moves the number, and the ceiling is what the partition has to hold. The estimate above was the right shape.
+- **128 KB of coredump.** An ELF dump of a twelve-task image resembling M1's — WiFi, lwIP, HTTP server, plus the LVGL and provider tasks — measures 21 KB. A dump stores each task's *used* stack, so the ceiling is the sum of the allocated ones: around 50 KB for that task set, and still inside 128 KB once M1 fills them. §11.3 depends on the dump surviving a panic, and a partition that truncates it is worse than no partition at all. #14 measured the real thing across three forced panics in `app_main` at slightly different points in startup: **21 988 B to 26 020 B, 16.8 % to 19.9 % of the partition**, with up to thirteen tasks alive (`main`, both idles, `ipc0`, `ipc1`, `esp_timer`, `sys_evt`, `tiT`, `wifi`, `httpd`, `slate_wifi`, `slate_setup`, `ota_health`) — M1 without the display. The spread is the point: a dump stores each task's used stack, so *when* the panel crashes moves the number, and the ceiling is what the partition has to hold. The estimate above was the right shape.
 - **`phy_init` is kept** even though `CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION` is off by default. Four kilobytes now cost nothing; enabling that option later without the partition costs a serial flash.
 
 NVS and LittleFS sit outside the application slots, so configuration and tokens survive an update (§11.4). Changing any of this later forces a full serial flash, which is why the table is settled before firmware code is written.
@@ -436,15 +551,16 @@ NVS and LittleFS sit outside the application slots, so configuration and tokens 
 ```
 load config
   → validate
-  → build LVGL tree
-  → compute entity set → subscribe_entities
+  → build replacement LVGL tree
+  → compute binding sets per provider
+  → atomically activate tree + provider subscriptions
   → event loop
 
 PUT /config
   → validate (on error: 400, existing UI untouched)
-  → destroy tree
-  → build new tree
-  → update subscription
+  → build replacement tree off-screen
+  → atomically activate tree + provider subscriptions
+  → destroy old tree and unreferenced state
 ```
 
 Rebuilds must be memory-idempotent. After 500 cycles the free LVGL heap returns to its starting value. This is spike S-1 and a precondition for the whole design.
@@ -454,9 +570,9 @@ Rebuilds must be memory-idempotent. After 500 cycles the free LVGL heap returns 
 | Mode    | Behaviour |
 |---------|-----------|
 | setup   | the device runs its own access point and serves the setup page. The screen shows the SSID, the password if one is set, the address and a pairing QR — section 9 |
-| normal  | dashboard; touch controls entities |
-| edit    | top bar reads "edit mode", touch does not call services, live preview of changes |
-| offline | HA unreachable: tiles dimmed, indicator in the bar, last known values visible but clearly marked stale |
+| normal  | dashboard; touch emits semantic actions for bound resources |
+| edit    | top bar reads "edit mode", touch emits no provider actions, live preview of changes |
+| offline | one or more providers unreachable: only their tiles are dimmed, indicators identify them, last known values remain visible but clearly stale |
 | error   | no configuration or incompatible schema: instructions and device address on screen |
 
 ## 7. Component library
@@ -468,17 +584,17 @@ Four components at launch. Each has variants driven by tile size.
 | Size | Content | Action |
 |------|---------|--------|
 | 1×1  | icon, name, state dot | tap → `toggle` |
-| 2×1  | icon, name, brightness %, slider | slider → `turn_on` with `brightness_pct` |
-| 2×2  | large icon, brightness slider, colour temperature if supported | as above |
+| 2×1  | icon, name, brightness %, slider | slider → `set_brightness` |
+| 2×2  | large icon, brightness slider, colour temperature if supported | `set_brightness` / `set_color_temperature` |
 
-Reads `supported_color_modes` and hides controls the device does not support.
+Reads normalized capabilities and hides controls the resource does not support. HA's `supported_color_modes` is interpreted only by the HA provider.
 
 ### 7.2 cover
 
 | Size | Content | Action |
 |------|---------|--------|
 | 1×1  | position-aware icon, name | tap → `toggle` |
-| 1×2  | icon, up / stop / down buttons, position % | `open_cover` / `stop_cover` / `close_cover` |
+| 1×2  | icon, up / stop / down buttons, position % | `open` / `stop` / `close` |
 | 2×1  | as above, horizontal | as above |
 
 Movement shows an animated indicator until the state settles.
@@ -491,13 +607,13 @@ Movement shows an animated indicator until the state settles.
 | 2×1  | as above with a leading icon |
 | 2×2  | as above plus a 24 h chart (deferred — see section 15) |
 
-No actions. `device_class` selects the icon and value formatting.
+No actions. The normalized `measurement` selects the icon and value formatting; HA `device_class` is one input the HA provider maps onto it.
 
 ### 7.4 scene
 
 | Size | Content | Action |
 |------|---------|--------|
-| 1×1  | icon, name | `scene.turn_on` |
+| 1×1  | icon, name | `activate` |
 | 4×1  | bar of 2–5 scenes | as above |
 
 Confirmation is a brief tile flash. Scenes are stateless.
@@ -508,8 +624,8 @@ These determine whether dashboards look good on someone else's data, and are man
 
 - **Text overflow.** A name that does not fit is ellipsized or marquee-scrolled, never clipped mid-glyph.
 - **Out-of-range values.** `1013.25` and `-12.4` must fit where `21.4` was designed for. The type scale steps down automatically for longer strings.
-- **Entity unavailable.** `unavailable` / `unknown` renders dimmed with a dash, not an empty tile.
-- **Entity missing.** A configuration referencing a deleted entity shows a placeholder containing the `entity_id`, so it can be located in the editor.
+- **Resource unavailable.** `available:false` or an `offline` provider renders dimmed with a dash, not an empty tile.
+- **Resource missing.** A binding that has never produced or can no longer resolve a resource shows a placeholder containing `provider:resource`, so it can be located in the editor.
 - **Touch targets ≥ 48 px** in both dimensions.
 - **Pending state** visible for every action.
 
@@ -553,8 +669,8 @@ This replaces the on-screen WiFi wizard the design originally called for. A phon
 4. The setup page lists nearby networks. Pick one, type the password, submit.
 5. The panel reports the outcome **on its own screen** — see §9.3 for why the browser cannot. On success it shows the station address and the pairing QR with the device token; on failure the access point comes back with the reason.
 6. Scanning the pairing QR, or typing the address, opens the editor.
-7. The editor asks for the Home Assistant URL and a long-lived token. `POST /ha` verifies the connection before persisting.
-8. The entity picker populates and the first page can be arranged.
+7. The editor asks which provider to use. `direct` needs no setup; choosing Home Assistant asks for its URL and long-lived token, and `POST /ha` verifies the connection before persisting.
+8. The provider's resource picker populates and the first page can be arranged.
 
 Steps 6–8 are M6 and later. From M1 the setup page carries the WiFi form and nothing else; it grows into the editor's pairing view rather than being replaced by it.
 
@@ -614,7 +730,7 @@ station lost while running
        └─ still down after 5 min ────────────► setup AP raised *alongside* the dashboard
 ```
 
-In the runtime case the dashboard stays on screen with its last known values marked stale — the `offline` presentation of §6.5, which exists for a Home Assistant outage and applies here for the same reason — and the setup details appear as a banner rather than a full-screen card.
+In the runtime case the dashboard stays on screen with all network-backed provider values marked stale — the `offline` presentation of §6.5 applies per provider — and the setup details appear as a banner rather than a full-screen card.
 
 **Raising the access point must never stop the station trying.** This is a requirement, not an implementation note, and it is what makes the five minutes above a safe number rather than a gamble. A router that comes back at minute seven has to find the panel waiting for it: the panel returns to normal, the access point is torn down without ceremony, and nobody had to be in the room. Without it the fallback is a trap — the panel survives the outage and then sits on its own access point indefinitely, needing a human for a fault that fixed itself.
 
@@ -658,8 +774,8 @@ Static files served from the device's LittleFS. React with a drag-and-drop grid.
 
 Views:
 
-- **Grid** — abstract rectangles labelled with component type and entity, resize handles, snapping. It deliberately does not imitate the panel's appearance; the panel does that.
-- **Inspector** — properties of the selected tile: type, entity (searchable picker filtered by area), label, icon.
+- **Grid** — abstract rectangles labelled with component type and bound resource, resize handles, snapping. It deliberately does not imitate the panel's appearance; the panel does that.
+- **Inspector** — properties of the selected tile: type, provider, resource (searchable picker, filtered by area when the provider supplies one), label, icon.
 - **Library** — the component set, draggable onto the grid.
 - **Top bar** — pages, theme, publish button, device connection indicator.
 
@@ -702,7 +818,7 @@ Without rollback, the first firmware that crashes on boot forces the panel off t
 
 Health means "I can accept the next OTA", nothing more, and the check must contain nothing else. Two exclusions follow from that and both are load-bearing:
 
-- **Not the Home Assistant connection.** If HA is down for maintenance, a perfectly good image would be rolled back.
+- **Not any provider connection.** If HA, a direct integration or a future provider is down for maintenance, a perfectly good image would be rolled back.
 - **Not the station connection.** A device sitting on its own access point with the API answering can be flashed again — `POST /ota/upload` at `192.168.4.1` is the same endpoint. An image that boots while the router happens to be down is not a bad image, and rolling it back would be the same mistake as the first exclusion, arriving through a different door. Rolling back would also be actively wrong: the previous image is no more able to reach a router that is not there, so the device reboots into an identical state having thrown away the newer firmware.
 
 ### 11.3 Logs and crashes without a cable
@@ -735,13 +851,13 @@ Configuration and tokens must survive updates. They live in NVS and LittleFS, ou
 
 Minimal by design — the device sits on a LAN, not on the internet.
 
-- The Home Assistant token lives only in NVS and is never returned by the API (masked in `GET /status`). It is the one secret that genuinely matters.
-- The device token guards write endpoints.
-- Documentation states plainly that a long-lived HA token carries full account privileges, and recommends a dedicated account in Home Assistant's **`system-users`** group. Not `system-admin`, which grants more than Slate needs, and explicitly **not `system-read-only`**, which does not work: S-4 measured that group reading every registry Slate needs while being refused `call_service`, so the panel renders a perfect dashboard on which nothing responds to a tap. The group has to be named, because "restricted" reads like "read-only" to anyone skimming. The failure is also quiet: a denied service call comes back as `home_assistant_error`, not `unauthorized`, so firmware matching on the error code classifies a permission problem as a transient fault and reverts the optimistic update (§5.4) on every tap, forever, with no hint that the account is the cause.
+- Provider credentials live only in NVS and are never returned by the API. The Home Assistant token is the first such credential and carries the account's authority.
+- The device token guards write endpoints, direct-provider state publication and provider attachment on the WebSocket. Possessing it grants configuration and control access to the panel; it is a secret, not merely a pairing convenience.
+- Documentation states plainly that a long-lived HA token carries full account privileges, and recommends a dedicated account in Home Assistant's **`system-users`** group. Not `system-admin`, which grants more than Slate needs, and explicitly **not `system-read-only`**, which does not work: S-4 measured that group reading every registry Slate needs while being refused `call_service`, so the panel renders a perfect dashboard on which nothing responds to a tap. The group has to be named, because "restricted" reads like "read-only" to anyone skimming. The failure is also quiet: a denied service call comes back as `home_assistant_error`, not `unauthorized`, so the HA adapter must classify it before the common optimistic update (§5.3) reverts, or every tap fails forever with no hint that the account is the cause.
 - The WiFi passphrase written by `POST /wifi` lives in NVS and is never returned by the API, and it never enters the configuration JSON — §10 makes that file something people export, import and share, and a credential does not belong in a document with those properties.
-- **The setup access point is open by default**, and the setup page on it is served without a token (§4.3). This is the one place the token rule is relaxed, and the trade is worth naming rather than discovering. What an attacker in radio range gets is the ability to move the panel to a different network. What they do not get is the Home Assistant token, the configuration, or `/ota/upload` — those answer 401 on the access point exactly as they do on the station, and a panel moved to a hostile network still holds every secret behind a token that only the screen has shown. The threat model is a room, and the mitigation is the same one the whole pairing scheme rests on: the screen is in that room and the attacker is not. A WPA2 passphrase can be set for anyone whose radio range is a shared building rather than a house; it is then displayed on the setup screen, which is the same trade one layer down.
+- **The setup access point is open by default**, and the setup page on it is served without a token (§4.3). This is the one place the token rule is relaxed, and the trade is worth naming rather than discovering. What an attacker in radio range gets is the ability to move the panel to a different network. What they do not get is provider credentials, direct-provider publication/attachment, the configuration, or `/ota/upload` — those answer 401 on the access point exactly as they do on the station, and a panel moved to a hostile network still holds every secret behind a token that only the screen has shown. The threat model is a room, and the mitigation is the same one the whole pairing scheme rests on: the screen is in that room and the attacker is not. A WPA2 passphrase can be set for anyone whose radio range is a shared building rather than a house; it is then displayed on the setup screen, which is the same trade one layer down.
 - No HTTPS on the device. A deliberate trade-off: a self-signed certificate on an ESP32 is a worse experience than its absence on a local network.
-- **`GET /coredump` (§11.3) returns memory, so it is the one endpoint whose body is not a curated document.** An ELF core dump carries task stacks, which is where a secret is on its way to or from NVS. Three things keep the two rules above true rather than approximately true. The dump is token-gated like every write, with no setup-access-point exception. `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` stays off, so `.bss`, `.data` and the heap are not in the dump — and the device token, which lives in `.bss`, is therefore not in it either. And the code paths that hold a passphrase or an HA token on a stack zero it as soon as they are done, for this reason and with this section named at the call site; that is a habit the firmware has to keep, not a property of the endpoint. Enabling `CAPTURE_DRAM` would break the arrangement, which is a second reason it is off.
+- **`GET /coredump` (§11.3) returns memory, so it is the one endpoint whose body is not a curated document.** An ELF core dump carries task stacks, which is where a secret is on its way to or from NVS. Three things keep the two rules above true rather than approximately true. The dump is token-gated like every write, with no setup-access-point exception. `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` stays off, so `.bss`, `.data` and the heap are not in the dump — and the device token, which lives in `.bss`, is therefore not in it either. And the code paths that hold a passphrase or any provider credential on a stack zero it as soon as they are done, for this reason and with this section named at the call site; that is a habit the firmware has to keep, not a property of the endpoint. Enabling `CAPTURE_DRAM` would break the arrangement, which is a second reason it is off.
 
 Rate limiting and origin allow-lists will be added if a concrete scenario requires them.
 
@@ -757,7 +873,7 @@ Pass: free heap returns to its starting value within 1%, with no downward trend.
 
 ### S-2 — Render performance
 
-A saturated page with 4 animated tiles, driven at 10 entity updates per second. Measure frame time and scrolling smoothness.
+A saturated page with 4 animated tiles, driven at 10 resource updates per second. Measure frame time and scrolling smoothness.
 
 Pass: no visible stutter when switching pages. Determines: the maximum tile count per page — which cannot be changed later without invalidating existing configurations — and whether a single framebuffer is enough or tearing demands a second one (section 6.2).
 
@@ -775,7 +891,7 @@ Answered in `docs/spikes/s3.md`: 1 409 680 B release, 1 547 600 B development, w
 
 Call `config/entity_registry/list` and `config/area_registry/list` with a non-admin token.
 
-Answered in `docs/spikes/s4.md`: the area-aware picker is a primary feature. A `system-users` and a `system-read-only` token both read both registries in full, returning payloads byte-identical to an administrator's, and no release checked back to 2020.12.0 admin-gates a registry `list`. §5.3 and §12 are corrected accordingly. Two findings outrank the one the spike was asked for: `area` resolves entity → device → area, so `config/device_registry/list` is mandatory, and `system-read-only` cannot call services, which disqualifies it as the recommended account.
+Answered in `docs/spikes/s4.md`: the area-aware picker is a primary feature. A `system-users` and a `system-read-only` token both read both registries in full, returning payloads byte-identical to an administrator's, and no release checked back to 2020.12.0 admin-gates a registry `list`. §5.7 and §12 carry the result. Two findings outrank the one the spike was asked for: `area` resolves entity → device → area, so `config/device_registry/list` is mandatory, and `system-read-only` cannot call services, which disqualifies it as the recommended account.
 
 ## 14. Milestones
 
@@ -787,8 +903,8 @@ Ordered so that a usable panel is mounted after M3 and everything afterwards imp
 |--|-------|-----------|
 | M0 | Spikes S-1…S-4 | four written answers; board variant and partition sizes decided |
 | M1 | Partition table, LCD, touch, backlight, WiFi station **and setup access point**, SNTP, LittleFS, device token, OTA, rollback, WS logs, core dump | a panel with no credentials opens its own access point and is pointed at a network from a phone; new firmware installs over `curl`; a deliberately broken image rolls back; logs are visible remotely |
-| M2 | HA client: auth, `subscribe_entities`, `call_service`, reconnect | live entity state on screen, toggle works, WiFi loss and recovery resumes automatically |
-| M3 | UI runtime, light, sensor, one theme, `PUT /config` | a hand-written JSON pushed with `curl` rebuilds the screen. The panel goes on the wall. |
+| M2 | Provider-neutral config/UI runtime, state store, action bus, light, sensor, one theme, `PUT /config`, direct provider | with no HA configured, a hand-written JSON and direct-provider snapshots pushed from a script rebuild and update the screen; a tap emits a semantic action and confirmation/failure clears or reverts its optimistic state |
+| M3 | HA provider: auth, `subscribe_entities` mapping, service-call mapping, reconnect | the same components work against live HA resources without provider-specific UI code; WiFi or HA loss and recovery resumes automatically. The panel goes on the wall. |
 
 The device token is generated in M1, not later: every write endpoint — including development OTA — requires it from the first day the API exists.
 
@@ -796,14 +912,14 @@ The setup access point is in M1 for the same kind of reason and it is not a comf
 
 M1 ends with a literal test: unplug the USB cable and put it away. Everything afterwards happens over the network. Reaching for the cable during M2 for firmware reasons means M1 was not finished — and the network is included in "firmware reasons", which is what the access point buys.
 
-After M3 the iteration loop exists: edit JSON, push, observe. That alone is faster than the ESPHome cycle.
+After M2 the core iteration loop exists: edit JSON, push config and state, observe. It proves the product's central claim without Home Assistant and is already faster than the ESPHome cycle. M3 replaces the direct test script with the first production provider and real household data; it does not change the component or configuration architecture.
 
 ### Phase 2 — maturing on real data
 
 | | Scope | Done when |
 |--|-------|-----------|
 | M4 | cover, scene, all size variants, edge cases from 7.5 | a week of daily use with nothing that irritates |
-| M5 | Brightness, night schedule, offline mode | nobody in the house complains about night-time glare; a Home Assistant restart does not freeze the panel |
+| M5 | Brightness, night schedule, offline mode | nobody in the house complains about night-time glare; restarting one provider does not freeze the panel or stale unrelated tiles |
 
 M5 outranks the editor because a wall panel without a brightness schedule gets unplugged within days.
 
@@ -811,7 +927,7 @@ M5 outranks the editor because a wall panel without a brightness schedule gets u
 
 | | Scope | Done when |
 |--|-------|-----------|
-| M6 | Web editor, entity picker, second theme | someone unfamiliar builds a page without reading the JSON format |
+| M6 | Web editor, provider/resource picker, second theme | someone unfamiliar builds a page without reading the JSON format |
 | M7 | Setup screen and portal polish, pairing QR, error mode, factory reset from the panel, static addressing (9.6) | the section 9 flow works with no cable and no ESP-IDF, for someone who has not read this document |
 | M8 | Release OTA with manifest, prebuilt binary, browser flasher, README, enclosure files | someone without ESP-IDF gets a running panel and receives updates |
 
