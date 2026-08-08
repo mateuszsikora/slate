@@ -7,6 +7,8 @@
 
 #include "slate_ota.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
@@ -130,15 +132,151 @@ static esp_err_t snapshot_health_endpoint(void *ctx)
     return ESP_ERR_NOT_FOUND;
 }
 
-static bool send_all(int fd, const char *data, size_t len)
+static bool wait_for_socket(int fd, bool writable, int64_t deadline_us)
+{
+    while (true) {
+        int64_t remaining_us = deadline_us - esp_timer_get_time();
+        if (remaining_us <= 0) {
+            return false;
+        }
+
+        fd_set read_fds;
+        fd_set write_fds;
+        FD_ZERO(&read_fds);
+        FD_ZERO(&write_fds);
+        if (writable) {
+            FD_SET(fd, &write_fds);
+        } else {
+            FD_SET(fd, &read_fds);
+        }
+        struct timeval timeout = {
+            .tv_sec = remaining_us / 1000000,
+            .tv_usec = remaining_us % 1000000,
+        };
+
+        int ready = select(fd + 1, writable ? NULL : &read_fds,
+                           writable ? &write_fds : NULL, NULL, &timeout);
+        if (ready > 0) {
+            return true;
+        }
+        if (ready == 0 || errno != EINTR) {
+            return false;
+        }
+    }
+}
+
+static bool connect_until(int fd, const struct sockaddr_in *address, int64_t deadline_us)
+{
+    if (connect(fd, (const struct sockaddr *) address, sizeof(*address)) == 0) {
+        return true;
+    }
+    if (errno != EINPROGRESS && errno != EWOULDBLOCK) {
+        return false;
+    }
+    if (!wait_for_socket(fd, true, deadline_us)) {
+        return false;
+    }
+
+    int socket_error = 0;
+    socklen_t error_len = sizeof(socket_error);
+    return getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_len) == 0 &&
+           socket_error == 0;
+}
+
+static bool send_all_until(int fd, const char *data, size_t len, int64_t deadline_us)
 {
     while (len > 0) {
         int sent = send(fd, data, len, 0);
-        if (sent <= 0) {
-            return false;
+        if (sent > 0) {
+            data += sent;
+            len -= sent;
+            continue;
         }
-        data += sent;
-        len -= sent;
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
+            wait_for_socket(fd, true, deadline_us)) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool receive_response_until(int fd, int64_t deadline_us)
+{
+    char headers[512] = {0};
+    size_t headers_used = 0;
+    size_t header_bytes = 0;
+    size_t content_length = 0;
+    size_t total_received = 0;
+    bool headers_complete = false;
+    char response[256];
+
+    while (esp_timer_get_time() < deadline_us) {
+        int received = recv(fd, response, sizeof(response), 0);
+        if (received > 0) {
+            total_received += received;
+            if (!headers_complete) {
+                size_t copy = sizeof(headers) - headers_used - 1;
+                if (copy > (size_t) received) {
+                    copy = received;
+                }
+                memcpy(headers + headers_used, response, copy);
+                headers_used += copy;
+
+                char *headers_end = strstr(headers, "\r\n\r\n");
+                if (headers_end == NULL) {
+                    if (copy < (size_t) received || headers_used == sizeof(headers) - 1) {
+                        return false;
+                    }
+                    continue;
+                }
+
+                bool status_ok = strncmp(headers, "HTTP/1.0 200 ", 13) == 0 ||
+                                 strncmp(headers, "HTTP/1.1 200 ", 13) == 0;
+                char *length_value = strstr(headers, "\r\nContent-Length: ");
+                if (!status_ok || length_value == NULL) {
+                    return false;
+                }
+                length_value += sizeof("\r\nContent-Length: ") - 1;
+                char *length_end = NULL;
+                unsigned long long parsed_length = strtoull(length_value, &length_end, 10);
+                if (length_end == length_value || strncmp(length_end, "\r\n", 2) != 0 ||
+                    parsed_length > SIZE_MAX) {
+                    return false;
+                }
+
+                header_bytes = headers_end + 4 - headers;
+                content_length = parsed_length;
+                headers_complete = true;
+            }
+            if (headers_complete && total_received - header_bytes >= content_length) {
+                return true;
+            }
+            continue;
+        }
+        if (received == 0) {
+            return headers_complete && total_received - header_bytes >= content_length;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if ((errno == EAGAIN || errno == EWOULDBLOCK) &&
+            wait_for_socket(fd, false, deadline_us)) {
+            continue;
+        }
+        return false;
+    }
+    return false;
+}
+
+static bool make_nonblocking(int fd)
+{
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return false;
     }
     return true;
 }
@@ -146,19 +284,12 @@ static bool send_all(int fd, const char *data, size_t len)
 /* A flag that slate_api_init() returned would prove registration, not that the
  * HTTP task can answer. This traverses lwIP and the real public route on the
  * address a second machine would use, which is exactly §11.2's criterion. */
-static bool info_answers(const health_endpoint_t *endpoint)
+static bool info_answers(const health_endpoint_t *endpoint, int64_t deadline_us)
 {
     int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (fd < 0) {
         return false;
     }
-
-    struct timeval timeout = {
-        .tv_sec = HEALTH_IO_TIMEOUT_MS / 1000,
-        .tv_usec = (HEALTH_IO_TIMEOUT_MS % 1000) * 1000,
-    };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
     struct sockaddr_in address = {
         .sin_family = AF_INET,
@@ -169,31 +300,20 @@ static bool info_answers(const health_endpoint_t *endpoint)
         "GET " SLATE_API_BASE_PATH "/info HTTP/1.0\r\n"
         "Host: slate\r\nConnection: close\r\n\r\n";
 
-    char status_line[64] = {0};
-    bool ok = connect(fd, (struct sockaddr *) &address, sizeof(address)) == 0 &&
-              send_all(fd, REQUEST, sizeof(REQUEST) - 1);
-    size_t status_used = 0;
-    char response[256];
-    int received = -1;
-    while (ok && (received = recv(fd, response, sizeof(response), 0)) > 0) {
-        size_t copy = sizeof(status_line) - status_used - 1;
-        if (copy > (size_t) received) {
-            copy = received;
-        }
-        if (copy > 0) {
-            memcpy(status_line + status_used, response, copy);
-            status_used += copy;
-        }
-    }
+    bool complete = make_nonblocking(fd) && connect_until(fd, &address, deadline_us) &&
+                    send_all_until(fd, REQUEST, sizeof(REQUEST) - 1, deadline_us) &&
+                    receive_response_until(fd, deadline_us);
     close(fd);
 
-    /* Drain the whole response before closing. Reading only the status would
+    /* Drain the whole response, but never past the attempt's absolute deadline.
+     * Reading only the status would
      * make the server's send of the JSON body fail with ECONNRESET even though
      * the health check passed — noise that looks like a sick API in the exact
-     * log this check exists to make trustworthy. */
-    return status_used > 0 &&
-           (strncmp(status_line, "HTTP/1.0 200 ", 13) == 0 ||
-            strncmp(status_line, "HTTP/1.1 200 ", 13) == 0);
+     * log this check exists to make trustworthy. Reading the announced body
+     * length also proves the one HTTP task finished /info and is free to accept
+     * the next OTA, without depending on the server closing a persistent TCP
+     * connection. */
+    return complete;
 }
 
 static void rollback_now(void)
@@ -218,8 +338,13 @@ static void boot_health_task(void *arg)
 
     while (esp_timer_get_time() < HEALTH_DEADLINE_US) {
         health_endpoint_t endpoint = {0};
+        int64_t attempt_deadline = esp_timer_get_time() + HEALTH_IO_TIMEOUT_MS * 1000LL;
+        if (attempt_deadline > HEALTH_DEADLINE_US) {
+            attempt_deadline = HEALTH_DEADLINE_US;
+        }
         if (esp_netif_tcpip_exec(snapshot_health_endpoint, &endpoint) == ESP_OK &&
-            info_answers(&endpoint) && esp_timer_get_time() < HEALTH_DEADLINE_US) {
+            info_answers(&endpoint, attempt_deadline) &&
+            esp_timer_get_time() < HEALTH_DEADLINE_US) {
             int64_t elapsed_ms = esp_timer_get_time() / 1000;
             esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
             if (err == ESP_OK) {
