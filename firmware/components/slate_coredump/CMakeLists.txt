@@ -12,5 +12,19 @@
 idf_component_register(
     SRCS "slate_coredump.c"
     INCLUDE_DIRS "include"
-    REQUIRES slate_api espcoredump esp_app_format esp_partition
+    REQUIRES slate_api espcoredump esp_app_format esp_partition esp_timer
 )
+
+#
+#   -DSLATE_COREDUMP_SELFTEST=1   compile slate_coredump_partition_is_blank(),
+#                                 which exists only for main's forced panic (see
+#                                 firmware/main/CMakeLists.txt). Passed to this
+#                                 component as well as to main, because the
+#                                 declaration and the definition have to agree —
+#                                 the same arrangement slate_api makes for its own
+#                                 selftest.
+#
+if(DEFINED SLATE_COREDUMP_SELFTEST)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE
+                               SLATE_COREDUMP_SELFTEST=${SLATE_COREDUMP_SELFTEST})
+endif()

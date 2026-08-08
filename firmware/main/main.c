@@ -62,25 +62,40 @@ static void ota_rollback_selftest(void)
  * partition there will ever be — a dump is produced by crashing, and nothing in
  * M1's scope crashes on purpose.
  *
- * Two properties, both deliberate.
+ * Two guards, and between them they are what keeps this from being the one knob
+ * in the tree that can strand a panel. The neighbour above restricts itself to
+ * PENDING_VERIFY for the same reason and says so in as many words.
  *
- * It panics only when flash holds no readable dump, so it is not a boot loop: the
- * first boot crashes, the reboot after it finds a dump and carries on serving it.
- * Re-arming the test means erasing the partition, which is a decision somebody
- * takes rather than one a build knob takes for them.
+ * The first is "has anything ever been written here", not "is there a dump I can
+ * read". Those differ exactly when the write failed — which S-3 observed
+ * happening while the writer logged success — and a guard that re-arms on a
+ * corrupt dump panics again on every boot forever. On a serial flash there is no
+ * PENDING_VERIFY image and therefore no rollback to break that cycle, and no
+ * endpoint erases the partition, so the way out would be a cable: precisely §9's
+ * unreachable powered panel. It also keeps the failed write, which is evidence.
  *
- * It panics at the end of app_main, before §11.2's health check can mark the
- * image valid, so an OTA of this build exercises the whole of §11.3's promise in
- * one go: the panel crashes on a pending image, the bootloader returns to the
- * previous slot, and the dump written by an image that is no longer running is
- * still fetchable from the one that is. That is the real shape of the problem —
- * a panel that came back from a crash is usually not running the firmware that
- * crashed.
+ * The second is the reset reason, which closes the same hole from the other side:
+ * a boot that is itself the reboot from a panic has already run the test, whatever
+ * the panic managed to leave on flash.
+ *
+ * It panics before §11.2's health check is armed, so an OTA of this build
+ * exercises the whole of §11.3's promise in one go: the panel crashes on a
+ * pending image, the bootloader returns to the previous slot, and the dump
+ * written by an image that is no longer running is still fetchable from the one
+ * that is. That is the real shape of the problem — a panel that came back from a
+ * crash is usually not running the firmware that crashed. Ordering, not timing:
+ * the health task runs at a higher priority than app_main and would otherwise be
+ * free to mark the image valid first, which made the promise a race this happened
+ * to win by ten milliseconds.
  */
 static void coredump_selftest(void)
 {
-    if (slate_coredump_available()) {
-        ESP_LOGW(TAG, "coredump selftest: a dump is already on flash; not panicking again");
+    if (esp_reset_reason() == ESP_RST_PANIC) {
+        ESP_LOGW(TAG, "coredump selftest: this boot follows a panic; not panicking again");
+        return;
+    }
+    if (!slate_coredump_partition_is_blank()) {
+        ESP_LOGW(TAG, "coredump selftest: the partition is not blank; not panicking again");
         return;
     }
     ESP_LOGE(TAG, "coredump selftest: panicking to write a core dump");
@@ -396,9 +411,9 @@ static void start_api(void)
     }
 
     /* §11.3's other half of the same idea: OTA is how firmware gets onto a panel
-     * that has no cable, and this is how the reason it crashed gets off one. It
-     * also prints what is on flash, so every boot report says whether there is a
-     * crash waiting to be fetched. */
+     * that has no cable, and this is how the reason it crashed gets off one. The
+     * boot line about what is on flash is not here — it belongs to the boot
+     * report, and it has to survive an HTTP server that did not start. */
     err = slate_coredump_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "core dump retrieval unavailable: %s — continuing", esp_err_to_name(err));
@@ -460,6 +475,13 @@ void app_main(void)
                       "are gone");
     }
 
+    /* §11.3, and here rather than beside the route it is fetched through: the
+     * reset reason two lines above says a panic happened, and this says what
+     * crashed and whether this firmware is the one that can explain it. Neither
+     * needs a network, which is the point — the boot that cannot serve the dump
+     * is the boot that most needs to describe it. */
+    slate_coredump_report();
+
     ESP_LOGI(TAG, "home assistant %s",
              slate_store_ha_token_is_set() ? "configured" : "not configured");
     ESP_LOGI(TAG, "free heap %u B internal, %u B psram",
@@ -478,6 +500,14 @@ void app_main(void)
     start_api();
     start_network();
 
+    /* Before the health check is armed, not after: the panic is supposed to
+     * happen while the image is still unverified, and the health task runs at a
+     * higher priority than this one — so leaving it to the scheduler would make
+     * §11.2's rollback a race rather than the other half of the test. */
+#ifdef SLATE_COREDUMP_SELFTEST
+    coredump_selftest();
+#endif
+
     /* Keep this independent of both initializers' return values. A pending
      * image whose HTTP server or radio failed to start is exactly the image the
      * 60-second health deadline must reject. */
@@ -485,8 +515,4 @@ void app_main(void)
     if (health_err != ESP_OK) {
         ESP_LOGE(TAG, "OTA boot health unavailable: %s", esp_err_to_name(health_err));
     }
-
-#ifdef SLATE_COREDUMP_SELFTEST
-    coredump_selftest();
-#endif
 }

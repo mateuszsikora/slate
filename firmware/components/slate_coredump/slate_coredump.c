@@ -16,6 +16,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "esp_timer.h"
 
 #include "slate_api.h"
 
@@ -28,7 +29,8 @@
  * sdkconfig.defaults: delete firmware/sdkconfig and reconfigure.
  */
 #if !CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH || !CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
-#error "slate_coredump requires CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH and CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF"
+#error "slate_coredump needs CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH " \
+       "and CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF"
 #endif
 
 static const char *TAG = "coredump";
@@ -37,10 +39,29 @@ static const char *TAG = "coredump";
  * Out of PSRAM where there is any, for §11.1's reason: the buffer only ever
  * reaches esp_partition_read() and httpd_resp_send_chunk(), neither of which
  * needs DMA or internal memory, and §6.2's internal budget belongs to the
- * display and the setup access point. 4096 B matches the OTA path so that the
- * two transfers over the same one HTTP task behave the same way.
+ * display and the setup access point.
  */
 #define CHUNK_BYTES 4096
+
+/*
+ * A wall-clock bound on the response, which §11.1 makes mandatory rather than
+ * optional for anything that occupies the one HTTP task: "'does not answer for a
+ * while' is a client away from 'does not answer'". The number is the OTA path's
+ * own budget, and if 300 s is generous for a 6 MB upload it is generous for a
+ * dump of at most 128 KB.
+ *
+ * What it bounds and what it does not, because the difference is not obvious.
+ * A client that has stopped reading altogether is already bounded without this,
+ * by the socket's send_wait_timeout — httpd_resp_send_chunk() fails when nothing
+ * moves for 5 s. This bounds the other case: a link slow enough that the whole
+ * transfer would outlast §11.2's 60-second health window and take a healthy
+ * image down with it. What neither bounds is a client that accepts a few bytes
+ * inside every send window, because that resets the socket timeout and
+ * httpd_resp_send_chunk() does not return until its chunk is out. Bounding that
+ * needs a send path that owns a deadline of its own, which is #13's channel;
+ * it is stated here rather than pretended, and it costs a valid device token.
+ */
+#define SEND_BUDGET_US (300 * 1000000LL)
 
 /* --- Refusals ----------------------------------------------------------- */
 
@@ -83,14 +104,31 @@ static esp_err_t refuse_dump_status(httpd_req_t *req, esp_err_t err)
     }
 }
 
-/* --- Retrieval ---------------------------------------------------------- */
+/* --- What is on flash --------------------------------------------------- */
 
 /* ESP-IDF writes the total length of the dump into the first word of the
  * partition, so erased flash reads as this. */
 #define BLANK_LENGTH 0xFFFFFFFF
 
+/*
+ * Resolved once and remembered, because the answer cannot change while the
+ * device is running: the only writer of this partition is the panic handler, and
+ * it does not return. The cost of asking is what makes that worth stating —
+ * esp_core_dump_image_check() reads and checksums the whole dump in 32-byte
+ * units, which is some 800 flash transactions for the 26 KB dump #14 measured
+ * and four thousand at the 128 KB ceiling, each one a window with the cache and
+ * interrupts off on both cores. Asking per request, and three times per boot,
+ * was buying a constant over and over.
+ */
+static struct {
+    bool resolved;
+    esp_err_t status;
+    const esp_partition_t *partition;
+    size_t size;
+} s_dump;
+
 /**
- * Is there a dump, is it intact, and where in the partition does it sit.
+ * Is there a dump, is it intact, and how big is it.
  *
  * This is the one place ESP-IDF's vocabulary is corrected, and the correction is
  * the whole reason the function exists. esp_core_dump_image_check() documents
@@ -106,75 +144,94 @@ static esp_err_t refuse_dump_status(httpd_req_t *req, esp_err_t err)
  * ESP_ERR_NOT_FOUND. Everything past that point is a dump that claims to exist,
  * and the checksum decides whether it can be believed.
  *
- * esp_core_dump_image_get() then reports an absolute flash address, while
- * esp_partition_read() wants an offset into a partition. Going through the
- * partition table rather than reading raw flash is also what makes a dump
- * claiming to extend past the 128 KB of §6.3 a refusal instead of a read of
- * whatever follows it.
+ * The offset within the partition is deliberately not returned: ESP-IDF writes a
+ * dump at the partition base and esp_core_dump_image_get() reports that base
+ * back, so an offset would be a variable that is always zero. esp_partition_read()
+ * refuses a read that would run past the partition, which is the bound §6.3
+ * wants and not something this has to re-derive.
  */
-static esp_err_t dump_status(const esp_partition_t **out_partition, size_t *out_offset,
-                            size_t *out_size)
+static esp_err_t dump_status(const esp_partition_t **out_partition, size_t *out_size)
 {
+    if (s_dump.resolved) {
+        *out_partition = s_dump.partition;
+        *out_size = s_dump.size;
+        return s_dump.status;
+    }
+
     const esp_partition_t *partition = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
+    esp_err_t err;
+    uint32_t claimed = 0;
+    size_t address = 0;
+    size_t size = 0;
+
     if (partition == NULL) {
         /* Not ESP_ERR_NOT_FOUND: a panel with no coredump partition can never
          * produce a dump, which is a flash layout fault (§6.3) and not the same
          * news as "nothing has crashed". */
         ESP_LOGE(TAG, "no coredump partition in the table");
-        return ESP_ERR_INVALID_STATE;
+        err = ESP_ERR_INVALID_STATE;
+        goto done;
     }
 
-    uint32_t claimed = 0;
-    esp_err_t err = esp_partition_read(partition, 0, &claimed, sizeof(claimed));
+    err = esp_partition_read(partition, 0, &claimed, sizeof(claimed));
     if (err != ESP_OK) {
-        return err;
+        goto done;
     }
     if (claimed == BLANK_LENGTH) {
-        return ESP_ERR_NOT_FOUND;
+        err = ESP_ERR_NOT_FOUND;
+        goto done;
     }
 
     err = esp_core_dump_image_check();
     if (err != ESP_OK) {
-        /* The partition was there a moment ago, so a NOT_FOUND from here is not
-         * the blank case and must not be answered as one. */
-        return err == ESP_ERR_NOT_FOUND ? ESP_ERR_INVALID_STATE : err;
+        goto done;
     }
-
-    size_t address = 0;
-    size_t size = 0;
     err = esp_core_dump_image_get(&address, &size);
-    if (err != ESP_OK) {
-        return err;
-    }
-    if (size == 0 || address < partition->address ||
-        address - partition->address + size > partition->size) {
-        return ESP_ERR_INVALID_SIZE;
+
+done:
+    switch (err) {
+    case ESP_OK:              /* a dump, and it checks out */
+    case ESP_ERR_NOT_FOUND:   /* blank partition */
+    case ESP_ERR_INVALID_SIZE:
+    case ESP_ERR_INVALID_CRC: /* something is there and cannot be believed */
+    case ESP_ERR_INVALID_STATE: /* no coredump partition in this flash layout */
+        s_dump.resolved = true;
+        s_dump.status = err;
+        s_dump.partition = partition;
+        s_dump.size = size;
+        break;
+
+    default:
+        /* A failed flash transaction is the one outcome that can differ on a
+         * second attempt, so it is not remembered: answering 500 for the rest of
+         * the uptime because of one bad read would be worse than asking again. */
+        break;
     }
 
     *out_partition = partition;
-    *out_offset = address - partition->address;
     *out_size = size;
-    return ESP_OK;
+    return err;
 }
 
-bool slate_coredump_available(void)
+#ifdef SLATE_COREDUMP_SELFTEST
+bool slate_coredump_partition_is_blank(void)
 {
     const esp_partition_t *partition = NULL;
-    size_t offset = 0;
     size_t size = 0;
-    return dump_status(&partition, &offset, &size) == ESP_OK;
+    return dump_status(&partition, &size) == ESP_ERR_NOT_FOUND;
 }
+#endif
+
+/* --- Retrieval ---------------------------------------------------------- */
 
 static esp_err_t coredump_handler(httpd_req_t *req)
 {
-    /* Resolved before a byte is sent: the checksum is the difference between a
-     * dump and 128 KB of erased flash, and the status line is the only place
-     * this endpoint can still say which one it found. */
+    /* Resolved before a byte is sent, because the status line is the only place
+     * this endpoint can say which of the three states it found. */
     const esp_partition_t *partition = NULL;
-    size_t offset = 0;
     size_t size = 0;
-    esp_err_t err = dump_status(&partition, &offset, &size);
+    esp_err_t err = dump_status(&partition, &size);
     if (err != ESP_OK) {
         return refuse_dump_status(req, err);
     }
@@ -189,43 +246,70 @@ static esp_err_t coredump_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    /*
-     * The bytes as the panic handler wrote them: ESP-IDF's header, the ELF, and
-     * the checksum. `esp-coredump --core-format raw` is what reads that, which
-     * is also what `idf.py coredump-info` reads off a cable — one artifact, not
-     * one per transport. The filename is for a browser that followed the route
-     * out of curiosity; tools/coredump/fetch.sh names its own file.
-     */
-    httpd_resp_set_type(req, "application/octet-stream");
-    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"coredump.bin\"");
-
-    ESP_LOGI(TAG, "sending %u B of core dump from %s+0x%x", (unsigned) size, partition->label,
-             (unsigned) offset);
-
+    const int64_t budget_ends = esp_timer_get_time() + SEND_BUDGET_US;
     size_t sent = 0;
     while (sent < size) {
         size_t want = size - sent < CHUNK_BYTES ? size - sent : CHUNK_BYTES;
-        err = esp_partition_read(partition, offset + sent, buffer, want);
+        err = esp_partition_read(partition, sent, buffer, want);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "core dump read at 0x%x: %s", (unsigned) (offset + sent),
-                     esp_err_to_name(err));
+            ESP_LOGE(TAG, "core dump read at 0x%x: %s", (unsigned) sent, esp_err_to_name(err));
             break;
         }
+
+        /*
+         * The response is committed here rather than before the loop, and that
+         * ordering is the difference between a documented refusal and a socket
+         * that closes with nothing in it. esp_http_server buffers the status and
+         * the headers until the first chunk, so while `sent` is zero nothing has
+         * reached the wire and a failed read can still be answered as §4's
+         * `coredump_read_failed` — which it could not if the 200 had already
+         * gone out. Reachable rather than theoretical: the buffer above is PSRAM
+         * by preference, and esp_flash_read needs an internal staging buffer for
+         * a PSRAM destination, so a read can fail on a device short of internal
+         * memory (§6.2).
+         *
+         * The bytes are the flash image as the panic handler wrote it: ESP-IDF's
+         * header, the ELF, and the checksum. `esp-coredump --core-format raw` is
+         * what reads that, which is also what `idf.py coredump-info` reads off a
+         * cable — one artifact, not one per transport. The filename is for a
+         * browser that followed the route out of curiosity;
+         * tools/coredump/fetch.sh names its own file.
+         */
+        if (sent == 0) {
+            httpd_resp_set_type(req, "application/octet-stream");
+            httpd_resp_set_hdr(req, "Content-Disposition",
+                               "attachment; filename=\"coredump.bin\"");
+            ESP_LOGI(TAG, "sending %u B of core dump from %s", (unsigned) size,
+                     partition->label);
+        }
+
         if (httpd_resp_send_chunk(req, buffer, want) != ESP_OK) {
             ESP_LOGW(TAG, "client stopped reading after %u of %u B", (unsigned) sent,
                      (unsigned) size);
             break;
         }
         sent += want;
+
+        if (sent < size && esp_timer_get_time() > budget_ends) {
+            ESP_LOGW(TAG, "abandoning the response after %u of %u B — %lld s budget spent",
+                     (unsigned) sent, (unsigned) size, SEND_BUDGET_US / 1000000);
+            break;
+        }
     }
     free(buffer);
 
+    if (sent == 0) {
+        /* Nothing was committed, so the whole vocabulary is still available. */
+        return refuse_dump_status(req, err == ESP_OK ? ESP_FAIL : err);
+    }
+
     /*
-     * A failure here cannot be a §4 error document: the 200 and part of the body
-     * have already gone. Abandoning the response without the terminating chunk
-     * is what tells the client its file is incomplete — the alternative, closing
-     * the stream cleanly, would hand esp-coredump a truncated dump and let it
-     * decide the panel is confused rather than the transfer.
+     * Past the first chunk a failure cannot be a §4 error document: the 200 and
+     * part of the body have already gone. Abandoning the response without the
+     * terminating chunk is what tells the client its file is incomplete — the
+     * alternative, closing the stream cleanly, would hand esp-coredump a
+     * truncated dump and let it decide the panel is confused rather than the
+     * transfer.
      */
     if (sent < size) {
         return ESP_FAIL;
@@ -244,13 +328,17 @@ static esp_err_t coredump_handler(httpd_req_t *req)
  * wrong `.elf` produces a plausible backtrace through the wrong functions. The
  * SHA-256 prefix of the ELF is the same string ESP-IDF prints in its own panic
  * output, so the comparison is one a person can also make by eye.
+ *
+ * Deliberately not part of registering the route. This is the diagnostic that
+ * works when nothing else does, and a boot whose HTTP server did not start is
+ * exactly the boot that needs it — so main calls it with the rest of the boot
+ * report rather than the endpoint carrying it as a side effect.
  */
-static void report_dump_on_flash(void)
+void slate_coredump_report(void)
 {
     const esp_partition_t *partition = NULL;
-    size_t offset = 0;
     size_t size = 0;
-    esp_err_t err = dump_status(&partition, &offset, &size);
+    esp_err_t err = dump_status(&partition, &size);
     if (err == ESP_ERR_NOT_FOUND) {
         ESP_LOGI(TAG, "no core dump on flash");
         return;
@@ -262,10 +350,22 @@ static void report_dump_on_flash(void)
         return;
     }
 
-    /* Off the stack: this runs on the main task, and the summary carries a
-     * backtrace array that is not free. A boot report is also the one caller
-     * that can simply say less when there is no heap for it. */
-    esp_core_dump_summary_t *summary = malloc(sizeof(*summary));
+    /*
+     * calloc, and the two "unknown"s below, because esp_core_dump_get_summary()
+     * returns ESP_OK whether or not it found anything to fill the fields with:
+     * the task name and program counter arrive only if a loadable segment
+     * matches the crashed task's TCB, and the image SHA only if the dump carries
+     * the note that holds it. A panic whose task stack was too broken to dump —
+     * which is a stack overflow, i.e. one of the crashes this line exists for —
+     * leaves both untouched. On malloc'd memory that prints heap contents as a
+     * task name and compares heap contents against the running image; zeroed, it
+     * is an empty string this can test for and say so.
+     *
+     * Off the stack rather than on it because the summary carries a backtrace
+     * array, and a boot report is the one caller that can simply say less when
+     * there is no heap for it.
+     */
+    esp_core_dump_summary_t *summary = calloc(1, sizeof(*summary));
     if (summary == NULL || esp_core_dump_get_summary(summary) != ESP_OK) {
         ESP_LOGW(TAG, "core dump on flash: %u B, no summary available — fetch it from GET "
                       SLATE_API_BASE_PATH "/coredump",
@@ -274,18 +374,31 @@ static void report_dump_on_flash(void)
         return;
     }
 
-    const char *running = esp_app_get_elf_sha256_str();
-    bool same_image = strncmp((const char *) summary->app_elf_sha256, running,
-                              APP_ELF_SHA256_SZ - 1) == 0;
+    char task[sizeof(summary->exc_task) + sizeof("\"\"")];
+    if (summary->exc_task[0] != '\0') {
+        snprintf(task, sizeof(task), "\"%.*s\"", (int) sizeof(summary->exc_task),
+                 summary->exc_task);
+    } else {
+        strlcpy(task, "unknown", sizeof(task));
+    }
+
+    char image[APP_ELF_SHA256_SZ + sizeof("NOT this firmware ()")];
+    if (summary->app_elf_sha256[0] != '\0') {
+        bool same = strncmp((const char *) summary->app_elf_sha256,
+                            esp_app_get_elf_sha256_str(), APP_ELF_SHA256_SZ - 1) == 0;
+        snprintf(image, sizeof(image), "%.*s (%s)", APP_ELF_SHA256_SZ - 1,
+                 (const char *) summary->app_elf_sha256,
+                 same ? "this firmware" : "NOT this firmware");
+    } else {
+        strlcpy(image, "unknown", sizeof(image));
+    }
 
     /* A warning rather than an info line: a panel that has crashed at some point
      * is a panel with something to explain, and this is the line #13 streams to
      * a desk. */
-    ESP_LOGW(TAG, "core dump on flash: %u B, task \"%.*s\" at pc 0x%08" PRIx32
-                  ", image %.*s (%s) — GET " SLATE_API_BASE_PATH "/coredump",
-             (unsigned) size, (int) sizeof(summary->exc_task), summary->exc_task,
-             summary->exc_pc, APP_ELF_SHA256_SZ - 1, (const char *) summary->app_elf_sha256,
-             same_image ? "this firmware" : "NOT this firmware");
+    ESP_LOGW(TAG, "core dump on flash: %u B, task %s at pc 0x%08" PRIx32
+                  ", image %s — GET " SLATE_API_BASE_PATH "/coredump",
+             (unsigned) size, task, summary->exc_pc, image);
     free(summary);
 }
 
@@ -300,9 +413,5 @@ esp_err_t slate_coredump_init(void)
         .handler = coredump_handler,
     };
 
-    esp_err_t err = slate_api_register_uri(&coredump, SLATE_API_AUTH_DEVICE_TOKEN);
-    if (err == ESP_OK) {
-        report_dump_on_flash();
-    }
-    return err;
+    return slate_api_register_uri(&coredump, SLATE_API_AUTH_DEVICE_TOKEN);
 }

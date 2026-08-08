@@ -65,42 +65,56 @@ authenticated_curl() {
         curl --config - "$@"
 }
 
+# Same shape and the same reasoning as tools/ota/upload.sh's helper: python3 is
+# already a hard dependency of idf.py and of every script in tools/, and a regex
+# blind to the shape of what it reads reports "the panel is not answering" for a
+# document it merely did not recognise.
+json_field() {
+    python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin).get(sys.argv[1], ""))
+except Exception:
+    pass' "$1"
+}
+
+# Downloaded beside the destination and moved onto it only after the 200, which is
+# upload.sh's arrangement and here it protects something: `curl --output` truncates
+# its target the moment the connection opens, so writing straight to ${OUTPUT}
+# would let a 404 — the ordinary answer for a panel that has not crashed — destroy
+# a dump that was fetched to that path earlier. The panel is the only other copy,
+# and only until the next panic overwrites it. In the same directory so the move
+# is a rename rather than a copy across filesystems.
+mkdir -p "$(dirname "${OUTPUT}")"
+body="$(mktemp "${OUTPUT}.XXXXXX")"
+trap 'rm -f "${body}"' EXIT
+
 # The status and the body are both needed: a 404 carries §4's
 # {"error":"no_coredump"}, which is the answer to "has this panel ever crashed"
-# and not a failure of this script. Written to the output path either way and
-# removed unless the transfer succeeded, so a refusal cannot leave a previous
-# dump behind looking like a fresh one.
+# and not a failure of this script.
 set +e
 status="$(authenticated_curl \
     --connect-timeout 5 \
     --max-time 120 \
-    --output "${OUTPUT}" \
+    --output "${body}" \
     --write-out '%{http_code}' \
     "${API}/coredump")"
 curl_status=$?
 set -e
 
 if [[ ${curl_status} -ne 0 ]]; then
-    rm -f "${OUTPUT}"
     echo "could not fetch from ${BASE}: curl exit ${curl_status}" >&2
     exit 1
 fi
 if [[ "${status}" == "404" ]]; then
-    rm -f "${OUTPUT}"
     echo "no core dump on ${BASE} — nothing has panicked since the partition was last erased" >&2
     exit 1
 fi
 if [[ "${status}" != "200" ]]; then
-    error="$(python3 -c 'import json,sys
-try:
-    print(json.load(open(sys.argv[1])).get("error", ""))
-except Exception:
-    pass' "${OUTPUT}" 2>/dev/null || true)"
-    rm -f "${OUTPUT}"
-    echo "core dump refused: HTTP ${status} ${error}" >&2
+    echo "core dump refused: HTTP ${status} $(json_field error < "${body}")" >&2
     exit 1
 fi
 
+mv "${body}" "${OUTPUT}"
 bytes="$(wc -c < "${OUTPUT}" | tr -d ' ')"
 echo "wrote ${OUTPUT} (${bytes} bytes)"
 

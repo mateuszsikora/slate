@@ -28,6 +28,10 @@
  * `idf.py coredump-info` pulls over a cable, so the two paths do not produce two
  * formats to remember. tools/coredump/fetch.sh is the host side of it.
  *
+ * A response that stops early is the one outcome with no error document, because
+ * the 200 has already gone: the terminating chunk is absent, so the client sees a
+ * transfer that failed rather than a dump that is short. §4.1 says the same.
+ *
  * `corrupt_coredump` is a named answer rather than a body the host has to
  * diagnose, and S-3 is why. Its log showed `esp_core_dump_flash` reporting "Core
  * dump has been saved to flash" three lines after the write had failed
@@ -50,25 +54,21 @@
  * dump_status() in the implementation.
  *
  *
- * THE BOOT LINE
- *
- * slate_coredump_init() also logs a one-line summary of a dump it finds on
- * flash: the crashed task, the program counter, and whether the dump was written
- * by the image that is running now. The last part is the question that decides
- * whether the `.elf` on the desk can symbolicate it at all — §11.2 rolls a
- * panicking image back, so the panel that serves a dump is routinely NOT the
- * panel that produced it. When #13 lands, that line is the first thing a remote
- * log says about a panel which came back from a crash.
- *
- *
- * THREADING
+ * THREADING AND COST
  *
  * slate_coredump_init() is called once from app_main, after slate_api_init().
  * The response is streamed on the HTTP server's task out of a heap buffer, which
  * follows §11.1's arrangement for the same reason: the one HTTP task is occupied
- * for the duration, and a dump is tens of kilobytes rather than a megabyte.
+ * for the duration, and a dump is tens of kilobytes rather than a megabyte. It
+ * carries §11.1's other half too — a wall-clock budget on the whole response, so
+ * that a slow link cannot hold the API past §11.2's health deadline.
+ *
  * Nothing writes the partition at runtime — only the panic handler does, and it
- * does not return — so no lock stands between a read and a write.
+ * does not return — so no lock stands between a read and a write, and the state
+ * of the partition is resolved once per boot and remembered. That matters more
+ * than it looks: the integrity check reads and checksums the whole dump in
+ * 32-byte units, which is hundreds of cache-disabling flash transactions per
+ * call.
  */
 
 #pragma once
@@ -82,7 +82,7 @@ extern "C" {
 #endif
 
 /**
- * @brief Register `GET /api/v1/coredump` and report any dump on flash.
+ * @brief Register `GET /api/v1/coredump`.
  *
  * Call after slate_api_init(). Returns what registration returned; a panel
  * whose endpoint could not be registered is degraded, not broken, and the
@@ -91,16 +91,34 @@ extern "C" {
 esp_err_t slate_coredump_init(void);
 
 /**
- * @brief Whether flash holds a dump that `GET /api/v1/coredump` would serve.
+ * @brief Log what the coredump partition holds: nothing, a crash, or a mess.
  *
- * True only for a dump that is present and passes its checksum, so a blank
- * partition and a corrupt one both answer false — a dump nobody can read is not
- * one worth preserving. It is here for main's forced-panic knob, which uses it to
- * avoid crashing on top of a dump that has not been fetched yet, and for the same
- * reason no caller should have to know that ESP-IDF spells "blank" and
- * "nonsense" with one error code.
+ * Part of the boot report, and independent of slate_coredump_init() on purpose —
+ * a boot whose HTTP server did not start is exactly the boot where this line is
+ * the only account of the crash anybody will get. For a dump it names the crashed
+ * task, the program counter and the ELF SHA-256 prefix of the image that produced
+ * it, and whether that is the image now running. The last part is the one that
+ * decides whether the `.elf` on the desk can symbolicate it at all: §11.2 rolls a
+ * panicking image back, so the panel serving a dump is routinely NOT the panel
+ * that produced it. When #13 lands, this is the first thing a remote log says
+ * about a panel which came back from a crash.
  */
-bool slate_coredump_available(void);
+void slate_coredump_report(void);
+
+#ifdef SLATE_COREDUMP_SELFTEST
+
+/**
+ * @brief Whether the coredump partition is blank — no dump has ever been written.
+ *
+ * "Blank", not "no readable dump": a corrupt dump means a panic did happen and
+ * its record failed, which is both worth keeping and a reason not to crash on top
+ * of it. main's forced-panic knob needs exactly that distinction, and it is the
+ * difference between a knob that arms once and one that boot-loops a panel whose
+ * dump write failed.
+ */
+bool slate_coredump_partition_is_blank(void);
+
+#endif
 
 #ifdef __cplusplus
 }

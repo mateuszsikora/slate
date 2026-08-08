@@ -48,6 +48,14 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
 CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 
+# ESP-IDF's own boot-time integrity check is turned off because slate_coredump
+# does it: CHECK_BOOT reads and checksums the whole dump in 32-byte flash
+# transactions — some 800 of them for the 26 KB dump #14 measured, each with the
+# cache and interrupts off on both cores — and then logs a line that says less
+# than the boot report does. Once per boot rather than twice, and the one that
+# survives names the crashed task and whether this firmware can symbolicate it.
+CONFIG_ESP_COREDUMP_CHECK_BOOT=n
+
 # Two knobs are deliberately left at their ESP-IDF defaults, because both
 # defaults are the right answer here and the reason is not obvious from the name:
 #
@@ -60,12 +68,23 @@ CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
 #   a development artifact travelling over a LAN, and SHA256 needs more of the
 #   dump stack below to compute — stack that is spent inside a panic handler.
 #
-# One default is worth stating because it costs DRAM without being asked for:
-# with SPIRAM=y, FREERTOS_TASK_CREATE_ALLOW_EXT_MEM defaults to y, which makes
-# ESP_COREDUMP_USE_STACK_SIZE=y and reserves ESP_COREDUMP_STACK_SIZE (1792 B) of
-# DRAM for a dump stack of its own. That is not optional: a task whose stack is
-# in PSRAM cannot be dumped from that stack, and §6.2's internal-memory budget
-# has to carry the 1792 B.
+# What core dump costs in internal memory, measured rather than added up. The
+# boot report's free-DIRAM line moved from 232 575 B to 228 307 B when these
+# options went in: 4 268 B, on a panel with the station up.
+#
+# The largest identified piece is a dump stack of its own, and it is worth
+# naming because nothing asked for it: with SPIRAM=y,
+# FREERTOS_TASK_CREATE_ALLOW_EXT_MEM defaults to y, which makes
+# ESP_COREDUMP_USE_STACK_SIZE=y and reserves ESP_COREDUMP_STACK_SIZE (1792 B).
+# That part is not optional — a task whose stack is in PSRAM cannot be dumped
+# from that stack. The remaining ~2.5 KB is the component's own DRAM: its log
+# strings, which ESP_COREDUMP_LOGS=y keeps (ESP-IDF's help says disabling them
+# saves "~5KB", which is evidently an upper bound), plus its static state. Kept:
+# the panic path is the one place where a log line cannot be recovered later.
+#
+# §6.2's budget carries all 4 268 B. Its S-2 figure is for a display-bearing
+# image and is not this number, which is why the live value is printed on every
+# boot instead of assumed.
 
 # --- Tasks ---
 # app_main brings the store up and will bring the display, WiFi and the HTTP

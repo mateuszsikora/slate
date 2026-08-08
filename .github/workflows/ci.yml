@@ -158,6 +158,11 @@ jobs:
       # both normal variants stayed green. Build the opt-in image separately: it
       # keeps the development artifact unchanged and ccache makes the duplicate
       # ESP-IDF component compilation cheap.
+      #
+      # #14's forced panic is here for the same reason and nothing more: this
+      # compiles it, it does not run it. Its guards are what keep an image that
+      # deliberately aborts from stranding a panel, and a guard that stops
+      # compiling is a guard nobody notices losing.
       - name: Compile hardware self-tests
         if: matrix.variant == 'development'
         env:
@@ -170,6 +175,7 @@ jobs:
                  -DSDKCONFIG_DEFAULTS=sdkconfig.defaults \
                  -DSLATE_API_SELFTEST=1 \
                  -DSLATE_SETUP_SELFTEST=1 \
+                 -DSLATE_COREDUMP_SELFTEST=1 \
                  build
 
       # Component Manager re-solves dependencies and rewrites dependencies.lock
