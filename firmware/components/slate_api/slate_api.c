@@ -69,6 +69,35 @@ esp_err_t slate_api_send_error(httpd_req_t *req, const char *status, const char 
     return httpd_resp_send(req, body, len);
 }
 
+/*
+ * A rejected request whose body was not consumed leaves esp_http_server to
+ * drain it before serving anyone else. The server does that on the one HTTP
+ * task, in CONFIG_HTTPD_PURGE_BUF_LEN chunks of 32 bytes, and stops only when a
+ * read returns nothing. A client announcing a large Content-Length and then
+ * trickling can therefore hold the whole API indefinitely.
+ *
+ * Returning ESP_FAIL after sending the response drops that socket, which is
+ * the only bound that does not depend on the caller cooperating. A body-less
+ * refusal keeps the connection because there is nothing for the server to
+ * purge. This is deliberately conservative after a handler consumes a body:
+ * httpd_req_t retains the declared content_len rather than an unread count, so
+ * the same request receives the same connection policy whichever component
+ * parsed it. Routes such as OTA that always abandon a refused upload use the
+ * explicit unconditional variant, including for an empty upload.
+ */
+esp_err_t slate_api_refuse(httpd_req_t *req, const char *status, const char *error)
+{
+    esp_err_t err = slate_api_send_error(req, status, error);
+    return req->content_len > 0 ? ESP_FAIL : err;
+}
+
+esp_err_t slate_api_refuse_and_close(httpd_req_t *req, const char *status,
+                                     const char *error)
+{
+    slate_api_send_error(req, status, error);
+    return ESP_FAIL;
+}
+
 /**
  * Whether this request arrived on the setup access point's own address.
  *
@@ -151,20 +180,7 @@ static esp_err_t dispatch(httpd_req_t *req)
                    bearer_token_matches(req);
     if (!allowed) {
         httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer");
-        slate_api_send_error(req, "401 Unauthorized", "unauthorized");
-
-        /*
-         * A rejected request whose body was never read leaves esp_http_server
-         * to drain it before it serves anyone else, in CONFIG_HTTPD_PURGE_BUF_LEN
-         * chunks of 32 bytes, and that loop ends only when a read returns
-         * nothing. An unauthenticated client announcing a huge Content-Length
-         * and then trickling would hold the one HTTP task there indefinitely,
-         * so a 401 with a body closes the socket: it is the only bound that
-         * does not depend on the caller cooperating. A body-less 401 keeps the
-         * connection, because there is nothing to drain and a browser polling
-         * /info should not pay for a reconnect.
-         */
-        return req->content_len > 0 ? ESP_FAIL : ESP_OK;
+        return slate_api_refuse(req, "401 Unauthorized", "unauthorized");
     }
 
     /* Preserve the handler contract: the wrapper's context is private, and
@@ -465,13 +481,13 @@ static const char *reset_reason_str(esp_reset_reason_t reason)
 esp_err_t slate_api_send_json(httpd_req_t *req, cJSON *root)
 {
     if (root == NULL) {
-        return slate_api_send_error(req, "500 Internal Server Error", "out_of_memory");
+        return slate_api_refuse(req, "500 Internal Server Error", "out_of_memory");
     }
 
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (body == NULL) {
-        return slate_api_send_error(req, "500 Internal Server Error", "out_of_memory");
+        return slate_api_refuse(req, "500 Internal Server Error", "out_of_memory");
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -598,12 +614,7 @@ static esp_err_t not_found_handler(httpd_req_t *req, httpd_err_code_t error)
         return ESP_OK;
     }
 
-    slate_api_send_error(req, "404 Not Found", "not_found");
-
-    /* Same bound as the 401 above: a body nobody read is a body esp_http_server
-     * drains 32 bytes at a time on the one HTTP task, and a client that keeps
-     * trickling owns it for as long as it likes. */
-    return req->content_len > 0 ? ESP_FAIL : ESP_OK;
+    return slate_api_refuse(req, "404 Not Found", "not_found");
 }
 
 esp_err_t slate_api_init(void)
