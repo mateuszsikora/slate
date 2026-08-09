@@ -6,7 +6,9 @@
  * booted them on this exact N16R8 board and measured 26,441 us between VSYNCs.
  * Its recommended shape is implemented literally: two RGB565 framebuffers in
  * PSRAM, direct LVGL rendering, a ten-line internal bounce buffer and a flush
- * gate that permits exactly one rendered frame per panel scan.
+ * gate that permits exactly one rendered frame per panel scan. The gate is a
+ * deferral rather than a wait: §6.1 gives LVGL one task, so blocking it until
+ * VSYNC would stop every lv_timer and not merely the renderer.
  */
 
 #include <inttypes.h>
@@ -90,7 +92,6 @@ typedef struct {
 
 static QueueHandle_t s_work_queue;
 static SemaphoreHandle_t s_init_done;
-static SemaphoreHandle_t s_vsync;
 /* The CH422G's output register is read-modify-written by the driver, so two
  * tasks changing two different pins can lose one of them. Only the backlight
  * changes after start-up, but #28's schedule is a second task and this is
@@ -98,6 +99,7 @@ static SemaphoreHandle_t s_vsync;
 static SemaphoreHandle_t s_expander_lock;
 static TaskHandle_t s_task;
 static esp_lcd_panel_handle_t s_panel;
+static lv_display_t *s_display;
 static esp_io_expander_handle_t s_expander;
 static void *s_lvgl_pool;
 static esp_err_t s_init_result = ESP_ERR_INVALID_STATE;
@@ -111,6 +113,18 @@ static int64_t s_heap_metrics_at_us;
 static lv_obj_t *s_setup_overlay;
 static atomic_bool s_setup_presentation_active = ATOMIC_VAR_INIT(false);
 static atomic_bool s_setup_hide_pending = ATOMIC_VAR_INIT(false);
+
+/* The flush gate. `s_flush_pending` is armed on the LVGL task once a
+ * framebuffer has been submitted and disarmed by whichever of the VSYNC ISR and
+ * the task's stall check completes the flush first, so exactly one of them
+ * calls lv_display_flush_ready(). `s_frame_presented` carries the ISR's "the
+ * switch has taken effect" back to the task, which is the only place allowed to
+ * take the expander mutex and drive I²C. */
+static atomic_bool s_flush_pending = ATOMIC_VAR_INIT(false);
+static atomic_bool s_frame_presented = ATOMIC_VAR_INIT(false);
+/* Written and read on the LVGL task only, always before `s_flush_pending` is
+ * armed, so an observed pending flush is the one this timestamp belongs to. */
+static int64_t s_flush_submitted_us;
 
 /* Written in the VSYNC ISR, read on the LVGL task. The values are 64-bit on a
  * 32-bit CPU, so the read is protected rather than assumed atomic. */
@@ -225,11 +239,14 @@ static bool IRAM_ATTR on_vsync(esp_lcd_panel_handle_t panel,
     s_vsync_count++;
     portEXIT_CRITICAL_ISR(&s_vsync_lock);
 
-    BaseType_t higher_priority_task_woken = pdFALSE;
-    if (s_vsync) {
-        xSemaphoreGiveFromISR(s_vsync, &higher_priority_task_woken);
+    /* This is the gate. Releasing LVGL here rather than on the task keeps the
+     * promise — no next render before the panel has begun scanning this frame —
+     * while leaving the task free to run its other timers meanwhile. */
+    if (atomic_exchange_explicit(&s_flush_pending, false, memory_order_acq_rel)) {
+        atomic_store_explicit(&s_frame_presented, true, memory_order_release);
+        lv_display_flush_ready(s_display);
     }
-    return higher_priority_task_woken == pdTRUE;
+    return false;
 }
 
 static esp_err_t panel_init(void)
@@ -311,59 +328,87 @@ static void backlight_enable_first_frame(void)
     ESP_LOGI(TAG, "first frame displayed; backlight on");
 }
 
-static uint32_t vsync_generation(void)
-{
-    uint32_t generation;
-    portENTER_CRITICAL(&s_vsync_lock);
-    generation = s_vsync_count;
-    portEXIT_CRITICAL(&s_vsync_lock);
-    return generation;
-}
-
-static bool wait_for_vsync_after(uint32_t generation)
-{
-    const TickType_t timeout_ticks = pdMS_TO_TICKS(SLATE_DISPLAY_VSYNC_TIMEOUT_MS);
-    const TickType_t started = xTaskGetTickCount();
-
-    /* Remove a wake-up represented by `generation`. If a new VSYNC arrives
-     * between the snapshot and this take, the generation check below still
-     * observes it, so draining the binary semaphore cannot lose the event. */
-    xSemaphoreTake(s_vsync, 0);
-
-    while (vsync_generation() == generation) {
-        const TickType_t elapsed = xTaskGetTickCount() - started;
-        if (elapsed >= timeout_ticks ||
-            xSemaphoreTake(s_vsync, timeout_ticks - elapsed) != pdTRUE) {
-            return false;
-        }
-    }
-    return true;
-}
-
 static void flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
     (void) area;
 
-    if (lv_display_flush_is_last(display)) {
-        esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, 0,
-                                                  SLATE_LCD_H_RES, SLATE_LCD_V_RES,
-                                                  pixels);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "flush: %s", esp_err_to_name(err));
-        } else {
-            /* Snapshot after draw_bitmap has selected the new framebuffer. A
-             * VSYNC from before that call can never satisfy this generation
-             * wait, including the narrow ISR race that a drain-before-submit
-             * semaphore scheme leaves open. */
-            const uint32_t submitted_generation = vsync_generation();
-            if (!wait_for_vsync_after(submitted_generation)) {
-                ESP_LOGE(TAG, "VSYNC timeout after framebuffer switch");
-            } else {
-                backlight_enable_first_frame();
-            }
-        }
+    /* Nothing was submitted, so there is no switch to wait for. */
+    if (!lv_display_flush_is_last(display)) {
+        lv_display_flush_ready(display);
+        return;
     }
-    lv_display_flush_ready(display);
+
+    esp_err_t err = esp_lcd_panel_draw_bitmap(s_panel, 0, 0,
+                                              SLATE_LCD_H_RES, SLATE_LCD_V_RES,
+                                              pixels);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "flush: %s", esp_err_to_name(err));
+        lv_display_flush_ready(display);
+        return;
+    }
+
+    /* Armed after draw_bitmap has selected the new framebuffer, for the reason
+     * the generation snapshot it replaces was taken there: a VSYNC raised
+     * before the panel had this frame must not be the one that releases LVGL.
+     * Losing the race to the ISR here costs the frame already being scanned and
+     * can never release LVGL early, which is the direction that matters. */
+    s_flush_submitted_us = esp_timer_get_time();
+    atomic_store_explicit(&s_flush_pending, true, memory_order_release);
+}
+
+/*
+ * Deferring the completion is only half of the gate. LVGL waits for a flush by
+ * spinning on `disp->flushing` (lv_refr.c, wait_for_flushing()), and in double
+ * buffered mode it does that at the top of every flush — so the renderer would
+ * take the block straight back onto the task, as a busy-wait rather than as a
+ * sleep, and the timers this change exists to free would be no better off.
+ *
+ * The wait is avoided by not refreshing at all while the panel still holds the
+ * last frame. Wrapping the refresh timer's callback is how LVGL's own drivers
+ * reach into that decision; pausing the timer does not work, because any
+ * invalidation sends LV_EVENT_REFR_REQUEST and lv_display.c resumes it again.
+ */
+static void refresh_timer_cb(lv_timer_t *timer)
+{
+    if (atomic_load_explicit(&s_flush_pending, memory_order_acquire)) {
+        return;
+    }
+
+    /* Animations advance on their own timer, which no longer shares a pass with
+     * the renderer now that the renderer waits for the panel. A frame would
+     * otherwise sample them at a quantised time up to a refresh period stale,
+     * and uneven steps read as judder on anything moving. This is what the old
+     * lock-step gave for free. */
+    lv_anim_refr_now();
+    lv_display_refr_timer(timer);
+}
+
+/* The gate completes in an interrupt now, so a panel that stopped raising VSYNC
+ * would leave the renderer waiting for ever rather than for one frame. This is
+ * the old blocking wait's timeout, moved to where the wait went. */
+static void service_flush_gate(void)
+{
+    if (atomic_load_explicit(&s_flush_pending, memory_order_acquire) &&
+        esp_timer_get_time() - s_flush_submitted_us >=
+            SLATE_DISPLAY_VSYNC_TIMEOUT_MS * 1000LL &&
+        atomic_exchange_explicit(&s_flush_pending, false, memory_order_acq_rel)) {
+        ESP_LOGE(TAG, "VSYNC timeout after framebuffer switch");
+        lv_display_flush_ready(s_display);
+    }
+
+    if (atomic_exchange_explicit(&s_frame_presented, false, memory_order_acq_rel)) {
+        /* The scan has just begun, so this is the point in the frame with the
+         * most room before the next one. Making the renderer due now rather
+         * than on its own grid re-locks it to the panel, and consecutive frames
+         * are then a scan apart, which is what keeps motion even. It cannot run
+         * more often than the panel presents. */
+        lv_timer_ready(lv_display_get_refr_timer(s_display));
+
+        /* The ISR cannot do this itself: it takes the expander mutex and talks
+         * I²C. Retried on every presented frame, which is what the latch inside
+         * it is for. */
+        backlight_enable_first_frame();
+    }
 }
 
 static uint32_t tick_ms(void)
@@ -390,6 +435,10 @@ static esp_err_t lvgl_display_init(void)
     }
     lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
     lv_display_set_flush_cb(display, flush_cb);
+    /* Published before the first flush can arm the gate, because the VSYNC ISR
+     * completes that flush through this handle. */
+    s_display = display;
+    lv_timer_set_cb(lv_display_get_refr_timer(display), refresh_timer_cb);
 
     void *framebuffer_0 = NULL;
     void *framebuffer_1 = NULL;
@@ -422,6 +471,18 @@ static void display_resources_deinit(void)
         s_first_frame_shown = false;
     }
 
+    /* Before LVGL goes, because the VSYNC ISR completes flushes through
+     * s_display. This runs on the display task, which is pinned to the core the
+     * panel's interrupt was allocated on, so once the callbacks are gone no
+     * invocation of on_vsync is either in flight or still to come. */
+    if (s_panel) {
+        const esp_lcd_rgb_panel_event_callbacks_t no_callbacks = {0};
+        cleanup_error("RGB callbacks",
+                      esp_lcd_rgb_panel_register_event_callbacks(s_panel, &no_callbacks, NULL));
+    }
+    atomic_store_explicit(&s_flush_pending, false, memory_order_release);
+    s_display = NULL;
+
     if (s_lvgl_initialized) {
         lv_deinit();
         s_lvgl_initialized = false;
@@ -431,12 +492,9 @@ static void display_resources_deinit(void)
         s_lvgl_pool = NULL;
     }
 
-    /* Deleting the RGB panel stops DMA and removes its ISR before the VSYNC
-     * semaphore can be destroyed by the caller. */
+    /* Deleting the RGB panel stops its DMA and releases the framebuffers LVGL
+     * was rendering into, which is why it follows lv_deinit(). */
     if (s_panel) {
-        const esp_lcd_rgb_panel_event_callbacks_t no_callbacks = {0};
-        cleanup_error("RGB callbacks",
-                      esp_lcd_rgb_panel_register_event_callbacks(s_panel, &no_callbacks, NULL));
         cleanup_error("RGB panel", esp_lcd_panel_del(s_panel));
         s_panel = NULL;
     }
@@ -982,6 +1040,7 @@ static void display_task(void *ctx)
         if (atomic_exchange_explicit(&s_setup_hide_pending, false, memory_order_acq_rel)) {
             hide_setup_overlay(NULL);
         }
+        service_flush_gate();
         log_vsync_once();
         update_heap_metrics();
     }
@@ -999,10 +1058,6 @@ static void primitives_free(void)
     if (s_init_done) {
         vSemaphoreDelete(s_init_done);
         s_init_done = NULL;
-    }
-    if (s_vsync) {
-        vSemaphoreDelete(s_vsync);
-        s_vsync = NULL;
     }
     if (s_expander_lock) {
         vSemaphoreDelete(s_expander_lock);
@@ -1026,12 +1081,13 @@ esp_err_t slate_display_init(void)
     s_vsync_period_us = 0;
     s_vsync_count = 0;
     portEXIT_CRITICAL(&s_vsync_lock);
+    atomic_store_explicit(&s_flush_pending, false, memory_order_relaxed);
+    atomic_store_explicit(&s_frame_presented, false, memory_order_relaxed);
 
     s_work_queue = xQueueCreate(SLATE_DISPLAY_QUEUE_LEN, sizeof(slate_display_work_t));
     s_init_done = xSemaphoreCreateBinary();
-    s_vsync = xSemaphoreCreateBinary();
     s_expander_lock = xSemaphoreCreateMutex();
-    if (!s_work_queue || !s_init_done || !s_vsync || !s_expander_lock) {
+    if (!s_work_queue || !s_init_done || !s_expander_lock) {
         primitives_free();
         return ESP_ERR_NO_MEM;
     }

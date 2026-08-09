@@ -40,11 +40,12 @@ static const char *TAG = "slate_touch";
  * a few hundred microseconds against the 26.4 ms the panel takes to scan (S-2),
  * so the input device should never be the thing a frame is waiting for.
  *
- * It is not what it achieves today. The flush gate waits for VSYNC inside the
- * callback, on the one task §6.1 allows LVGL, so no lv_timer runs more than
- * once per frame and a drag measures 38 Hz whatever this says — see #81, which
- * owns that and is where the number becomes real. This is written for the
- * behaviour the component asks for rather than for the ceiling above it.
+ * It is not quite what it achieves. #81 removed the ceiling that made this
+ * number decorative — the flush gate used to wait for VSYNC on the one task
+ * §6.1 allows LVGL, which pinned every lv_timer to one run per frame and a drag
+ * to 38 Hz — and a drag now measures around 62 Hz. The remainder is the
+ * renderer, which shares this task and takes it for the length of a frame's
+ * drawing, so a poll due during one waits for it.
  */
 #define SLATE_TOUCH_READ_PERIOD_MS 10
 
