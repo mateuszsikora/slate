@@ -169,19 +169,31 @@ static esp_err_t expander_init(void)
                                        &s_expander),
         TAG, "CH422G");
 
+    /* From the moment the handle exists, s_expander_lock is what makes the
+     * output register single-writer, and that includes this function: the
+     * backlight is reachable through the public API the instant `s_expander` is
+     * non-NULL, which is now. */
+    if (xSemaphoreTake(s_expander_lock, pdMS_TO_TICKS(SLATE_DISPLAY_EXPANDER_TIMEOUT_MS)) !=
+        pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
     const uint32_t outputs = SLATE_EXIO_DISP | SLATE_EXIO_LCD_RST;
-    ESP_RETURN_ON_ERROR(esp_io_expander_set_dir(s_expander, outputs, IO_EXPANDER_OUTPUT),
-                        TAG, "CH422G direction");
+    esp_err_t err = esp_io_expander_set_dir(s_expander, outputs, IO_EXPANDER_OUTPUT);
+    if (err == ESP_OK) {
+        /* Keep the glass dark until a complete frame exists. */
+        err = esp_io_expander_set_level(s_expander, SLATE_EXIO_DISP, 0);
+    }
+    if (err == ESP_OK) {
+        err = esp_io_expander_set_level(s_expander, SLATE_EXIO_LCD_RST, 0);
+    }
+    if (err == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        err = esp_io_expander_set_level(s_expander, SLATE_EXIO_LCD_RST, 1);
+    }
+    xSemaphoreGive(s_expander_lock);
+    ESP_RETURN_ON_ERROR(err, TAG, "CH422G bring-up");
 
-    /* Keep the glass dark until a complete frame exists. */
-    ESP_RETURN_ON_ERROR(esp_io_expander_set_level(s_expander, SLATE_EXIO_DISP, 0),
-                        TAG, "backlight off");
-
-    ESP_RETURN_ON_ERROR(esp_io_expander_set_level(s_expander, SLATE_EXIO_LCD_RST, 0),
-                        TAG, "panel reset low");
-    vTaskDelay(pdMS_TO_TICKS(20));
-    ESP_RETURN_ON_ERROR(esp_io_expander_set_level(s_expander, SLATE_EXIO_LCD_RST, 1),
-                        TAG, "panel reset high");
     vTaskDelay(pdMS_TO_TICKS(50));
     return ESP_OK;
 }
@@ -265,20 +277,32 @@ static esp_err_t panel_init(void)
  * backlight can be switched from outside, "is it off" stops answering "has
  * anything been drawn yet" — and a flush arriving while §3.3's screen-off is in
  * force must not turn the panel back on by itself.
+ *
+ * The latch is set only once the glass is actually lit. The expander shares its
+ * bus with the touch controller now, so a single lost arbitration here is a
+ * thing that happens; latching before the write would turn one NACK into a
+ * panel that renders perfectly and is black for the rest of the boot. Retried
+ * every frame, complained about once.
  */
 static void backlight_enable_first_frame(void)
 {
+    static bool failure_logged;
+
     if (s_first_frame_shown) {
         return;
     }
-    s_first_frame_shown = true;
 
     esp_err_t err = slate_display_backlight_set(true);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "first frame displayed; backlight on");
-    } else {
-        ESP_LOGE(TAG, "backlight on: %s", esp_err_to_name(err));
+    if (err != ESP_OK) {
+        if (!failure_logged) {
+            failure_logged = true;
+            ESP_LOGE(TAG, "backlight on: %s — retrying on each frame", esp_err_to_name(err));
+        }
+        return;
     }
+
+    s_first_frame_shown = true;
+    ESP_LOGI(TAG, "first frame displayed; backlight on");
 }
 
 static uint32_t vsync_generation(void)
@@ -483,6 +507,7 @@ static void moving_marker_x(void *object, int32_t x)
 #define SLATE_BRINGUP_CROSSHAIR 0x00E5FF
 
 static lv_obj_t *s_corner[4];
+static lv_obj_t *s_backlight_tile;
 static lv_obj_t *s_crosshair_h;
 static lv_obj_t *s_crosshair_v;
 static lv_obj_t *s_touch_label;
@@ -492,10 +517,28 @@ static uint32_t s_press_count;
 static uint32_t s_label_at_ms;
 static lv_point_t s_last_point = {-1, -1};
 
-static bool point_within(const lv_point_t *point, int32_t x, int32_t y,
-                         int32_t width, int32_t height)
+/*
+ * The widget is asked where it is rather than told. `solid_rect()` takes the
+ * click flag off everything so that the screen sees every press wherever it
+ * lands, which leaves this pattern doing its own hit-testing — but a second
+ * copy of each rectangle's geometry is how a target ends up visibly in one
+ * place and touchable in another, and this harness exists to rule out exactly
+ * that class of mismatch rather than to introduce one.
+ */
+static bool point_on_object(lv_obj_t *object, const lv_point_t *point)
 {
-    return point->x >= x && point->x < x + width && point->y >= y && point->y < y + height;
+    if (!object) {
+        return false;
+    }
+
+    /* Compared here rather than through LVGL's own predicate: 9.5 exposes that
+     * one as `_lv_area_is_point_on`, and a leading underscore is a version this
+     * firmware does not get to depend on. The coordinates are still the
+     * widget's. */
+    lv_area_t area;
+    lv_obj_get_coords(object, &area);
+    return point->x >= area.x1 && point->x <= area.x2 && point->y >= area.y1 &&
+           point->y <= area.y2;
 }
 
 static void update_touch_label(void)
@@ -575,22 +618,8 @@ static void backlight_sleep(void)
 
 static void latch_corners(const lv_point_t *point)
 {
-    static const int32_t X[4] = {SLATE_BRINGUP_CORNER_INSET,
-                                 SLATE_LCD_H_RES - SLATE_BRINGUP_CORNER_INSET -
-                                     SLATE_BRINGUP_CORNER_SIZE,
-                                 SLATE_BRINGUP_CORNER_INSET,
-                                 SLATE_LCD_H_RES - SLATE_BRINGUP_CORNER_INSET -
-                                     SLATE_BRINGUP_CORNER_SIZE};
-    static const int32_t Y[4] = {SLATE_BRINGUP_CORNER_INSET, SLATE_BRINGUP_CORNER_INSET,
-                                 SLATE_LCD_V_RES - SLATE_BRINGUP_CORNER_INSET -
-                                     SLATE_BRINGUP_CORNER_SIZE,
-                                 SLATE_LCD_V_RES - SLATE_BRINGUP_CORNER_INSET -
-                                     SLATE_BRINGUP_CORNER_SIZE};
-
     for (size_t i = 0; i < 4; i++) {
-        if (s_corner_hit[i] || !s_corner[i] ||
-            !point_within(point, X[i], Y[i], SLATE_BRINGUP_CORNER_SIZE,
-                          SLATE_BRINGUP_CORNER_SIZE)) {
+        if (s_corner_hit[i] || !point_on_object(s_corner[i], point)) {
             continue;
         }
         s_corner_hit[i] = true;
@@ -618,8 +647,7 @@ static void screen_input_event(lv_event_t *event)
         s_press_count++;
         if (!slate_display_backlight_is_on()) {
             backlight_wake_now();
-        } else if (point_within(&point, SLATE_BRINGUP_BACKLIGHT_X, SLATE_BRINGUP_BACKLIGHT_Y,
-                                SLATE_BRINGUP_BACKLIGHT_W, SLATE_BRINGUP_BACKLIGHT_H)) {
+        } else if (point_on_object(s_backlight_tile, &point)) {
             backlight_sleep();
         }
     }
@@ -672,6 +700,7 @@ static void build_touch_pattern(lv_obj_t *screen)
 
     lv_obj_t *tile = solid_rect(screen, SLATE_BRINGUP_BACKLIGHT_X, SLATE_BRINGUP_BACKLIGHT_Y,
                                 SLATE_BRINGUP_BACKLIGHT_W, SLATE_BRINGUP_BACKLIGHT_H, 0x22252B);
+    s_backlight_tile = tile;
     lv_obj_set_style_border_color(tile, lv_color_hex(0xF5A524), LV_PART_MAIN);
     lv_obj_set_style_border_width(tile, 2, LV_PART_MAIN);
     lv_obj_t *tile_label = lv_label_create(tile);
@@ -798,7 +827,7 @@ static void display_task(void *ctx)
          * LVGL exactly one task. A controller that will not answer costs the
          * panel its input and nothing else — the display, the API and the setup
          * access point are all still worth having. */
-        esp_err_t touch_err = slate_touch_init(SLATE_I2C_PORT, s_expander);
+        esp_err_t touch_err = slate_touch_init(SLATE_I2C_PORT, s_expander, s_expander_lock);
         if (touch_err != ESP_OK) {
             ESP_LOGE(TAG, "touch unavailable: %s — continuing without input",
                      esp_err_to_name(touch_err));

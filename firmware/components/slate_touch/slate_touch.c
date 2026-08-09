@@ -27,18 +27,31 @@
 
 static const char *TAG = "slate_touch";
 
-#define SLATE_TOUCH_H_RES 800
-#define SLATE_TOUCH_V_RES 480
-
 #define SLATE_TOUCH_EXIO_RESET IO_EXPANDER_PIN_NUM_1
 #define SLATE_TOUCH_INT_GPIO   GPIO_NUM_4
 
-/* LVGL's own refresh period, so a coordinate is never the thing a frame is
- * waiting for. A poll is one 9-byte I²C transaction at 400 kHz — a few hundred
- * microseconds against the 26.4 ms the panel takes to scan (S-2) — and
- * sampling at half the refresh rate was visible as a marker trailing a finger
- * before the display's own latency was accounted for at all. */
+/* Selected by the reset sequence below rather than by this constant — the
+ * controller latches the address from a pin level, so changing it here alone
+ * would produce a driver talking confidently to nothing. Both halves are in
+ * reset_controller(), which is where the two have to agree. */
+#define SLATE_TOUCH_ADDRESS ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS
+
+/* LVGL's own refresh period. A poll is one 9-byte I²C transaction at 400 kHz,
+ * a few hundred microseconds against the 26.4 ms the panel takes to scan (S-2),
+ * so the input device should never be the thing a frame is waiting for.
+ *
+ * It is not what it achieves today. The flush gate waits for VSYNC inside the
+ * callback, on the one task §6.1 allows LVGL, so no lv_timer runs more than
+ * once per frame and a drag measures 38 Hz whatever this says — see #81, which
+ * owns that and is where the number becomes real. This is written for the
+ * behaviour the component asks for rather than for the ceiling above it.
+ */
 #define SLATE_TOUCH_READ_PERIOD_MS 10
+
+/* The expander is shared and its output register is read-modify-written. Long
+ * enough to outlast the whole reset sequence a competing writer might be in the
+ * middle of, short enough that a wedged bus surfaces as an error. */
+#define SLATE_TOUCH_EXPANDER_TIMEOUT_MS 200
 
 /* A controller that has stopped answering does so on every poll, fifty times a
  * second. The first line is the diagnosis and the rest are noise, so the rest
@@ -50,22 +63,14 @@ static esp_lcd_touch_handle_t s_touch;
 static lv_indev_t *s_indev;
 static bool s_ready;
 static bool s_pressed;
+static int32_t s_h_res;
+static int32_t s_v_res;
 static uint16_t s_last_x;
 static uint16_t s_last_y;
 static uint32_t s_press_samples;
 static int64_t s_press_started_us;
 static uint32_t s_faults;
 static int64_t s_fault_logged_at_us;
-
-/*
- * The driver keeps the pointer rather than the value, so this outlives the call
- * even though nothing reads it after initialisation: with reset on the expander
- * the driver's own address-selection branch is unreachable (see below) and the
- * field is only ever inspected there.
- */
-static esp_lcd_touch_io_gt911_config_t s_gt911_config = {
-    .dev_addr = ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS,
-};
 
 /*
  * GT911 latches its I²C address from the state of the interrupt line at the
@@ -79,8 +84,13 @@ static esp_lcd_touch_io_gt911_config_t s_gt911_config = {
  * address is sampled. The line is handed to the driver immediately afterwards,
  * which reconfigures it as an input — leaving it an output would have the SoC
  * and the controller both driving one wire.
+ *
+ * The expander writes are taken under the borrowed lock, and the whole sequence
+ * under one take rather than three: releasing it around the delays would let a
+ * backlight change land between the reset going low and coming back up, which
+ * is a read-modify-write pair that can leave the controller held in reset.
  */
-static esp_err_t reset_controller(esp_io_expander_handle_t expander)
+static esp_err_t reset_controller(esp_io_expander_handle_t expander, SemaphoreHandle_t lock)
 {
     const gpio_config_t int_as_output = {
         .mode = GPIO_MODE_OUTPUT,
@@ -89,14 +99,22 @@ static esp_err_t reset_controller(esp_io_expander_handle_t expander)
     ESP_RETURN_ON_ERROR(gpio_config(&int_as_output), TAG, "interrupt line as output");
     ESP_RETURN_ON_ERROR(gpio_set_level(SLATE_TOUCH_INT_GPIO, 0), TAG, "interrupt line low");
 
-    ESP_RETURN_ON_ERROR(
-        esp_io_expander_set_dir(expander, SLATE_TOUCH_EXIO_RESET, IO_EXPANDER_OUTPUT),
-        TAG, "reset direction");
-    ESP_RETURN_ON_ERROR(esp_io_expander_set_level(expander, SLATE_TOUCH_EXIO_RESET, 0),
-                        TAG, "reset low");
-    vTaskDelay(pdMS_TO_TICKS(11));
-    ESP_RETURN_ON_ERROR(esp_io_expander_set_level(expander, SLATE_TOUCH_EXIO_RESET, 1),
-                        TAG, "reset high");
+    if (xSemaphoreTake(lock, pdMS_TO_TICKS(SLATE_TOUCH_EXPANDER_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "expander lock busy");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = esp_io_expander_set_dir(expander, SLATE_TOUCH_EXIO_RESET, IO_EXPANDER_OUTPUT);
+    if (err == ESP_OK) {
+        err = esp_io_expander_set_level(expander, SLATE_TOUCH_EXIO_RESET, 0);
+    }
+    if (err == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(11));
+        err = esp_io_expander_set_level(expander, SLATE_TOUCH_EXIO_RESET, 1);
+    }
+    xSemaphoreGive(lock);
+    ESP_RETURN_ON_ERROR(err, TAG, "reset line");
+
     vTaskDelay(pdMS_TO_TICKS(6));
 
     /* The controller runs its own firmware start-up before it will answer. */
@@ -107,7 +125,7 @@ static esp_err_t reset_controller(esp_io_expander_handle_t expander)
 static esp_err_t attach_controller(int i2c_port)
 {
     esp_lcd_panel_io_i2c_config_t io_config = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
-    io_config.dev_addr = s_gt911_config.dev_addr;
+    io_config.dev_addr = SLATE_TOUCH_ADDRESS;
     /* The macro sets a per-device clock, which only the new I²C driver can
      * honour — the legacy one takes its speed from the bus and refuses a
      * configuration that says otherwise rather than ignoring it. The first
@@ -121,17 +139,43 @@ static esp_err_t attach_controller(int i2c_port)
     ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c_v1((uint32_t) i2c_port, &io_config, &s_io),
                         TAG, "panel IO");
 
+    /* `driver_data` is deliberately absent. The driver reads it only inside the
+     * address-selection branch that an expander-borne reset line makes
+     * unreachable, so supplying it would advertise a knob that changes a log
+     * line and nothing on the wire. */
     const esp_lcd_touch_config_t config = {
-        .x_max = SLATE_TOUCH_H_RES,
-        .y_max = SLATE_TOUCH_V_RES,
+        .x_max = (uint16_t) s_h_res,
+        .y_max = (uint16_t) s_v_res,
         .rst_gpio_num = GPIO_NUM_NC, /* EXIO1; reset_controller() has done it */
         .int_gpio_num = SLATE_TOUCH_INT_GPIO,
         .levels = {.reset = 0, .interrupt = 0},
         .flags = {.swap_xy = 0, .mirror_x = 0, .mirror_y = 0},
-        .driver_data = &s_gt911_config,
     };
     ESP_RETURN_ON_ERROR(esp_lcd_touch_new_i2c_gt911(s_io, &config, &s_touch), TAG, "GT911");
     return ESP_OK;
+}
+
+/*
+ * Everything reset_controller() and attach_controller() may have taken, in the
+ * reverse order, and callable at any point in either. The interrupt pin is the
+ * one that matters: reset_controller() leaves it an output driving low, and the
+ * driver only turns it back into an input on the path where it succeeds. A
+ * failure between those two points would otherwise leave the SoC holding a line
+ * the controller — released from reset a few milliseconds earlier — drives for
+ * itself on every touch.
+ */
+static void release_controller(void)
+{
+    if (s_touch) {
+        esp_lcd_touch_del(s_touch); /* also restores the interrupt pin */
+        s_touch = NULL;
+    } else {
+        gpio_reset_pin(SLATE_TOUCH_INT_GPIO);
+    }
+    if (s_io) {
+        esp_lcd_panel_io_del(s_io);
+        s_io = NULL;
+    }
 }
 
 static void note_fault(const char *what, esp_err_t err)
@@ -146,6 +190,32 @@ static void note_fault(const char *what, esp_err_t err)
     ESP_LOGW(TAG, "%s: %s (%" PRIu32 " so far)", what, esp_err_to_name(err), s_faults);
 }
 
+/*
+ * Reporting a release is the only safe answer to a failed read — a coordinate
+ * that could not be fetched is not a coordinate — but it has to be a release
+ * this component agrees with. Leaving `s_pressed` set would make LVGL and
+ * slate_touch disagree about the finger: LVGL would deliver a release and then
+ * a fresh press on the next good poll, while the sample counter went on
+ * accumulating into the previous press and the eventual real release logged
+ * nothing at all.
+ */
+static void report_released(lv_indev_data_t *data)
+{
+    if (s_pressed) {
+        const int64_t held_us = esp_timer_get_time() - s_press_started_us;
+        /* The sample rate is reported rather than assumed, because it is the
+         * number that separates a slow input device from a slow display: this
+         * is how often a coordinate was available, and anything the glass does
+         * later is downstream of it. */
+        ESP_LOGI(TAG, "release at %u,%u after %lld ms, %" PRIu32 " samples (%.0f Hz)",
+                 (unsigned) s_last_x, (unsigned) s_last_y, (long long) (held_us / 1000),
+                 s_press_samples,
+                 held_us > 0 ? (double) s_press_samples * 1000000.0 / (double) held_us : 0.0);
+        s_pressed = false;
+    }
+    data->state = LV_INDEV_STATE_RELEASED;
+}
+
 static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
 {
     (void) indev;
@@ -153,7 +223,7 @@ static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     esp_err_t err = esp_lcd_touch_read_data(s_touch);
     if (err != ESP_OK) {
         note_fault("controller read", err);
-        data->state = LV_INDEV_STATE_RELEASED;
+        report_released(data);
         return;
     }
 
@@ -162,39 +232,27 @@ static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     err = esp_lcd_touch_get_data(s_touch, &point, &points, 1);
     if (err != ESP_OK) {
         note_fault("coordinate read", err);
-        data->state = LV_INDEV_STATE_RELEASED;
+        report_released(data);
+        return;
+    }
+
+    if (points == 0) {
+        report_released(data);
         return;
     }
 
     uint16_t x = point.x;
     uint16_t y = point.y;
 
-    if (points == 0) {
-        if (s_pressed) {
-            /* The sample rate is reported rather than assumed, because it is
-             * the number that separates a slow input device from a slow
-             * display: this is how often a coordinate was available, and
-             * anything the glass does later is downstream of it. */
-            const int64_t held_us = esp_timer_get_time() - s_press_started_us;
-            ESP_LOGI(TAG, "release at %u,%u after %lld ms, %" PRIu32 " samples (%.0f Hz)",
-                     (unsigned) s_last_x, (unsigned) s_last_y, (long long) (held_us / 1000),
-                     s_press_samples,
-                     held_us > 0 ? (double) s_press_samples * 1000000.0 / (double) held_us : 0.0);
-            s_pressed = false;
-        }
-        data->state = LV_INDEV_STATE_RELEASED;
-        return;
-    }
-
     /* Clamped rather than trusted, and reported rather than clamped quietly: a
      * coordinate outside the panel means the controller came up against a
      * configuration for a different resolution, which is a thing to fix and not
      * a thing to absorb. LVGL is handed something inside the display either
      * way, because a point outside it lands on no object at all. */
-    if (x >= SLATE_TOUCH_H_RES || y >= SLATE_TOUCH_V_RES) {
+    if (x >= s_h_res || y >= s_v_res) {
         note_fault("coordinate outside the panel", ESP_ERR_INVALID_RESPONSE);
-        x = x >= SLATE_TOUCH_H_RES ? SLATE_TOUCH_H_RES - 1 : x;
-        y = y >= SLATE_TOUCH_V_RES ? SLATE_TOUCH_V_RES - 1 : y;
+        x = x >= s_h_res ? (uint16_t) (s_h_res - 1) : x;
+        y = y >= s_v_res ? (uint16_t) (s_v_res - 1) : y;
     }
 
     data->point.x = x;
@@ -213,20 +271,42 @@ static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     s_press_samples++;
 }
 
-esp_err_t slate_touch_init(int i2c_port, esp_io_expander_handle_t expander)
+esp_err_t slate_touch_init(int i2c_port, esp_io_expander_handle_t expander,
+                           SemaphoreHandle_t expander_lock)
 {
-    if (!expander) {
+    if (!expander || !expander_lock) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s_ready) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_RETURN_ON_ERROR(reset_controller(expander), TAG, "reset");
-    ESP_RETURN_ON_ERROR(attach_controller(i2c_port), TAG, "attach");
+    /* One source of truth for the panel size, and it is the display that has
+     * already been told what the panel is. A private copy here would be a third
+     * place to change for a board variant and the first to be forgotten. */
+    lv_display_t *display = lv_display_get_default();
+    if (!display) {
+        ESP_LOGE(TAG, "no LVGL display; touch has nothing to report coordinates against");
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_h_res = lv_display_get_horizontal_resolution(display);
+    s_v_res = lv_display_get_vertical_resolution(display);
+    if (s_h_res <= 0 || s_v_res <= 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = reset_controller(expander, expander_lock);
+    if (err == ESP_OK) {
+        err = attach_controller(i2c_port);
+    }
+    if (err != ESP_OK) {
+        release_controller();
+        return err;
+    }
 
     s_indev = lv_indev_create();
     if (!s_indev) {
+        release_controller();
         return ESP_ERR_NO_MEM;
     }
     lv_indev_set_type(s_indev, LV_INDEV_TYPE_POINTER);
@@ -234,9 +314,11 @@ esp_err_t slate_touch_init(int i2c_port, esp_io_expander_handle_t expander)
     lv_timer_set_period(lv_indev_get_read_timer(s_indev), SLATE_TOUCH_READ_PERIOD_MS);
 
     s_ready = true;
-    ESP_LOGI(TAG, "GT911 at 0x%02X on I2C%d, interrupt GPIO%d, reset EXIO1; polled every %d ms",
-             (unsigned) s_gt911_config.dev_addr, i2c_port, (int) SLATE_TOUCH_INT_GPIO,
-             SLATE_TOUCH_READ_PERIOD_MS);
+    ESP_LOGI(TAG,
+             "GT911 at 0x%02X on I2C%d, interrupt GPIO%d, reset EXIO1; %" PRId32 "x%" PRId32
+             ", polled every %d ms",
+             (unsigned) SLATE_TOUCH_ADDRESS, i2c_port, (int) SLATE_TOUCH_INT_GPIO, s_h_res,
+             s_v_res, SLATE_TOUCH_READ_PERIOD_MS);
     return ESP_OK;
 }
 
