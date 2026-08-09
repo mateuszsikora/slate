@@ -68,6 +68,7 @@ static const char *TAG = "slate_display";
 #define SLATE_DISPLAY_QUEUE_LEN 16
 #define SLATE_DISPLAY_INIT_TIMEOUT_MS 10000
 #define SLATE_DISPLAY_VSYNC_TIMEOUT_MS 100
+#define SLATE_DISPLAY_HEAP_METRICS_PERIOD_US (15LL * 1000000)
 
 static const int SLATE_DATA_GPIOS[16] = {
     14, /* B3 */ 38, /* B4 */ 18, /* B5 */ 17, /* B6 */ 10, /* B7 */
@@ -92,13 +93,36 @@ static bool s_i2c_installed;
 static bool s_lvgl_initialized;
 static bool s_ready;
 static bool s_backlight_on;
+static slate_display_heap_metrics_t s_heap_metrics;
+static int64_t s_heap_metrics_at_us;
 
 /* Written in the VSYNC ISR, read on the LVGL task. The values are 64-bit on a
  * 32-bit CPU, so the read is protected rather than assumed atomic. */
 static portMUX_TYPE s_vsync_lock = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE s_heap_metrics_lock = portMUX_INITIALIZER_UNLOCKED;
 static volatile int64_t s_vsync_last_us;
 static volatile int64_t s_vsync_period_us;
 static volatile uint32_t s_vsync_count;
+
+static void update_heap_metrics(void)
+{
+    int64_t now = esp_timer_get_time();
+    if (s_heap_metrics.available &&
+        now - s_heap_metrics_at_us < SLATE_DISPLAY_HEAP_METRICS_PERIOD_US) {
+        return;
+    }
+
+    lv_mem_monitor_t monitor;
+    lv_mem_monitor(&monitor);
+
+    portENTER_CRITICAL(&s_heap_metrics_lock);
+    s_heap_metrics.available = true;
+    s_heap_metrics.free_size = monitor.free_size;
+    s_heap_metrics.total_size = monitor.total_size;
+    s_heap_metrics.frag_pct = monitor.frag_pct;
+    s_heap_metrics_at_us = now;
+    portEXIT_CRITICAL(&s_heap_metrics_lock);
+}
 
 void *slate_display_lvgl_pool_alloc(size_t size)
 {
@@ -499,6 +523,7 @@ static void display_task(void *ctx)
     }
     s_ready = s_init_result == ESP_OK;
     if (s_ready) {
+        update_heap_metrics();
         ESP_LOGI(TAG, "display ready: %u B internal DMA-capable, %u B PSRAM free",
                  (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
                  (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -522,6 +547,7 @@ static void display_task(void *ctx)
             work.fn(work.ctx);
         }
         log_vsync_once();
+        update_heap_metrics();
     }
 }
 
@@ -532,6 +558,10 @@ esp_err_t slate_display_init(void)
     }
 
     s_init_result = ESP_ERR_INVALID_STATE;
+    portENTER_CRITICAL(&s_heap_metrics_lock);
+    memset(&s_heap_metrics, 0, sizeof(s_heap_metrics));
+    s_heap_metrics_at_us = 0;
+    portEXIT_CRITICAL(&s_heap_metrics_lock);
     portENTER_CRITICAL(&s_vsync_lock);
     s_vsync_last_us = 0;
     s_vsync_period_us = 0;
@@ -608,4 +638,15 @@ esp_err_t slate_display_post(slate_display_work_fn fn, void *ctx, uint32_t timeo
 bool slate_display_ready(void)
 {
     return s_ready;
+}
+
+void slate_display_heap_metrics(slate_display_heap_metrics_t *out)
+{
+    if (!out) {
+        return;
+    }
+
+    portENTER_CRITICAL(&s_heap_metrics_lock);
+    *out = s_heap_metrics;
+    portEXIT_CRITICAL(&s_heap_metrics_lock);
 }

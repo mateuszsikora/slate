@@ -33,6 +33,7 @@
 #include "slate_store.h"
 #include "slate_time.h"
 #include "slate_wifi.h"
+#include "slate_ws.h"
 
 static const char *TAG = "slate";
 
@@ -397,6 +398,22 @@ static void start_api(void)
         ESP_LOGE(TAG, "HTTP API degraded: %s — continuing", esp_err_to_name(err));
         return;
     }
+
+    /* §4.2 shares this server but deliberately does not share HTTP bearer
+     * authentication: browser WebSockets cannot set that header, so the token
+     * is the first frame. Register it before other diagnostics so boot logs
+     * from their initialisation enter the retained ring as well. */
+    err = slate_ws_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "WebSocket diagnostics unavailable: %s — continuing",
+                 esp_err_to_name(err));
+    }
+
+#ifdef SLATE_WS_SELFTEST
+    if (err == ESP_OK) {
+        slate_ws_selftest();
+    }
+#endif
 
 #ifdef SLATE_API_SELFTEST
     slate_api_selftest();

@@ -2,7 +2,7 @@ idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
     REQUIRES slate_api slate_coredump slate_display slate_ota slate_setup slate_store slate_wifi
-             slate_time app_update esp_system esp_event
+             slate_time slate_ws app_update esp_system esp_event
 )
 
 #
@@ -40,7 +40,8 @@ idf_component_register(
 # The station credentials used to arrive the same way. They do not any more —
 # `POST /wifi` and the setup page are what M1 exists to replace that with.
 #
-foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_OTA_ROLLBACK_SELFTEST
+foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_WS_SELFTEST
+             SLATE_OTA_ROLLBACK_SELFTEST
              SLATE_COREDUMP_SELFTEST SLATE_SETUP_AP_PASSWORD SLATE_TIMEZONE)
     if(DEFINED ${knob})
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${knob}=${${knob}})

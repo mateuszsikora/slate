@@ -91,6 +91,14 @@ CONFIG_ESP_COREDUMP_CHECK_BOOT=n
 # server up as those land. The default 3584 B is not enough headroom for that.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
+# --- HTTP/WebSocket diagnostics (design.md §4.2, §11.3) ---
+# The upgrade itself is public and the first application frame authenticates.
+# POST_HANDSHAKE is what starts the five-second deadline before any frame has
+# arrived; registering a client only from the data handler cannot time out a
+# peer that upgrades and then remains silent.
+CONFIG_HTTPD_WS_SUPPORT=y
+CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
+
 # --- Display and LVGL (design.md §6.1–§6.2, issue #6) ---
 # S-2 measured frame time with these cache settings. The RGB peripheral reads
 # two 800×480 RGB565 framebuffers continuously from PSRAM; the 64-byte line and

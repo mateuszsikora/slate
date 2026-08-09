@@ -9,6 +9,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -18,6 +19,13 @@ extern "C" {
 #endif
 
 typedef void (*slate_display_work_fn)(void *ctx);
+
+typedef struct {
+    bool available;
+    size_t free_size;
+    size_t total_size;
+    uint8_t frag_pct;
+} slate_display_heap_metrics_t;
 
 /**
  * @brief Bring up the panel and start its LVGL owner task.
@@ -40,6 +48,16 @@ esp_err_t slate_display_post(slate_display_work_fn fn, void *ctx, uint32_t timeo
 
 /** @brief Whether panel and LVGL initialisation completed successfully. */
 bool slate_display_ready(void);
+
+/**
+ * @brief Copy the latest LVGL allocator snapshot.
+ *
+ * The snapshot is collected on LVGL's owner task at the diagnostics heartbeat
+ * interval. Callers on API or diagnostics tasks therefore never cross §6.1's
+ * single-owner boundary. `available` is false before successful display
+ * initialisation.
+ */
+void slate_display_heap_metrics(slate_display_heap_metrics_t *out);
 
 #ifdef __cplusplus
 }
