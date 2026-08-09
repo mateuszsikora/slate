@@ -74,6 +74,9 @@ esp_err_t slate_api_send_json(httpd_req_t *req, cJSON *root);
  * in each component that registers a route: a client matches on `error` across
  * the whole API instead of on one component's idea of what a failure looks
  * like. `status` is an esp_http_server status line, e.g. "400 Bad Request".
+ * This is a low-level response primitive; route handlers should use
+ * slate_api_refuse() or slate_api_refuse_and_close() so the shared connection
+ * policy is applied.
  */
 esp_err_t slate_api_send_error(httpd_req_t *req, const char *status, const char *error);
 

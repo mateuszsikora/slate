@@ -85,17 +85,26 @@ esp_err_t slate_api_send_error(httpd_req_t *req, const char *status, const char 
  * parsed it. Routes such as OTA that always abandon a refused upload use the
  * explicit unconditional variant, including for an empty upload.
  */
+static esp_err_t refuse_with_policy(httpd_req_t *req, const char *status,
+                                    const char *error, bool close_connection)
+{
+    if (close_connection) {
+        httpd_resp_set_hdr(req, "Connection", "close");
+    }
+
+    esp_err_t err = slate_api_send_error(req, status, error);
+    return close_connection ? ESP_FAIL : err;
+}
+
 esp_err_t slate_api_refuse(httpd_req_t *req, const char *status, const char *error)
 {
-    esp_err_t err = slate_api_send_error(req, status, error);
-    return req->content_len > 0 ? ESP_FAIL : err;
+    return refuse_with_policy(req, status, error, req->content_len > 0);
 }
 
 esp_err_t slate_api_refuse_and_close(httpd_req_t *req, const char *status,
                                      const char *error)
 {
-    slate_api_send_error(req, status, error);
-    return ESP_FAIL;
+    return refuse_with_policy(req, status, error, true);
 }
 
 /**
@@ -704,13 +713,11 @@ static bool send_all(int fd, const char *data, size_t len)
     return true;
 }
 
-static bool selftest_request(const char *name, const char *request, int expected_status,
-                             const char *expected_text)
+static int selftest_connect(void)
 {
     int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (fd < 0) {
-        ESP_LOGE(TAG, "selftest: %-30s FAIL (socket)", name);
-        return false;
+        return -1;
     }
 
     struct timeval timeout = {.tv_sec = 3};
@@ -722,26 +729,131 @@ static bool selftest_request(const char *name, const char *request, int expected
         .sin_port = htons(80),
         .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
     };
+    if (connect(fd, (struct sockaddr *) &address, sizeof(address)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
 
-    char response[1536];
+static bool receive_response(int fd, char *response, size_t capacity)
+{
     size_t used = 0;
-    bool ok = connect(fd, (struct sockaddr *) &address, sizeof(address)) == 0 &&
-              send_all(fd, request, strlen(request));
-    while (ok && used + 1 < sizeof(response)) {
-        int received = recv(fd, response + used, sizeof(response) - used - 1, 0);
+    size_t response_len = 0;
+    bool response_len_known = false;
+
+    while (used + 1 < capacity) {
+        int received = recv(fd, response + used, capacity - used - 1, 0);
         if (received <= 0) {
-            break;
+            return false;
         }
         used += received;
-    }
-    close(fd);
-    response[used] = '\0';
+        response[used] = '\0';
 
+        if (!response_len_known) {
+            char *headers_end = strstr(response, "\r\n\r\n");
+            if (headers_end != NULL) {
+                static const char LENGTH_HEADER[] = "\r\nContent-Length: ";
+                char *length = strstr(response, LENGTH_HEADER);
+                if (length == NULL || length >= headers_end) {
+                    return false;
+                }
+                length += sizeof(LENGTH_HEADER) - 1;
+
+                char *end = NULL;
+                unsigned long body_len = strtoul(length, &end, 10);
+                size_t header_len = (size_t) (headers_end - response) + 4;
+                if (end == length || end[0] != '\r' || end[1] != '\n' ||
+                    body_len > capacity - header_len - 1) {
+                    return false;
+                }
+                response_len = header_len + body_len;
+                response_len_known = true;
+            }
+        }
+
+        if (response_len_known && used >= response_len) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool response_matches(const char *response, int expected_status,
+                             const char *expected_text)
+{
     const char *space = strchr(response, ' ');
     int status = space != NULL ? atoi(space + 1) : 0;
-    ok = ok && status == expected_status && strstr(response, expected_text) != NULL;
+    return status == expected_status && strstr(response, expected_text) != NULL;
+}
+
+static bool selftest_request(const char *name, const char *request, int expected_status,
+                             const char *expected_text)
+{
+    int fd = selftest_connect();
+    if (fd < 0) {
+        ESP_LOGE(TAG, "selftest: %-30s FAIL (connect)", name);
+        return false;
+    }
+
+    char response[1536] = {0};
+    bool ok = send_all(fd, request, strlen(request)) &&
+              receive_response(fd, response, sizeof(response));
+    close(fd);
+    ok = ok && response_matches(response, expected_status, expected_text);
     ESP_LOGI(TAG, "selftest: %-30s %s", name, ok ? "PASS" : "FAIL");
     memset(response, 0, sizeof(response));
+    return ok;
+}
+
+static bool selftest_bodyless_refusal_keeps_connection(void)
+{
+    static const char REFUSED[] =
+        "GET /api/v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+    static const char FOLLOW_UP[] =
+        "GET /api/v1/info HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+
+    int fd = selftest_connect();
+    char response[1536] = {0};
+    bool ok = fd >= 0 && send_all(fd, REFUSED, strlen(REFUSED)) &&
+              receive_response(fd, response, sizeof(response)) &&
+              response_matches(response, 401, "\"error\":\"unauthorized\"") &&
+              strstr(response, "\r\nConnection: close\r\n") == NULL;
+
+    memset(response, 0, sizeof(response));
+    ok = ok && send_all(fd, FOLLOW_UP, strlen(FOLLOW_UP)) &&
+         receive_response(fd, response, sizeof(response)) &&
+         response_matches(response, 200, "\"model\":\"" MODEL_ID "\"");
+    if (fd >= 0) {
+        close(fd);
+    }
+
+    ESP_LOGI(TAG, "selftest: %-30s %s", "bodyless refusal keeps socket",
+             ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+static bool selftest_body_refusal_closes_connection(void)
+{
+    static const char REFUSED[] =
+        "GET /api/v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+        "Content-Length: 1\r\n\r\nx";
+
+    int fd = selftest_connect();
+    char response[1536] = {0};
+    bool ok = fd >= 0 && send_all(fd, REFUSED, strlen(REFUSED)) &&
+              receive_response(fd, response, sizeof(response)) &&
+              response_matches(response, 401, "\"error\":\"unauthorized\"") &&
+              strstr(response, "\r\nConnection: close\r\n") != NULL;
+
+    char byte;
+    ok = ok && recv(fd, &byte, sizeof(byte), 0) == 0;
+    if (fd >= 0) {
+        close(fd);
+    }
+
+    ESP_LOGI(TAG, "selftest: %-30s %s", "body refusal closes socket",
+             ok ? "PASS" : "FAIL");
     return ok;
 }
 
@@ -785,6 +897,8 @@ esp_err_t slate_api_selftest(void)
 
     failures += !selftest_request("CORS preflight is public", OPTIONS, 204,
                                   "Access-Control-Allow-Origin: *");
+    failures += !selftest_bodyless_refusal_keeps_connection();
+    failures += !selftest_body_refusal_closes_connection();
     ESP_LOGI(TAG, "selftest: %d failure(s)", failures);
     return failures == 0 ? ESP_OK : ESP_FAIL;
 }
