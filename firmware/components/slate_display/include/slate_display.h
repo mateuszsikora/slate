@@ -102,9 +102,9 @@ bool slate_display_ready(void);
 /**
  * @brief Switch the backlight.
  *
- * Safe from any task. The expander's output register is read-modify-written, so
- * the level change is serialised here rather than left to whichever of #28's
- * schedule, the LVGL task and a future API handler arrives second.
+ * Safe from any task. The expander driver serialises its cached register update
+ * with the bus write rather than leaving it to whichever of #28's schedule,
+ * the LVGL task and a future API handler arrives second.
  *
  * Turning the backlight off does not stop the panel, the renderer or touch;
  * §3.3's `screen_off_after` is a dark screen that still responds, not a

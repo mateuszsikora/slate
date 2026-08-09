@@ -3,8 +3,6 @@ dependencies:
   # Same versions slate_display already resolves; repeated rather than inherited
   # because a manifest declares what its own component uses.
   lvgl/lvgl: "9.5.0"
-  espressif/esp32_io_expander: "1.1.1"
   # The controller. It talks through an `esp_lcd` panel IO handle rather than to
-  # a bus of its own, which is the reason the legacy I²C stack the expander
-  # forces costs this issue nothing (#7).
+  # a device-specific transport of its own, so it shares slate_display's bus.
   espressif/esp_lcd_touch_gt911: "1.2.0~3"
