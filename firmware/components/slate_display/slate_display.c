@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -108,6 +109,8 @@ static bool s_first_frame_shown;
 static slate_display_heap_metrics_t s_heap_metrics;
 static int64_t s_heap_metrics_at_us;
 static lv_obj_t *s_setup_overlay;
+static atomic_bool s_setup_presentation_active = ATOMIC_VAR_INIT(false);
+static atomic_bool s_setup_hide_pending = ATOMIC_VAR_INIT(false);
 
 /* Written in the VSYNC ISR, read on the LVGL task. The values are 64-bit on a
  * 32-bit CPU, so the read is protected rather than assumed atomic. */
@@ -812,6 +815,7 @@ static void setup_overlay_deleted(lv_event_t *event)
 {
     if (lv_event_get_target(event) == s_setup_overlay) {
         s_setup_overlay = NULL;
+        atomic_store_explicit(&s_setup_presentation_active, false, memory_order_release);
     }
 }
 
@@ -826,6 +830,11 @@ static void hide_setup_overlay(void *ctx)
 static void show_setup_overlay(void *ctx)
 {
     slate_display_setup_t *setup = ctx;
+
+    /* A newer show supersedes a hide requested before this work reached the
+     * LVGL task. A hide requested after this store remains pending and wins at
+     * the end of the task's iteration. */
+    atomic_store_explicit(&s_setup_hide_pending, false, memory_order_release);
     hide_setup_overlay(NULL);
 
     lv_obj_t *screen = lv_screen_active();
@@ -848,6 +857,12 @@ static void show_setup_overlay(void *ctx)
     lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(overlay, setup_overlay_deleted, LV_EVENT_DELETE, NULL);
+    atomic_store_explicit(&s_setup_presentation_active, true, memory_order_release);
+
+    /* §9.4 makes the address on this presentation a recovery mechanism, so it
+     * cannot be left behind a dark backlight. While the presentation is active
+     * slate_display_backlight_set(false) refuses later dimming as well. */
+    backlight_on();
 
     lv_obj_t *card = overlay;
     if (!setup->banner) {
@@ -960,6 +975,13 @@ static void display_task(void *ctx)
         if (xQueueReceive(s_work_queue, &work, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
             work.fn(work.ctx);
         }
+        /* Hide is desired state rather than ordinary queued work. A full work
+         * queue must not leave the recovery card over a dashboard after the
+         * station has returned. Checking after work also preserves show/hide
+         * ordering when a show was already queued. */
+        if (atomic_exchange_explicit(&s_setup_hide_pending, false, memory_order_acq_rel)) {
+            hide_setup_overlay(NULL);
+        }
         log_vsync_once();
         update_heap_metrics();
     }
@@ -1066,6 +1088,10 @@ esp_err_t slate_display_setup_show(const slate_display_setup_t *setup)
         return ESP_ERR_NO_MEM;
     }
     *copy = *setup;
+    copy->network[sizeof(copy->network) - 1] = '\0';
+    copy->address[sizeof(copy->address) - 1] = '\0';
+    copy->passphrase[sizeof(copy->passphrase) - 1] = '\0';
+    copy->message[sizeof(copy->message) - 1] = '\0';
 
     esp_err_t err = slate_display_post(show_setup_overlay, copy, 1000);
     if (err != ESP_OK) {
@@ -1077,7 +1103,12 @@ esp_err_t slate_display_setup_show(const slate_display_setup_t *setup)
 
 esp_err_t slate_display_setup_hide(void)
 {
-    return slate_display_post(hide_setup_overlay, NULL, 1000);
+    if (!s_ready || !s_work_queue) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    atomic_store_explicit(&s_setup_hide_pending, true, memory_order_release);
+    return ESP_OK;
 }
 
 bool slate_display_ready(void)
@@ -1087,6 +1118,9 @@ bool slate_display_ready(void)
 
 esp_err_t slate_display_backlight_set(bool on)
 {
+    if (!on && atomic_load_explicit(&s_setup_presentation_active, memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!s_expander || !s_expander_lock) {
         return ESP_ERR_INVALID_STATE;
     }

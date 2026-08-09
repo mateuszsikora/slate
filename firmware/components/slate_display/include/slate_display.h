@@ -88,7 +88,12 @@ esp_err_t slate_display_post(slate_display_work_fn fn, void *ctx, uint32_t timeo
  */
 esp_err_t slate_display_setup_show(const slate_display_setup_t *setup);
 
-/** @brief Dismiss §9's setup presentation after the station reconnects. */
+/**
+ * @brief Dismiss §9's setup presentation after the station reconnects.
+ *
+ * The request is desired state rather than ordinary queued work, so a full
+ * LVGL work queue cannot leave a stale recovery card on screen.
+ */
 esp_err_t slate_display_setup_hide(void);
 
 /** @brief Whether panel and LVGL initialisation completed successfully. */
@@ -103,7 +108,9 @@ bool slate_display_ready(void);
  *
  * Turning the backlight off does not stop the panel, the renderer or touch;
  * §3.3's `screen_off_after` is a dark screen that still responds, not a
- * suspended one.
+ * suspended one. An active setup presentation refuses `off` with
+ * ESP_ERR_INVALID_STATE because §9.4 requires its recovery address to remain
+ * readable.
  */
 esp_err_t slate_display_backlight_set(bool on);
 
