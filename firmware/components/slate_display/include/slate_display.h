@@ -20,6 +20,22 @@ extern "C" {
 
 typedef void (*slate_display_work_fn)(void *ctx);
 
+/**
+ * @brief Which backlight variant this board is running.
+ *
+ * §16 asks the firmware to distinguish the two. On an unmodified board the
+ * CH422G drives the backlight enable as a plain output and `ON_OFF` is the only
+ * answer there is; `PWM` names the variant that appears once the testpoint
+ * described in #41 has been bridged to a GPIO. That bridge cannot be probed —
+ * the installer chooses the pin, and a pin nobody soldered reads the same as
+ * one somebody did — so it will arrive as configuration rather than detection.
+ * #28's night schedule branches here rather than assuming either.
+ */
+typedef enum {
+    SLATE_DISPLAY_BACKLIGHT_ON_OFF,
+    SLATE_DISPLAY_BACKLIGHT_PWM,
+} slate_display_backlight_mode_t;
+
 typedef struct {
     bool available;
     size_t free_size;
@@ -48,6 +64,25 @@ esp_err_t slate_display_post(slate_display_work_fn fn, void *ctx, uint32_t timeo
 
 /** @brief Whether panel and LVGL initialisation completed successfully. */
 bool slate_display_ready(void);
+
+/**
+ * @brief Switch the backlight.
+ *
+ * Safe from any task. The expander's output register is read-modify-written, so
+ * the level change is serialised here rather than left to whichever of #28's
+ * schedule, the LVGL task and a future API handler arrives second.
+ *
+ * Turning the backlight off does not stop the panel, the renderer or touch;
+ * §3.3's `screen_off_after` is a dark screen that still responds, not a
+ * suspended one.
+ */
+esp_err_t slate_display_backlight_set(bool on);
+
+/** @brief Whether the backlight is currently on. */
+bool slate_display_backlight_is_on(void);
+
+/** @brief Which backlight variant is live on this board. */
+slate_display_backlight_mode_t slate_display_backlight_mode(void);
 
 /**
  * @brief Copy the latest LVGL allocator snapshot.
