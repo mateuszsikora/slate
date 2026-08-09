@@ -74,8 +74,31 @@ esp_err_t slate_api_send_json(httpd_req_t *req, cJSON *root);
  * in each component that registers a route: a client matches on `error` across
  * the whole API instead of on one component's idea of what a failure looks
  * like. `status` is an esp_http_server status line, e.g. "400 Bad Request".
+ * This is a low-level response primitive; route handlers should use
+ * slate_api_refuse() or slate_api_refuse_and_close() so the shared connection
+ * policy is applied.
  */
 esp_err_t slate_api_send_error(httpd_req_t *req, const char *status, const char *error);
+
+/**
+ * @brief Refuse a request and apply the shared unread-body policy.
+ *
+ * Sends the same error document as slate_api_send_error(). A request that
+ * declared a body closes its connection after the response so esp_http_server
+ * cannot hold the API task while purging bytes the handler did not consume.
+ * Body-less requests keep the connection when the response is sent cleanly.
+ */
+esp_err_t slate_api_refuse(httpd_req_t *req, const char *status, const char *error);
+
+/**
+ * @brief Refuse a request and close its connection unconditionally.
+ *
+ * Use only when a route deliberately abandons the connection after every
+ * refusal, including a request that declared no body. The OTA upload uses this
+ * because a refused upload is never resumed on its existing connection.
+ */
+esp_err_t slate_api_refuse_and_close(httpd_req_t *req, const char *status,
+                                     const char *error);
 
 #ifdef SLATE_API_SELFTEST
 

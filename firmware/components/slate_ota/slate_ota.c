@@ -418,36 +418,12 @@ static void reboot_after_response(void)
     esp_restart();
 }
 
-/* --- Refusals ----------------------------------------------------------- */
-
-/*
- * Every refusal closes the connection, and that is not politeness.
- *
- * A body refused on its first bytes is still in flight, and esp_http_server
- * drains whatever a handler did not read before it serves anyone else — in
- * CONFIG_HTTPD_PURGE_BUF_LEN chunks, which is 32 bytes. A refused 40 MB file
- * would be over a million recv() calls on the one HTTP task, and the purge
- * loop ends only when a read returns nothing, so a client that keeps trickling
- * holds the whole API there for as long as it feels like it. Returning
- * ESP_FAIL after the answer makes the server drop the socket instead, which is
- * the only bound that does not depend on the client cooperating.
- *
- * The answer itself is already on the wire when this returns, so the uploader
- * still gets its §4 `{"error": ...}` rather than a bare disconnect.
- */
-static esp_err_t refuse(httpd_req_t *req, const char *status, const char *error)
-{
-    slate_api_send_error(req, status, error);
-    return ESP_FAIL;
-}
-
 /* One spelling of "the device is out of heap" for the whole API: #10's helper
  * answers 500 `out_of_memory`, and an OTA that invented its own status for the
  * same condition would make a client's retry rule depend on the route. */
 static esp_err_t refuse_out_of_memory(httpd_req_t *req)
 {
-    slate_api_send_json(req, NULL);
-    return ESP_FAIL;
+    return slate_api_refuse_and_close(req, "500 Internal Server Error", "out_of_memory");
 }
 
 /*
@@ -462,19 +438,19 @@ static esp_err_t refuse_ota_error(httpd_req_t *req, const char *what, esp_err_t 
 
     switch (err) {
     case ESP_ERR_OTA_VALIDATE_FAILED:
-        return refuse(req, "400 Bad Request", "invalid_image");
+        return slate_api_refuse_and_close(req, "400 Bad Request", "invalid_image");
 
     case ESP_ERR_OTA_ROLLBACK_INVALID_STATE:
         /* Reachable once #12 enables rollback: ESP-IDF refuses to write a new
          * image while the running one is still pending verification. Named so
          * the answer says what to wait for instead of looking like a fault. */
-        return refuse(req, "409 Conflict", "pending_verify");
+        return slate_api_refuse_and_close(req, "409 Conflict", "pending_verify");
 
     case ESP_ERR_NO_MEM:
         return refuse_out_of_memory(req);
 
     default:
-        return refuse(req, "500 Internal Server Error", "ota_failed");
+        return slate_api_refuse_and_close(req, "500 Internal Server Error", "ota_failed");
     }
 }
 
@@ -540,7 +516,8 @@ static esp_err_t upload_handler(httpd_req_t *req)
     const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
     if (target == NULL) {
         ESP_LOGE(TAG, "no second application partition to write to");
-        return refuse(req, "500 Internal Server Error", "no_ota_partition");
+        return slate_api_refuse_and_close(req, "500 Internal Server Error",
+                                          "no_ota_partition");
     }
 
     /*
@@ -553,12 +530,12 @@ static esp_err_t upload_handler(httpd_req_t *req)
     size_t total = req->content_len;
     if (total == 0) {
         ESP_LOGW(TAG, "upload with no body");
-        return refuse(req, "400 Bad Request", "empty_body");
+        return slate_api_refuse_and_close(req, "400 Bad Request", "empty_body");
     }
     if (total > target->size) {
         ESP_LOGW(TAG, "upload of %u B does not fit %s (%" PRIu32 " B)", (unsigned) total,
                  target->label, target->size);
-        return refuse(req, "413 Payload Too Large", "too_large");
+        return slate_api_refuse_and_close(req, "413 Payload Too Large", "too_large");
     }
 
     char *buffer = heap_caps_malloc(CHUNK_BYTES, MALLOC_CAP_SPIRAM);
@@ -584,7 +561,7 @@ static esp_err_t upload_handler(httpd_req_t *req)
     if (truncated) {
         ESP_LOGW(TAG, "upload stopped after %u of %u B", (unsigned) received, (unsigned) total);
         free(buffer);
-        return refuse(req, "400 Bad Request", "truncated");
+        return slate_api_refuse_and_close(req, "400 Bad Request", "truncated");
     }
 
     const esp_app_desc_t *incoming =
@@ -592,7 +569,7 @@ static esp_err_t upload_handler(httpd_req_t *req)
     if (incoming == NULL) {
         ESP_LOGW(TAG, "body is not an %s application image", CONFIG_IDF_TARGET);
         free(buffer);
-        return refuse(req, "400 Bad Request", "not_an_image");
+        return slate_api_refuse_and_close(req, "400 Bad Request", "not_an_image");
     }
 
     /* Copied out before the buffer is reused, and by length: esp_app_desc_t's
@@ -633,7 +610,7 @@ static esp_err_t upload_handler(httpd_req_t *req)
         esp_ota_abort(handle);
         ESP_LOGW(TAG, "upload stopped after %u of %u B, %s is now blank", (unsigned) received,
                  (unsigned) total, target->label);
-        return refuse(req, "400 Bad Request", "truncated");
+        return slate_api_refuse_and_close(req, "400 Bad Request", "truncated");
     }
     if (err != ESP_OK) {
         esp_ota_abort(handle);

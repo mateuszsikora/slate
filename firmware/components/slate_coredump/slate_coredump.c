@@ -63,19 +63,6 @@ static const char *TAG = "coredump";
  */
 #define SEND_BUDGET_US (300 * 1000000LL)
 
-/* --- Refusals ----------------------------------------------------------- */
-
-static esp_err_t refuse(httpd_req_t *req, const char *status, const char *error)
-{
-    slate_api_send_error(req, status, error);
-
-    /* The bound the rest of the API applies, for the same reason: a body no
-     * handler read is drained 32 bytes at a time on the one HTTP task, and a
-     * client that trickles owns it for as long as it likes. A GET here has no
-     * body worth reading, so a request that brought one loses its socket. */
-    return req->content_len > 0 ? ESP_FAIL : ESP_OK;
-}
-
 /**
  * Turn a dump_status() code into the answer §4.1's client acts on.
  *
@@ -88,7 +75,7 @@ static esp_err_t refuse_dump_status(httpd_req_t *req, esp_err_t err)
 {
     switch (err) {
     case ESP_ERR_NOT_FOUND:
-        return refuse(req, "404 Not Found", "no_coredump");
+        return slate_api_refuse(req, "404 Not Found", "no_coredump");
 
     case ESP_ERR_INVALID_SIZE:
     case ESP_ERR_INVALID_CRC:
@@ -96,11 +83,11 @@ static esp_err_t refuse_dump_status(httpd_req_t *req, esp_err_t err)
          * (#14). Naming the case on the device is what keeps that lie off the
          * host, which would otherwise spend the evening on gdb. */
         ESP_LOGE(TAG, "core dump on flash is corrupt: %s", esp_err_to_name(err));
-        return refuse(req, "500 Internal Server Error", "corrupt_coredump");
+        return slate_api_refuse(req, "500 Internal Server Error", "corrupt_coredump");
 
     default:
         ESP_LOGE(TAG, "reading the core dump partition: %s", esp_err_to_name(err));
-        return refuse(req, "500 Internal Server Error", "coredump_read_failed");
+        return slate_api_refuse(req, "500 Internal Server Error", "coredump_read_failed");
     }
 }
 
@@ -242,8 +229,7 @@ static esp_err_t coredump_handler(httpd_req_t *req)
     }
     if (buffer == NULL) {
         /* One spelling of "the device is out of heap" for the whole API. */
-        slate_api_send_json(req, NULL);
-        return ESP_FAIL;
+        return slate_api_refuse(req, "500 Internal Server Error", "out_of_memory");
     }
 
     const int64_t budget_ends = esp_timer_get_time() + SEND_BUDGET_US;

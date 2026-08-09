@@ -54,26 +54,6 @@ extern const uint8_t _binary_portal_html_gz_end[];
  * that safe. */
 #define DNS_SERVERS_MAX SLATE_IPV4_DNS_MAX
 
-/* --- Refusals ----------------------------------------------------------- */
-
-/*
- * A refusal that closes the connection, for the reason slate_ota.c spells out at
- * length: esp_http_server drains a body the handler did not read, 32 bytes at a
- * time, on the one HTTP task, and that loop ends only when the client stops
- * sending. Used for the refusals that happen before the body is read; once it
- * has been read there is nothing to drain and the connection is kept.
- */
-static esp_err_t refuse_and_close(httpd_req_t *req, const char *status, const char *error)
-{
-    slate_api_send_error(req, status, error);
-    return ESP_FAIL;
-}
-
-static esp_err_t refuse(httpd_req_t *req, const char *error)
-{
-    return slate_api_send_error(req, "400 Bad Request", error);
-}
-
 /* --- GET / -------------------------------------------------------------- */
 
 static esp_err_t page_handler(httpd_req_t *req)
@@ -481,10 +461,9 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
     char accepted_ssid[SLATE_WIFI_SSID_BUF_LEN] = {0};
     const char *problem = read_body(req, body, sizeof(body));
     if (problem != NULL) {
-        /* Nothing was read, or not all of it was, so the connection goes with
-         * the refusal. */
-        return refuse_and_close(req, strcmp(problem, "too_large") == 0 ? "413 Payload Too Large"
-                                                                      : "400 Bad Request",
+        return slate_api_refuse(req,
+                                strcmp(problem, "too_large") == 0 ? "413 Payload Too Large"
+                                                                  : "400 Bad Request",
                                 problem);
     }
 
@@ -496,7 +475,7 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
     if (!cJSON_IsObject(root)) {
         clear_json_strings(root);
         cJSON_Delete(root);
-        return refuse(req, "invalid_json");
+        return slate_api_refuse(req, "400 Bad Request", "invalid_json");
     }
 
     const char *ssid = string_field(root, "ssid");
@@ -539,10 +518,10 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
 
     if (error != NULL) {
         ESP_LOGW(TAG, "refused: %s", error);
-        return refuse(req, error);
+        return slate_api_refuse(req, "400 Bad Request", error);
     }
     if (err != ESP_OK) {
-        return slate_api_send_error(req, "500 Internal Server Error", "store_failed");
+        return slate_api_refuse(req, "500 Internal Server Error", "store_failed");
     }
 
     /*
@@ -596,7 +575,7 @@ static esp_err_t wifi_forget_handler(httpd_req_t *req)
     esp_err_t err = slate_wifi_forget();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "forgetting the credentials: %s", esp_err_to_name(err));
-        return slate_api_send_error(req, "500 Internal Server Error", "store_failed");
+        return slate_api_refuse(req, "500 Internal Server Error", "store_failed");
     }
 
     return slate_api_send_json(req, cJSON_CreateObject());
