@@ -466,6 +466,16 @@ static void start_display(void)
 
 void app_main(void)
 {
+    /* §11.3's retained backlog starts before the boot report and board
+     * bring-up, while its network transport still starts later with the API.
+     * The capture half uses static storage, so it is safe before the store has
+     * established whether this is a healthy or recovery boot. */
+    esp_err_t capture_err = slate_ws_capture_init();
+    if (capture_err != ESP_OK) {
+        ESP_LOGE(TAG, "retained log capture unavailable: %s — continuing",
+                 esp_err_to_name(capture_err));
+    }
+
 #ifdef SLATE_OTA_ROLLBACK_SELFTEST
     ota_rollback_selftest();
 #endif

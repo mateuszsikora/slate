@@ -105,6 +105,8 @@ static uint64_t s_log_next_seq;
 static portMUX_TYPE s_log_lock = portMUX_INITIALIZER_UNLOCKED;
 static vprintf_like_t s_previous_vprintf;
 static SemaphoreHandle_t s_capture_mutex;
+static StaticSemaphore_t s_capture_mutex_storage;
+static portMUX_TYPE s_capture_init_lock = portMUX_INITIALIZER_UNLOCKED;
 static char s_capture_line[SLATE_WS_LOG_CAPTURE_BYTES];
 
 static void ring_write_bytes(size_t offset, const void *data, size_t len)
@@ -857,26 +859,55 @@ static void ws_task(void *ctx)
     }
 }
 
+esp_err_t slate_ws_capture_init(void)
+{
+    bool installed = false;
+
+    /* Capture starts before the store is known to be healthy. Keep that step
+     * independent of heap state: the ring, line buffer and mutex all live in
+     * static storage, and transport/task allocation remains in slate_ws_init.
+     * The separate lock makes the check-and-install one operation: installing
+     * twice would make capture_vprintf its own previous handler. */
+    portENTER_CRITICAL(&s_capture_init_lock);
+    if (!s_capture_mutex) {
+        s_capture_mutex = xSemaphoreCreateMutexStatic(&s_capture_mutex_storage);
+        if (s_capture_mutex) {
+            s_previous_vprintf = esp_log_set_vprintf(capture_vprintf);
+            installed = true;
+        }
+    }
+    bool ready = s_capture_mutex != NULL;
+    portEXIT_CRITICAL(&s_capture_init_lock);
+
+    if (!ready) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (installed) {
+        ESP_LOGI(TAG, "retaining logs in %u B ring", SLATE_WS_LOG_RING_BYTES);
+    }
+    return ESP_OK;
+}
+
 esp_err_t slate_ws_init(void)
 {
     if (s_task) {
         return ESP_ERR_INVALID_STATE;
     }
 
+    esp_err_t err = slate_ws_capture_init();
+    if (err != ESP_OK) {
+        return err;
+    }
+
     for (size_t i = 0; i < SLATE_WS_MAX_CLIENTS; i++) {
         s_clients[i].fd = -1;
     }
     s_last_status_us = esp_timer_get_time();
-    s_capture_mutex = xSemaphoreCreateMutex();
-    if (!s_capture_mutex) {
-        return ESP_ERR_NO_MEM;
-    }
 
     if (xTaskCreate(ws_task, "slate_ws", SLATE_WS_TASK_STACK, NULL,
                     SLATE_WS_TASK_PRIORITY, &s_task) != pdPASS) {
         s_task = NULL;
-        vSemaphoreDelete(s_capture_mutex);
-        s_capture_mutex = NULL;
         return ESP_ERR_NO_MEM;
     }
 
@@ -887,18 +918,14 @@ esp_err_t slate_ws_init(void)
         .is_websocket = true,
         .ws_post_handshake_cb = ws_connected,
     };
-    esp_err_t err = slate_api_register_uri(&ws, SLATE_API_AUTH_WS_FIRST_FRAME);
+    err = slate_api_register_uri(&ws, SLATE_API_AUTH_WS_FIRST_FRAME);
     if (err != ESP_OK) {
         vTaskDelete(s_task);
         s_task = NULL;
-        vSemaphoreDelete(s_capture_mutex);
-        s_capture_mutex = NULL;
         return err;
     }
 
-    s_previous_vprintf = esp_log_set_vprintf(capture_vprintf);
-    ESP_LOGI(TAG, "WebSocket channel ready with %u B retained log ring",
-             SLATE_WS_LOG_RING_BYTES);
+    ESP_LOGI(TAG, "WebSocket channel ready");
     return ESP_OK;
 }
 
