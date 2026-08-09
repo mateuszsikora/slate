@@ -2,12 +2,15 @@
 # `esp_wifi` and `esp_netif` are the second interface and its DHCP server;
 # `lwip` is the captive DNS responder's socket. `slate_api` is where the routes
 # and §4.3's token exception live — this component never touches
-# esp_http_server without going through it.
+# esp_http_server without going through it. `slate_display` is private because
+# only this implementation presents setup state; slate_setup.h exposes none of
+# its types.
 #
 idf_component_register(
     SRCS "slate_setup.c" "slate_setup_api.c" "slate_setup_dns.c"
     INCLUDE_DIRS "include"
     REQUIRES slate_api slate_store slate_wifi esp_wifi esp_netif esp_event esp_timer lwip json
+    PRIV_REQUIRES slate_display
 )
 
 #

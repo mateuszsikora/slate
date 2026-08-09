@@ -12,6 +12,9 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -105,6 +108,9 @@ static bool s_backlight_on;
 static bool s_first_frame_shown;
 static slate_display_heap_metrics_t s_heap_metrics;
 static int64_t s_heap_metrics_at_us;
+static lv_obj_t *s_setup_overlay;
+static atomic_bool s_setup_presentation_active = ATOMIC_VAR_INIT(false);
+static atomic_bool s_setup_hide_pending = ATOMIC_VAR_INIT(false);
 
 /* Written in the VSYNC ISR, read on the LVGL task. The values are 64-bit on a
  * 32-bit CPU, so the read is protected rather than assumed atomic. */
@@ -792,6 +798,118 @@ static void build_test_pattern(void *ctx)
     ESP_LOGI(TAG, "bring-up test pattern built on LVGL task");
 }
 
+/* --- §9 recovery presentation ----------------------------------------- */
+
+static lv_obj_t *setup_label(lv_obj_t *parent, const char *text, uint32_t color,
+                             int32_t width)
+{
+    lv_obj_t *label = lv_label_create(parent);
+    lv_label_set_text(label, text);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(label, width);
+    lv_obj_set_style_text_color(label, lv_color_hex(color), LV_PART_MAIN);
+    return label;
+}
+
+static void setup_overlay_deleted(lv_event_t *event)
+{
+    if (lv_event_get_target(event) == s_setup_overlay) {
+        s_setup_overlay = NULL;
+        atomic_store_explicit(&s_setup_presentation_active, false, memory_order_release);
+    }
+}
+
+static void hide_setup_overlay(void *ctx)
+{
+    (void) ctx;
+    if (s_setup_overlay) {
+        lv_obj_delete(s_setup_overlay);
+    }
+}
+
+static void show_setup_overlay(void *ctx)
+{
+    slate_display_setup_t *setup = ctx;
+
+    /* A newer show supersedes a hide requested before this work reached the
+     * LVGL task. A hide requested after this store remains pending and wins at
+     * the end of the task's iteration. */
+    atomic_store_explicit(&s_setup_hide_pending, false, memory_order_release);
+    hide_setup_overlay(NULL);
+
+    lv_obj_t *screen = lv_screen_active();
+    const int32_t width = setup->banner ? 772 : SLATE_LCD_H_RES;
+    const int32_t height = setup->banner ? 132 : SLATE_LCD_V_RES;
+    const int32_t x = setup->banner ? 14 : 0;
+    const int32_t y = setup->banner ? 14 : 0;
+
+    lv_obj_t *overlay = lv_obj_create(screen);
+    s_setup_overlay = overlay;
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_pos(overlay, x, y);
+    lv_obj_set_size(overlay, width, height);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(setup->banner ? 0x22252B : 0x101114),
+                              LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(overlay, lv_color_hex(0xF5A524), LV_PART_MAIN);
+    lv_obj_set_style_border_width(overlay, setup->banner ? 2 : 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(overlay, setup->banner ? 18 : 0, LV_PART_MAIN);
+    lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(overlay, setup_overlay_deleted, LV_EVENT_DELETE, NULL);
+    atomic_store_explicit(&s_setup_presentation_active, true, memory_order_release);
+
+    /* §9.4 makes the address on this presentation a recovery mechanism, so it
+     * cannot be left behind a dark backlight. While the presentation is active
+     * slate_display_backlight_set(false) refuses later dimming as well. */
+    backlight_on();
+
+    lv_obj_t *card = overlay;
+    if (!setup->banner) {
+        card = lv_obj_create(overlay);
+        lv_obj_remove_style_all(card);
+        lv_obj_set_size(card, 650, 330);
+        lv_obj_center(card);
+        lv_obj_set_style_bg_color(card, lv_color_hex(0x1A1C21), LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_color(card, lv_color_hex(0x343841), LV_PART_MAIN);
+        lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
+        lv_obj_set_style_radius(card, 18, LV_PART_MAIN);
+        lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(card, LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    const int32_t text_width = setup->banner ? width - 40 : 590;
+    lv_obj_t *title = setup_label(card, setup->banner ? "NETWORK OFFLINE" : "SET UP NETWORK",
+                                  0xF5A524, text_width);
+    lv_obj_align(title, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30, setup->banner ? 16 : 28);
+
+    char connection[96];
+    snprintf(connection, sizeof(connection), "Join %s  |  Open http://%s", setup->network,
+             setup->address);
+    lv_obj_t *join = setup_label(card, connection, 0xF2F5F9, text_width);
+    lv_obj_align(join, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30, setup->banner ? 43 : 76);
+
+    if (setup->passphrase[0] != '\0') {
+        char password[96];
+        snprintf(password, sizeof(password), "WiFi password: %s", setup->passphrase);
+        lv_obj_t *pass = setup_label(card, password, 0xF2F5F9, text_width);
+        lv_obj_align(pass, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30,
+                     setup->banner ? 68 : 116);
+        explicit_bzero(password, sizeof(password));
+    }
+
+    const int32_t message_y = setup->banner ? (setup->passphrase[0] ? 93 : 72)
+                                             : (setup->passphrase[0] ? 170 : 140);
+    lv_obj_t *message = setup_label(card, setup->message, 0x8A94A6, text_width);
+    lv_obj_align(message, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30, message_y);
+
+    lv_obj_move_foreground(overlay);
+    explicit_bzero(connection, sizeof(connection));
+    explicit_bzero(setup, sizeof(*setup));
+    free(setup);
+}
+
 static void log_vsync_once(void)
 {
     static bool logged;
@@ -856,6 +974,13 @@ static void display_task(void *ctx)
         slate_display_work_t work;
         if (xQueueReceive(s_work_queue, &work, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
             work.fn(work.ctx);
+        }
+        /* Hide is desired state rather than ordinary queued work. A full work
+         * queue must not leave the recovery card over a dashboard after the
+         * station has returned. Checking after work also preserves show/hide
+         * ordering when a show was already queued. */
+        if (atomic_exchange_explicit(&s_setup_hide_pending, false, memory_order_acq_rel)) {
+            hide_setup_overlay(NULL);
         }
         log_vsync_once();
         update_heap_metrics();
@@ -951,6 +1076,41 @@ esp_err_t slate_display_post(slate_display_work_fn fn, void *ctx, uint32_t timeo
                : ESP_ERR_TIMEOUT;
 }
 
+esp_err_t slate_display_setup_show(const slate_display_setup_t *setup)
+{
+    if (!setup || setup->network[0] == '\0' || setup->address[0] == '\0' ||
+        setup->message[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    slate_display_setup_t *copy = malloc(sizeof(*copy));
+    if (!copy) {
+        return ESP_ERR_NO_MEM;
+    }
+    *copy = *setup;
+    copy->network[sizeof(copy->network) - 1] = '\0';
+    copy->address[sizeof(copy->address) - 1] = '\0';
+    copy->passphrase[sizeof(copy->passphrase) - 1] = '\0';
+    copy->message[sizeof(copy->message) - 1] = '\0';
+
+    esp_err_t err = slate_display_post(show_setup_overlay, copy, 1000);
+    if (err != ESP_OK) {
+        explicit_bzero(copy, sizeof(*copy));
+        free(copy);
+    }
+    return err;
+}
+
+esp_err_t slate_display_setup_hide(void)
+{
+    if (!s_ready || !s_work_queue) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    atomic_store_explicit(&s_setup_hide_pending, true, memory_order_release);
+    return ESP_OK;
+}
+
 bool slate_display_ready(void)
 {
     return s_ready;
@@ -958,6 +1118,9 @@ bool slate_display_ready(void)
 
 esp_err_t slate_display_backlight_set(bool on)
 {
+    if (!on && atomic_load_explicit(&s_setup_presentation_active, memory_order_acquire)) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!s_expander || !s_expander_lock) {
         return ESP_ERR_INVALID_STATE;
     }
