@@ -27,7 +27,7 @@
 
 static const char *TAG = "slate_touch";
 
-#define SLATE_TOUCH_EXIO_RESET IO_EXPANDER_PIN_NUM_1
+#define SLATE_TOUCH_EXIO_RESET SLATE_CH422G_PIN(1)
 #define SLATE_TOUCH_INT_GPIO   GPIO_NUM_4
 
 /* Selected by the reset sequence below rather than by this constant — the
@@ -49,10 +49,10 @@ static const char *TAG = "slate_touch";
  */
 #define SLATE_TOUCH_READ_PERIOD_MS 10
 
-/* The expander is shared and its output register is read-modify-written. Long
- * enough to outlast the whole reset sequence a competing writer might be in the
- * middle of, short enough that a wedged bus surfaces as an error. */
-#define SLATE_TOUCH_EXPANDER_TIMEOUT_MS 200
+/* Keep the measured bus speed from #7, now expressed per device. Unlike the
+ * legacy panel IO, the v2 path also honours the finite transfer timeout. */
+#define SLATE_TOUCH_I2C_HZ         400000
+#define SLATE_TOUCH_I2C_TIMEOUT_MS 10
 
 /* A controller that has stopped answering does so on every poll, fifty times a
  * second. The first line is the diagnosis and the rest are noise, so the rest
@@ -86,12 +86,11 @@ static int64_t s_fault_logged_at_us;
  * which reconfigures it as an input — leaving it an output would have the SoC
  * and the controller both driving one wire.
  *
- * The expander writes are taken under the borrowed lock, and the whole sequence
- * under one take rather than three: releasing it around the delays would let a
- * backlight change land between the reset going low and coming back up, which
- * is a read-modify-write pair that can leave the controller held in reset.
+ * The board driver serializes every cached output update with its write. A
+ * backlight change between reset low and high therefore preserves the reset
+ * bit, and the release preserves the changed backlight bit in turn.
  */
-static esp_err_t reset_controller(esp_io_expander_handle_t expander, SemaphoreHandle_t lock)
+static esp_err_t reset_controller(slate_ch422g_handle_t expander)
 {
     const gpio_config_t int_as_output = {
         .mode = GPIO_MODE_OUTPUT,
@@ -100,20 +99,11 @@ static esp_err_t reset_controller(esp_io_expander_handle_t expander, SemaphoreHa
     ESP_RETURN_ON_ERROR(gpio_config(&int_as_output), TAG, "interrupt line as output");
     ESP_RETURN_ON_ERROR(gpio_set_level(SLATE_TOUCH_INT_GPIO, 0), TAG, "interrupt line low");
 
-    if (xSemaphoreTake(lock, pdMS_TO_TICKS(SLATE_TOUCH_EXPANDER_TIMEOUT_MS)) != pdTRUE) {
-        ESP_LOGE(TAG, "expander lock busy");
-        return ESP_ERR_TIMEOUT;
-    }
-
-    esp_err_t err = esp_io_expander_set_dir(expander, SLATE_TOUCH_EXIO_RESET, IO_EXPANDER_OUTPUT);
-    if (err == ESP_OK) {
-        err = esp_io_expander_set_level(expander, SLATE_TOUCH_EXIO_RESET, 0);
-    }
+    esp_err_t err = slate_ch422g_set_level(expander, SLATE_TOUCH_EXIO_RESET, false);
     if (err == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(11));
-        err = esp_io_expander_set_level(expander, SLATE_TOUCH_EXIO_RESET, 1);
+        err = slate_ch422g_set_level(expander, SLATE_TOUCH_EXIO_RESET, true);
     }
-    xSemaphoreGive(lock);
     ESP_RETURN_ON_ERROR(err, TAG, "reset line");
 
     vTaskDelay(pdMS_TO_TICKS(6));
@@ -123,21 +113,14 @@ static esp_err_t reset_controller(esp_io_expander_handle_t expander, SemaphoreHa
     return ESP_OK;
 }
 
-static esp_err_t attach_controller(int i2c_port)
+static esp_err_t attach_controller(i2c_master_bus_handle_t i2c_bus)
 {
     esp_lcd_panel_io_i2c_config_t io_config = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
     io_config.dev_addr = SLATE_TOUCH_ADDRESS;
-    /* The macro sets a per-device clock, which only the new I²C driver can
-     * honour — the legacy one takes its speed from the bus and refuses a
-     * configuration that says otherwise rather than ignoring it. The first
-     * attempt at this returned ESP_ERR_INVALID_ARG for exactly that reason. */
-    io_config.scl_speed_hz = 0;
+    io_config.scl_speed_hz = SLATE_TOUCH_I2C_HZ;
+    io_config.transaction_timeout_ms = SLATE_TOUCH_I2C_TIMEOUT_MS;
 
-    /* The `_v1` suffix names the legacy `driver/i2c.h` bus explicitly. It is
-     * not a fallback: the CH422G package accepts nothing else, ESP-IDF aborts
-     * at boot if both I²C stacks touch one bus (#7), and the panel and the
-     * touch controller are on the same two wires. */
-    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c_v1((uint32_t) i2c_port, &io_config, &s_io),
+    ESP_RETURN_ON_ERROR(esp_lcd_new_panel_io_i2c_v2(i2c_bus, &io_config, &s_io),
                         TAG, "panel IO");
 
     /* `driver_data` is deliberately absent. The driver reads it only inside the
@@ -272,10 +255,9 @@ static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     s_press_samples++;
 }
 
-esp_err_t slate_touch_init(int i2c_port, esp_io_expander_handle_t expander,
-                           SemaphoreHandle_t expander_lock)
+esp_err_t slate_touch_init(i2c_master_bus_handle_t i2c_bus, slate_ch422g_handle_t expander)
 {
-    if (!expander || !expander_lock) {
+    if (!i2c_bus || !expander) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s_ready) {
@@ -296,9 +278,9 @@ esp_err_t slate_touch_init(int i2c_port, esp_io_expander_handle_t expander,
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t err = reset_controller(expander, expander_lock);
+    esp_err_t err = reset_controller(expander);
     if (err == ESP_OK) {
-        err = attach_controller(i2c_port);
+        err = attach_controller(i2c_bus);
     }
     if (err != ESP_OK) {
         release_controller();
@@ -316,9 +298,9 @@ esp_err_t slate_touch_init(int i2c_port, esp_io_expander_handle_t expander,
 
     s_ready = true;
     ESP_LOGI(TAG,
-             "GT911 at 0x%02X on I2C%d, interrupt GPIO%d, reset EXIO1; %" PRId32 "x%" PRId32
-             ", polled every %d ms",
-             (unsigned) SLATE_TOUCH_ADDRESS, i2c_port, (int) SLATE_TOUCH_INT_GPIO, s_h_res,
+             "GT911 at 0x%02X on shared I2C bus, interrupt GPIO%d, reset EXIO1; "
+             "%" PRId32 "x%" PRId32 ", polled every %d ms",
+             (unsigned) SLATE_TOUCH_ADDRESS, (int) SLATE_TOUCH_INT_GPIO, s_h_res,
              s_v_res, SLATE_TOUCH_READ_PERIOD_MS);
     return ESP_OK;
 }

@@ -24,7 +24,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-#include "driver/i2c.h"
+#include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
@@ -32,9 +32,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "lvgl.h"
-/* S-3 found CH422G here rather than in a component of its own. */
-#include "port/esp_io_expander_ch422g.h"
 
+#include "slate_ch422g.h"
 #include "slate_display.h"
 #include "slate_touch.h"
 
@@ -58,12 +57,11 @@ static const char *TAG = "slate_display";
 #define SLATE_I2C_PORT     I2C_NUM_0
 #define SLATE_I2C_SDA_GPIO 8
 #define SLATE_I2C_SCL_GPIO 9
-#define SLATE_I2C_HZ       400000
 
 /* EXIO1 is the touch controller's reset and belongs to slate_touch, which has
  * to hold it while the controller's I²C address is selected. */
-#define SLATE_EXIO_DISP    IO_EXPANDER_PIN_NUM_2
-#define SLATE_EXIO_LCD_RST IO_EXPANDER_PIN_NUM_3
+#define SLATE_EXIO_DISP    SLATE_CH422G_PIN(2)
+#define SLATE_EXIO_LCD_RST SLATE_CH422G_PIN(3)
 
 #define SLATE_PIN_HSYNC 46
 #define SLATE_PIN_VSYNC 3
@@ -76,7 +74,6 @@ static const char *TAG = "slate_display";
 #define SLATE_DISPLAY_QUEUE_LEN 16
 #define SLATE_DISPLAY_INIT_TIMEOUT_MS 10000
 #define SLATE_DISPLAY_VSYNC_TIMEOUT_MS 100
-#define SLATE_DISPLAY_EXPANDER_TIMEOUT_MS 100
 #define SLATE_DISPLAY_HEAP_METRICS_PERIOD_US (15LL * 1000000)
 
 static const int SLATE_DATA_GPIOS[16] = {
@@ -92,18 +89,16 @@ typedef struct {
 
 static QueueHandle_t s_work_queue;
 static SemaphoreHandle_t s_init_done;
-/* The CH422G's output register is read-modify-written by the driver, so two
- * tasks changing two different pins can lose one of them. Only the backlight
- * changes after start-up, but #28's schedule is a second task and this is
- * cheaper than remembering that. */
-static SemaphoreHandle_t s_expander_lock;
+/* The CH422G driver serializes its cached output update with the corresponding
+ * bus write, so touch reset and #28's future backlight task preserve one
+ * another's pins without a second lock here. */
 static TaskHandle_t s_task;
 static esp_lcd_panel_handle_t s_panel;
 static lv_display_t *s_display;
-static esp_io_expander_handle_t s_expander;
+static i2c_master_bus_handle_t s_i2c_bus;
+static slate_ch422g_handle_t s_expander;
 static void *s_lvgl_pool;
 static esp_err_t s_init_result = ESP_ERR_INVALID_STATE;
-static bool s_i2c_installed;
 static bool s_lvgl_initialized;
 static bool s_ready;
 static bool s_backlight_on;
@@ -162,56 +157,30 @@ void *slate_display_lvgl_pool_alloc(size_t size)
 
 static esp_err_t i2c_init(void)
 {
-    /* CH422G 1.1.1 accepts an i2c_port_t. ESP-IDF aborts if the new and legacy
-     * drivers touch the same bus, so #7 must keep using this installed legacy
-     * bus or replace the expander driver for both panel and touch together. */
-    const i2c_config_t config = {
-        .mode = I2C_MODE_MASTER,
+    const i2c_master_bus_config_t config = {
+        .i2c_port = SLATE_I2C_PORT,
         .sda_io_num = SLATE_I2C_SDA_GPIO,
         .scl_io_num = SLATE_I2C_SCL_GPIO,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = SLATE_I2C_HZ,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
     };
-    ESP_RETURN_ON_ERROR(i2c_param_config(SLATE_I2C_PORT, &config), TAG, "I2C config");
-    esp_err_t err = i2c_driver_install(SLATE_I2C_PORT, I2C_MODE_MASTER, 0, 0, 0);
-    if (err == ESP_OK) {
-        s_i2c_installed = true;
-    }
-    return err;
+    return i2c_new_master_bus(&config, &s_i2c_bus);
 }
 
 static esp_err_t expander_init(void)
 {
-    ESP_RETURN_ON_ERROR(
-        esp_io_expander_new_i2c_ch422g(SLATE_I2C_PORT,
-                                       ESP_IO_EXPANDER_I2C_CH422G_ADDRESS,
-                                       &s_expander),
-        TAG, "CH422G");
+    ESP_RETURN_ON_ERROR(slate_ch422g_new(s_i2c_bus, &s_expander), TAG, "CH422G");
 
-    /* From the moment the handle exists, s_expander_lock is what makes the
-     * output register single-writer, and that includes this function: the
-     * backlight is reachable through the public API the instant `s_expander` is
-     * non-NULL, which is now. */
-    if (xSemaphoreTake(s_expander_lock, pdMS_TO_TICKS(SLATE_DISPLAY_EXPANDER_TIMEOUT_MS)) !=
-        pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-
-    const uint32_t outputs = SLATE_EXIO_DISP | SLATE_EXIO_LCD_RST;
-    esp_err_t err = esp_io_expander_set_dir(s_expander, outputs, IO_EXPANDER_OUTPUT);
+    /* Keep the glass dark until a complete frame exists. */
+    esp_err_t err = slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, false);
     if (err == ESP_OK) {
-        /* Keep the glass dark until a complete frame exists. */
-        err = esp_io_expander_set_level(s_expander, SLATE_EXIO_DISP, 0);
-    }
-    if (err == ESP_OK) {
-        err = esp_io_expander_set_level(s_expander, SLATE_EXIO_LCD_RST, 0);
+        err = slate_ch422g_set_level(s_expander, SLATE_EXIO_LCD_RST, false);
     }
     if (err == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(20));
-        err = esp_io_expander_set_level(s_expander, SLATE_EXIO_LCD_RST, 1);
+        err = slate_ch422g_set_level(s_expander, SLATE_EXIO_LCD_RST, true);
     }
-    xSemaphoreGive(s_expander_lock);
     ESP_RETURN_ON_ERROR(err, TAG, "CH422G bring-up");
 
     vTaskDelay(pdMS_TO_TICKS(50));
@@ -466,7 +435,7 @@ static void display_resources_deinit(void)
 {
     /* The expander must still have its bus while the glass is made dark. */
     if (s_expander) {
-        cleanup_error("backlight", esp_io_expander_set_level(s_expander, SLATE_EXIO_DISP, 0));
+        cleanup_error("backlight", slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, false));
         s_backlight_on = false;
         s_first_frame_shown = false;
     }
@@ -499,12 +468,12 @@ static void display_resources_deinit(void)
         s_panel = NULL;
     }
     if (s_expander) {
-        cleanup_error("CH422G", esp_io_expander_del(s_expander));
+        cleanup_error("CH422G", slate_ch422g_del(s_expander));
         s_expander = NULL;
     }
-    if (s_i2c_installed) {
-        cleanup_error("I2C", i2c_driver_delete(SLATE_I2C_PORT));
-        s_i2c_installed = false;
+    if (s_i2c_bus) {
+        cleanup_error("I2C", i2c_del_master_bus(s_i2c_bus));
+        s_i2c_bus = NULL;
     }
 }
 
@@ -1003,7 +972,7 @@ static void display_task(void *ctx)
          * LVGL exactly one task. A controller that will not answer costs the
          * panel its input and nothing else — the display, the API and the setup
          * access point are all still worth having. */
-        esp_err_t touch_err = slate_touch_init(SLATE_I2C_PORT, s_expander, s_expander_lock);
+        esp_err_t touch_err = slate_touch_init(s_i2c_bus, s_expander);
         if (touch_err != ESP_OK) {
             ESP_LOGE(TAG, "touch unavailable: %s — continuing without input",
                      esp_err_to_name(touch_err));
@@ -1046,9 +1015,9 @@ static void display_task(void *ctx)
     }
 }
 
-/* Every synchronisation object the task needs, released together. The three
- * call sites below differ only in which of them exist yet, and a NULL handle is
- * one that has already gone. */
+/* Every synchronisation object the task needs, released together. The call
+ * sites below differ only in which of them exist yet, and a NULL handle is one
+ * that has already gone. */
 static void primitives_free(void)
 {
     if (s_work_queue) {
@@ -1058,10 +1027,6 @@ static void primitives_free(void)
     if (s_init_done) {
         vSemaphoreDelete(s_init_done);
         s_init_done = NULL;
-    }
-    if (s_expander_lock) {
-        vSemaphoreDelete(s_expander_lock);
-        s_expander_lock = NULL;
     }
 }
 
@@ -1086,8 +1051,7 @@ esp_err_t slate_display_init(void)
 
     s_work_queue = xQueueCreate(SLATE_DISPLAY_QUEUE_LEN, sizeof(slate_display_work_t));
     s_init_done = xSemaphoreCreateBinary();
-    s_expander_lock = xSemaphoreCreateMutex();
-    if (!s_work_queue || !s_init_done || !s_expander_lock) {
+    if (!s_work_queue || !s_init_done) {
         primitives_free();
         return ESP_ERR_NO_MEM;
     }
@@ -1177,19 +1141,14 @@ esp_err_t slate_display_backlight_set(bool on)
     if (!on && atomic_load_explicit(&s_setup_presentation_active, memory_order_acquire)) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (!s_expander || !s_expander_lock) {
+    if (!s_expander) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (xSemaphoreTake(s_expander_lock, pdMS_TO_TICKS(SLATE_DISPLAY_EXPANDER_TIMEOUT_MS)) !=
-        pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
 
-    esp_err_t err = esp_io_expander_set_level(s_expander, SLATE_EXIO_DISP, on ? 1 : 0);
+    esp_err_t err = slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, on);
     if (err == ESP_OK) {
         s_backlight_on = on;
     }
-    xSemaphoreGive(s_expander_lock);
     return err;
 }
 
