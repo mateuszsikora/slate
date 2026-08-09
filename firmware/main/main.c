@@ -271,10 +271,9 @@ static void store_selftest(void)
 
 /*
  * The boot report's network half. slate_setup now acts on two of these four and
- * prints §6.5's setup card itself; this stays because it is the only place the
- * two sides of the hand-off are visible in one log — an address arriving and an
- * access point going away, in the order they happened, which is the question
- * asked of every §9.4 test until #6 has a screen to answer it on.
+ * presents §6.5's setup card on the screen; this stays because it is the only
+ * place the two sides of the hand-off are visible in one log — an address
+ * arriving and an access point going away, in the order they happened.
  */
 static void network_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {

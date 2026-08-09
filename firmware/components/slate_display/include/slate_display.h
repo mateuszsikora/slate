@@ -43,6 +43,23 @@ typedef struct {
     uint8_t frag_pct;
 } slate_display_heap_metrics_t;
 
+/* §9's recovery presentation is intentionally narrower than the WiFi state:
+ * the network component decides what happened and gives the display only the
+ * text a person in front of the panel needs. */
+#define SLATE_DISPLAY_SETUP_NETWORK_LEN    33
+#define SLATE_DISPLAY_SETUP_ADDRESS_LEN    16
+#define SLATE_DISPLAY_SETUP_PASSPHRASE_LEN 65
+#define SLATE_DISPLAY_SETUP_MESSAGE_LEN    128
+
+typedef struct {
+    /** Keep the current screen and place a recovery banner over it (§9.4). */
+    bool banner;
+    char network[SLATE_DISPLAY_SETUP_NETWORK_LEN];
+    char address[SLATE_DISPLAY_SETUP_ADDRESS_LEN];
+    char passphrase[SLATE_DISPLAY_SETUP_PASSPHRASE_LEN];
+    char message[SLATE_DISPLAY_SETUP_MESSAGE_LEN];
+} slate_display_setup_t;
+
 /**
  * @brief Bring up the panel and start its LVGL owner task.
  *
@@ -61,6 +78,18 @@ esp_err_t slate_display_init(void);
  * `timeout_ms == 0` is non-blocking. A full queue returns ESP_ERR_TIMEOUT.
  */
 esp_err_t slate_display_post(slate_display_work_fn fn, void *ctx, uint32_t timeout_ms);
+
+/**
+ * @brief Show §9's setup card or runtime-loss banner.
+ *
+ * The request is copied before this function returns; the caller may clear or
+ * release it immediately. In particular, the setup access-point passphrase
+ * must not be kept on another task's stack while LVGL catches up.
+ */
+esp_err_t slate_display_setup_show(const slate_display_setup_t *setup);
+
+/** @brief Dismiss §9's setup presentation after the station reconnects. */
+esp_err_t slate_display_setup_hide(void);
 
 /** @brief Whether panel and LVGL initialisation completed successfully. */
 bool slate_display_ready(void);

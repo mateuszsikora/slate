@@ -14,6 +14,7 @@
 
 #include "slate_setup.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -30,6 +31,7 @@
 #include "esp_wifi.h"
 
 #include "slate_api.h"
+#include "slate_display.h"
 #include "slate_setup_private.h"
 #include "slate_store.h"
 #include "slate_wifi.h"
@@ -316,8 +318,44 @@ static esp_err_t configure_ap(void)
     return err;
 }
 
-/** What §6.5's setup mode would print, until #6 has a screen to print it on. */
-static void log_setup_card(slate_wifi_setup_reason_t reason)
+static void setup_message(slate_wifi_setup_reason_t reason, const slate_wifi_status_t *station,
+                          char *out, size_t out_len)
+{
+    const char *ssid = station->sta_ssid;
+    switch (station->last_error) {
+    case SLATE_WIFI_ERR_BAD_PASSWORD:
+        snprintf(out, out_len, "Wrong password for \"%s\".", ssid);
+        break;
+    case SLATE_WIFI_ERR_NOT_FOUND:
+        snprintf(out, out_len, "\"%s\" is not in range.", ssid);
+        break;
+    case SLATE_WIFI_ERR_NO_IP:
+        snprintf(out, out_len, "Joined \"%s\", but the router gave no address.", ssid);
+        break;
+    case SLATE_WIFI_ERR_AUTH_TIMEOUT:
+        snprintf(out, out_len, "\"%s\" did not answer.", ssid);
+        break;
+    case SLATE_WIFI_ERR_GATEWAY_UNREACHABLE:
+        snprintf(out, out_len, "Joined \"%s\", but its gateway did not answer.", ssid);
+        break;
+    case SLATE_WIFI_ERR_ADDRESS_IN_USE:
+        snprintf(out, out_len, "The requested address is already in use on \"%s\".", ssid);
+        break;
+    case SLATE_WIFI_ERR_NONE:
+    default:
+        if (reason == SLATE_WIFI_SETUP_NO_CREDENTIALS) {
+            strlcpy(out, "No network is configured.", out_len);
+        } else if (reason == SLATE_WIFI_SETUP_STATION_LOST) {
+            snprintf(out, out_len, "\"%s\" is unavailable; reconnecting automatically.", ssid);
+        } else {
+            snprintf(out, out_len, "Could not connect to \"%s\".", ssid);
+        }
+        break;
+    }
+}
+
+/** Log and render the same §6.5 setup facts from one snapshot. */
+static void present_setup_card(slate_wifi_setup_reason_t reason)
 {
     static const char *WHY[] = {
         "no credentials are stored",
@@ -328,6 +366,26 @@ static void log_setup_card(slate_wifi_setup_reason_t reason)
     slate_wifi_status_t station;
     slate_wifi_status(&station);
     const char *last_error = slate_wifi_error_str(station.last_error);
+
+    slate_display_setup_t display = {
+        .banner = reason == SLATE_WIFI_SETUP_STATION_LOST,
+    };
+    strlcpy(display.network, slate_store_device_name(), sizeof(display.network));
+    strlcpy(display.address, SLATE_SETUP_AP_ADDRESS, sizeof(display.address));
+    setup_message(reason, &station, display.message, sizeof(display.message));
+
+    char password[SLATE_WIFI_PASSWORD_BUF_LEN] = {0};
+    if (slate_store_str_get(SLATE_KEY_SETUP_AP_PASS, password, sizeof(password)) == ESP_OK &&
+        strlen(password) >= AP_WPA2_MIN_PASSWORD) {
+        strlcpy(display.passphrase, password, sizeof(display.passphrase));
+    }
+    explicit_bzero(password, sizeof(password));
+
+    esp_err_t display_err = slate_display_setup_show(&display);
+    explicit_bzero(&display, sizeof(display));
+    if (display_err != ESP_OK) {
+        ESP_LOGW(TAG, "setup presentation unavailable: %s", esp_err_to_name(display_err));
+    }
 
     ESP_LOGW(TAG, "---- setup mode: %s ----", WHY[reason]);
     ESP_LOGW(TAG, "  join  %s", slate_store_device_name());
@@ -362,7 +420,7 @@ static void raise_ap(slate_wifi_setup_reason_t reason)
         /* slate_wifi re-posts when the reason changes, so this is the panel
          * whose credentials were just deleted while the access point was
          * already up: the interface stays, the card is reprinted. */
-        log_setup_card(reason);
+        present_setup_card(reason);
         return;
     }
 
@@ -416,7 +474,7 @@ static void raise_ap(slate_wifi_setup_reason_t reason)
         }
     }
 
-    log_setup_card(reason);
+    present_setup_card(reason);
 
     /*
      * The number #55 asks for, against S-2's 104 167 B with the station alone
@@ -477,6 +535,11 @@ static bool release_ap(void)
         s_ap_netif = NULL;
     }
     s_ap_up = false;
+
+    esp_err_t display_err = slate_display_setup_hide();
+    if (display_err != ESP_OK) {
+        ESP_LOGW(TAG, "dismissing setup presentation: %s", esp_err_to_name(display_err));
+    }
 
     ESP_LOGI(TAG, "free internal DMA-capable memory with the station alone: %u B",
              (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));

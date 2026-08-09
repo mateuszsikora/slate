@@ -7,7 +7,8 @@
 idf_component_register(
     SRCS "slate_setup.c" "slate_setup_api.c" "slate_setup_dns.c"
     INCLUDE_DIRS "include"
-    REQUIRES slate_api slate_store slate_wifi esp_wifi esp_netif esp_event esp_timer lwip json
+    REQUIRES slate_api slate_display slate_store slate_wifi esp_wifi esp_netif esp_event esp_timer
+             lwip json
 )
 
 #
