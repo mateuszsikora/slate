@@ -257,6 +257,40 @@ static bool add_string_or_null(cJSON *object, const char *name, const char *valu
     return cJSON_AddNullToObject(object, name) != NULL;
 }
 
+static cJSON *providers_json(void)
+{
+    cJSON *providers = cJSON_CreateArray();
+    cJSON *direct = cJSON_CreateObject();
+    cJSON *ha = cJSON_CreateObject();
+    bool ok = providers && direct && ha &&
+              cJSON_AddStringToObject(direct, "id", "direct") != NULL &&
+              cJSON_AddStringToObject(direct, "status", "degraded") != NULL &&
+              cJSON_AddNumberToObject(direct, "resource_count", 0) != NULL &&
+              cJSON_AddStringToObject(ha, "id", "ha") != NULL &&
+              cJSON_AddStringToObject(
+                  ha, "status",
+                  slate_store_ha_token_is_set() ? "offline" : "unconfigured") != NULL &&
+              cJSON_AddNumberToObject(ha, "resource_count", 0) != NULL;
+
+    if (ok) {
+        ok = cJSON_AddItemToArray(providers, direct);
+        if (ok) {
+            direct = NULL;
+            ok = cJSON_AddItemToArray(providers, ha);
+            if (ok) {
+                ha = NULL;
+            }
+        }
+    }
+    if (!ok) {
+        cJSON_Delete(providers);
+        cJSON_Delete(direct);
+        cJSON_Delete(ha);
+        return NULL;
+    }
+    return providers;
+}
+
 typedef struct {
     bool up;
     esp_netif_ip_info_t ip;
@@ -489,9 +523,7 @@ static esp_err_t status_handler(httpd_req_t *req)
     }
 
     bool ok = add_item(root, "network", network_json(&wifi)) &&
-              cJSON_AddStringToObject(
-                  root, "ha",
-                  slate_store_ha_token_is_set() ? "disconnected" : "unconfigured") != NULL;
+              add_item(root, "providers", providers_json());
     if (ok) {
         ok = wifi.connected ? cJSON_AddNumberToObject(root, "rssi", wifi.rssi) != NULL
                             : cJSON_AddNullToObject(root, "rssi") != NULL;
@@ -514,7 +546,7 @@ static esp_err_t status_handler(httpd_req_t *req)
     ok = ok && cJSON_AddStringToObject(root, "reset_reason",
                                  reset_reason_str(esp_reset_reason())) != NULL &&
          cJSON_AddNumberToObject(root, "reboot_count", slate_store_boot_count()) != NULL &&
-         cJSON_AddNumberToObject(root, "entity_count", 0) != NULL &&
+         cJSON_AddNumberToObject(root, "resource_count", 0) != NULL &&
          cJSON_AddBoolToObject(root, "storage_reset",
                                slate_store_storage_was_reset()) != NULL;
     if (!ok) {
@@ -736,7 +768,8 @@ esp_err_t slate_api_selftest(void)
     bool request_ready = len > 0 && (size_t) len < sizeof(request);
     failures += !request_ready ||
                 !selftest_request("correct bearer token accepted", request, 200,
-                                  "\"reboot_count\":");
+                                  "\"providers\":[{\"id\":\"direct\","
+                                  "\"status\":\"degraded\"");
     memset(request, 0, sizeof(request));
 
     failures += !selftest_request("CORS preflight is public", OPTIONS, 204,

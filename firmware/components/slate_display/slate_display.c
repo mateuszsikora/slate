@@ -68,6 +68,7 @@ static const char *TAG = "slate_display";
 #define SLATE_DISPLAY_QUEUE_LEN 16
 #define SLATE_DISPLAY_INIT_TIMEOUT_MS 10000
 #define SLATE_DISPLAY_VSYNC_TIMEOUT_MS 100
+#define SLATE_DISPLAY_HEAP_METRICS_PERIOD_US (15LL * 1000000)
 
 static const int SLATE_DATA_GPIOS[16] = {
     14, /* B3 */ 38, /* B4 */ 18, /* B5 */ 17, /* B6 */ 10, /* B7 */
@@ -106,7 +107,8 @@ static volatile uint32_t s_vsync_count;
 static void update_heap_metrics(void)
 {
     int64_t now = esp_timer_get_time();
-    if (s_heap_metrics.available && now - s_heap_metrics_at_us < 1000000) {
+    if (s_heap_metrics.available &&
+        now - s_heap_metrics_at_us < SLATE_DISPLAY_HEAP_METRICS_PERIOD_US) {
         return;
     }
 

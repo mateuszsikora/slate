@@ -59,7 +59,6 @@ typedef struct {
     int fd;
     uint32_t generation;
     int64_t connected_at_us;
-    int64_t last_ping_us;
     uint64_t log_cursor;
     uint64_t backlog_end;
     unsigned reloaded_schema;
@@ -88,7 +87,8 @@ static TaskHandle_t s_task;
 static ws_client_t s_clients[SLATE_WS_MAX_CLIENTS];
 static uint32_t s_next_generation;
 static slate_ws_mode_t s_mode;
-static int s_edit_owner_fd = -1;
+static ws_client_t *s_edit_owner;
+static uint32_t s_edit_owner_generation;
 static int64_t s_edit_last_ping_us;
 static int64_t s_last_status_us;
 static portMUX_TYPE s_state_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -273,6 +273,10 @@ static esp_err_t ws_connected(httpd_req_t *req)
     const int fd = httpd_req_to_sockfd(req);
     ws_client_t *client = NULL;
 
+    /* Publish the immutable server handle before making a client visible to
+     * the dispatcher task. The state lock is the memory barrier between them. */
+    s_server = req->handle;
+
     portENTER_CRITICAL(&s_state_lock);
     for (size_t i = 0; i < SLATE_WS_MAX_CLIENTS; i++) {
         if (!s_clients[i].used) {
@@ -291,7 +295,6 @@ static esp_err_t ws_connected(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    s_server = req->handle;
     httpd_sess_set_ctx(req->handle, fd, client, client_session_freed);
     return ESP_OK;
 }
@@ -331,17 +334,19 @@ static bool parse_message(uint8_t *payload, size_t len, cJSON **out)
     return ok;
 }
 
-static void set_mode(slate_ws_mode_t mode, int owner_fd, int64_t now)
+static void set_mode(slate_ws_mode_t mode, ws_client_t *owner, int64_t now)
 {
     bool changed;
     portENTER_CRITICAL(&s_state_lock);
     changed = s_mode != mode;
     s_mode = mode;
-    if (mode == SLATE_WS_MODE_EDIT) {
-        s_edit_owner_fd = owner_fd;
+    if (mode == SLATE_WS_MODE_EDIT && owner) {
+        s_edit_owner = owner;
+        s_edit_owner_generation = owner->generation;
         s_edit_last_ping_us = now;
     } else {
-        s_edit_owner_fd = -1;
+        s_edit_owner = NULL;
+        s_edit_owner_generation = 0;
         s_edit_last_ping_us = 0;
     }
     portEXIT_CRITICAL(&s_state_lock);
@@ -362,8 +367,8 @@ static esp_err_t handle_authenticated(ws_client_t *client, int fd, cJSON *root)
     if (strcmp(type->valuestring, "ping") == 0) {
         portENTER_CRITICAL(&s_state_lock);
         if (client->used && client->fd == fd && client->authenticated) {
-            client->last_ping_us = now;
-            if (s_mode == SLATE_WS_MODE_EDIT && s_edit_owner_fd == fd) {
+            if (s_mode == SLATE_WS_MODE_EDIT && s_edit_owner == client &&
+                s_edit_owner_generation == client->generation) {
                 s_edit_last_ping_us = now;
             }
         }
@@ -374,9 +379,9 @@ static esp_err_t handle_authenticated(ws_client_t *client, int fd, cJSON *root)
     if (strcmp(type->valuestring, "mode") == 0) {
         cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
         if (cJSON_IsString(mode) && strcmp(mode->valuestring, "edit") == 0) {
-            set_mode(SLATE_WS_MODE_EDIT, fd, now);
+            set_mode(SLATE_WS_MODE_EDIT, client, now);
         } else if (cJSON_IsString(mode) && strcmp(mode->valuestring, "normal") == 0) {
-            set_mode(SLATE_WS_MODE_NORMAL, -1, now);
+            set_mode(SLATE_WS_MODE_NORMAL, NULL, now);
         }
     }
     return ESP_OK;
@@ -409,7 +414,6 @@ static esp_err_t handle_first_frame(httpd_req_t *req, ws_client_t *client, int f
                    now - client->connected_at_us < SLATE_WS_AUTH_TIMEOUT_US;
     if (current) {
         client->authenticated = true;
-        client->last_ping_us = now;
         client->log_cursor = oldest;
         client->backlog_end = next;
         client->initial_status_pending = true;
@@ -497,12 +501,14 @@ static bool client_is_current(const send_work_t *work, bool must_be_authenticate
     return current && httpd_sess_get_ctx(s_server, work->fd) == work->client;
 }
 
-static void finish_send(send_work_t *work, esp_err_t result)
+static void finish_send(send_work_t *work, esp_err_t result, bool was_current)
 {
-    bool close_session = result != ESP_OK || work->kind == SEND_POLICY_CLOSE;
+    bool close_session = was_current &&
+                         (result != ESP_OK || work->kind == SEND_POLICY_CLOSE);
 
     portENTER_CRITICAL(&s_state_lock);
-    if (work->client->used && work->client->generation == work->generation) {
+    if (was_current && work->client->used &&
+        work->client->generation == work->generation && work->client->fd == work->fd) {
         work->client->send_pending = false;
         if (result == ESP_OK) {
             if (work->kind == SEND_LOG && work->client->log_cursor <= work->log_seq) {
@@ -531,8 +537,9 @@ static void send_on_httpd(void *ctx)
     send_work_t *work = ctx;
     const bool auth_required = work->kind != SEND_POLICY_CLOSE;
     esp_err_t result = ESP_ERR_INVALID_STATE;
+    bool current = client_is_current(work, auth_required);
 
-    if (client_is_current(work, auth_required)) {
+    if (current) {
         httpd_ws_frame_t frame = {
             .type = work->kind == SEND_POLICY_CLOSE ? HTTPD_WS_TYPE_CLOSE
                                                     : HTTPD_WS_TYPE_TEXT,
@@ -542,7 +549,7 @@ static void send_on_httpd(void *ctx)
         result = httpd_ws_send_frame_async(s_server, work->fd, &frame);
     }
 
-    finish_send(work, result);
+    finish_send(work, result, current);
     explicit_bzero(work->payload, work->len);
     free(work);
 }
@@ -704,21 +711,23 @@ static size_t format_status_json(char *out, size_t out_size)
     }
 
     int len = snprintf(out, out_size,
-                       "{\"type\":\"status\",\"ha\":\"%s\",\"wifi\":%s,"
+                       "{\"type\":\"status\",\"providers\":{\"direct\":\"degraded\","
+                       "\"ha\":\"%s\"},\"wifi\":%s,"
                        "\"heap_free\":%u,\"lvgl_heap_free\":%s,\"lvgl_frag_pct\":%s}",
-                       slate_store_ha_token_is_set() ? "disconnected" : "unconfigured",
+                       slate_store_ha_token_is_set() ? "offline" : "unconfigured",
                        wifi_value, (unsigned) esp_get_free_heap_size(), lvgl_free, lvgl_frag);
     return len > 0 && (size_t) len < out_size ? (size_t) len : 0;
 }
 
 static void mark_status_due(int64_t now)
 {
+    portENTER_CRITICAL(&s_state_lock);
     if (now - s_last_status_us < SLATE_WS_STATUS_PERIOD_US) {
+        portEXIT_CRITICAL(&s_state_lock);
         return;
     }
     s_last_status_us = now;
 
-    portENTER_CRITICAL(&s_state_lock);
     for (size_t i = 0; i < SLATE_WS_MAX_CLIENTS; i++) {
         if (s_clients[i].used && s_clients[i].authenticated &&
             !s_clients[i].initial_status_pending) {
@@ -736,7 +745,7 @@ static void expire_edit_mode(int64_t now)
               now - s_edit_last_ping_us >= SLATE_WS_EDIT_TIMEOUT_US;
     portEXIT_CRITICAL(&s_state_lock);
     if (expired) {
-        set_mode(SLATE_WS_MODE_NORMAL, -1, now);
+        set_mode(SLATE_WS_MODE_NORMAL, NULL, now);
         ESP_LOGW(TAG, "edit mode expired after 60 seconds without a client ping");
     }
 }
@@ -863,6 +872,14 @@ esp_err_t slate_ws_init(void)
         return ESP_ERR_NO_MEM;
     }
 
+    if (xTaskCreate(ws_task, "slate_ws", SLATE_WS_TASK_STACK, NULL,
+                    SLATE_WS_TASK_PRIORITY, &s_task) != pdPASS) {
+        s_task = NULL;
+        vSemaphoreDelete(s_capture_mutex);
+        s_capture_mutex = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
     const httpd_uri_t ws = {
         .uri = SLATE_API_BASE_PATH "/ws",
         .method = HTTP_GET,
@@ -872,17 +889,11 @@ esp_err_t slate_ws_init(void)
     };
     esp_err_t err = slate_api_register_uri(&ws, SLATE_API_AUTH_WS_FIRST_FRAME);
     if (err != ESP_OK) {
-        vSemaphoreDelete(s_capture_mutex);
-        s_capture_mutex = NULL;
-        return err;
-    }
-
-    if (xTaskCreate(ws_task, "slate_ws", SLATE_WS_TASK_STACK, NULL,
-                    SLATE_WS_TASK_PRIORITY, &s_task) != pdPASS) {
+        vTaskDelete(s_task);
         s_task = NULL;
         vSemaphoreDelete(s_capture_mutex);
         s_capture_mutex = NULL;
-        return ESP_ERR_NO_MEM;
+        return err;
     }
 
     s_previous_vprintf = esp_log_set_vprintf(capture_vprintf);
@@ -1062,6 +1073,8 @@ static bool selftest_wait_for_text(int fd, const char *needle, bool *saw_marker,
             *saw_marker = true;
         }
         if (saw_status && strstr((char *) payload, "\"type\":\"status\"") &&
+            strstr((char *) payload,
+                   "\"providers\":{\"direct\":\"degraded\",\"ha\":") &&
             strstr((char *) payload, "\"lvgl_heap_free\":")) {
             *saw_status = true;
         }
@@ -1103,6 +1116,9 @@ esp_err_t slate_ws_selftest(void)
      * replay begins on a complete retained record rather than in raw bytes. */
     static const char FIRST[] = "ws-selftest-first\n";
     static const char LAST[] = "ws-selftest-last\n";
+    uint64_t ignored_oldest;
+    uint64_t first_seq;
+    log_ring_bounds(&ignored_oldest, &first_seq);
     log_ring_append(FIRST, sizeof(FIRST) - 1);
     for (unsigned i = 0; i < 40; i++) {
         char fill[256];
@@ -1117,9 +1133,10 @@ esp_err_t slate_ws_selftest(void)
     log_ring_bounds(&oldest, &next);
     char value[SLATE_WS_LOG_CAPTURE_BYTES];
     uint64_t seq;
-    bool ok = next > oldest && log_ring_copy(next - 1, value, sizeof(value), &seq) &&
+    bool ok = oldest > first_seq && next > oldest &&
+              log_ring_copy(next - 1, value, sizeof(value), &seq) &&
               seq == next - 1 && strcmp(value, LAST) == 0;
-    SELFTEST_CHECK(ok, "retained ring keeps newest record");
+    SELFTEST_CHECK(ok, "retained ring evicts whole records");
 
     ESP_LOGW(TAG, "ws-selftest-marker");
     int fd = selftest_connect();
@@ -1134,11 +1151,47 @@ esp_err_t slate_ws_selftest(void)
     SELFTEST_CHECK(initial && saw_marker, "retained logs replay after auth");
     SELFTEST_CHECK(initial && saw_status, "initial status follows backlog");
 
+    mark_status_due(esp_timer_get_time() + SLATE_WS_STATUS_PERIOD_US);
+    bool heartbeat = selftest_wait_for_text(fd, "\"type\":\"status\"", NULL, NULL);
+    portENTER_CRITICAL(&s_state_lock);
+    s_last_status_us = esp_timer_get_time();
+    portEXIT_CRITICAL(&s_state_lock);
+    SELFTEST_CHECK(heartbeat, "15 s status heartbeat delivered");
+
     bool edit_sent = authenticated &&
                      selftest_send_text(fd, "{\"type\":\"mode\",\"mode\":\"edit\"}");
     vTaskDelay(pdMS_TO_TICKS(100));
     SELFTEST_CHECK(edit_sent && slate_ws_mode() == SLATE_WS_MODE_EDIT, "mode edit accepted");
-    SELFTEST_CHECK(selftest_send_text(fd, "{\"type\":\"ping\"}"), "application ping accepted");
+
+    int other_fd = selftest_connect();
+    bool other_authenticated = other_fd >= 0 && selftest_authenticate(other_fd);
+    SELFTEST_CHECK(other_authenticated, "second client authentication");
+    portENTER_CRITICAL(&s_state_lock);
+    s_edit_last_ping_us = esp_timer_get_time() - SLATE_WS_EDIT_TIMEOUT_US + 2000000;
+    int64_t before_other_ping = s_edit_last_ping_us;
+    portEXIT_CRITICAL(&s_state_lock);
+    bool other_ping = other_authenticated &&
+                      selftest_send_text(other_fd, "{\"type\":\"ping\"}");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    portENTER_CRITICAL(&s_state_lock);
+    bool other_ignored = s_edit_last_ping_us == before_other_ping;
+    portEXIT_CRITICAL(&s_state_lock);
+    SELFTEST_CHECK(other_ping && other_ignored, "non-owner ping leaves edit deadline");
+    if (other_fd >= 0) {
+        close(other_fd);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    portENTER_CRITICAL(&s_state_lock);
+    s_edit_last_ping_us = esp_timer_get_time() - SLATE_WS_EDIT_TIMEOUT_US + 1000000;
+    int64_t before_ping = s_edit_last_ping_us;
+    portEXIT_CRITICAL(&s_state_lock);
+    bool ping_sent = selftest_send_text(fd, "{\"type\":\"ping\"}");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    portENTER_CRITICAL(&s_state_lock);
+    bool ping_refreshed = s_edit_last_ping_us > before_ping;
+    portEXIT_CRITICAL(&s_state_lock);
+    SELFTEST_CHECK(ping_sent && ping_refreshed, "application ping refreshes edit mode");
 
     SELFTEST_CHECK(slate_ws_publish_reloaded(1, 7) == ESP_OK &&
                        selftest_wait_for_text(fd, "\"type\":\"reloaded\"", NULL, NULL),
@@ -1149,6 +1202,20 @@ esp_err_t slate_ws_selftest(void)
     portEXIT_CRITICAL(&s_state_lock);
     expire_edit_mode(esp_timer_get_time());
     SELFTEST_CHECK(slate_ws_mode() == SLATE_WS_MODE_NORMAL, "edit mode 60 s fallback");
+
+    bool edit_again = selftest_send_text(fd, "{\"type\":\"mode\",\"mode\":\"edit\"}");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    bool edit_reacquired = slate_ws_mode() == SLATE_WS_MODE_EDIT;
+    portENTER_CRITICAL(&s_state_lock);
+    s_edit_owner_generation--;
+    s_edit_last_ping_us = esp_timer_get_time() - SLATE_WS_EDIT_TIMEOUT_US;
+    portEXIT_CRITICAL(&s_state_lock);
+    bool reused_ping = selftest_send_text(fd, "{\"type\":\"ping\"}");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    expire_edit_mode(esp_timer_get_time());
+    SELFTEST_CHECK(edit_again && edit_reacquired && reused_ping &&
+                       slate_ws_mode() == SLATE_WS_MODE_NORMAL,
+                   "reused fd cannot refresh edit owner");
 
     if (fd >= 0) {
         close(fd);

@@ -52,9 +52,10 @@ bool slate_display_ready(void);
 /**
  * @brief Copy the latest LVGL allocator snapshot.
  *
- * The snapshot is collected on LVGL's owner task once per second. Callers on
- * API or diagnostics tasks therefore never cross §6.1's single-owner boundary.
- * `available` is false before successful display initialisation.
+ * The snapshot is collected on LVGL's owner task at the diagnostics heartbeat
+ * interval. Callers on API or diagnostics tasks therefore never cross §6.1's
+ * single-owner boundary. `available` is false before successful display
+ * initialisation.
  */
 void slate_display_heap_metrics(slate_display_heap_metrics_t *out);
 
