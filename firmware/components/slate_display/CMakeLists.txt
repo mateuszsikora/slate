@@ -11,6 +11,6 @@
 idf_component_register(
     SRCS "slate_display.c"
     INCLUDE_DIRS "include"
-    REQUIRES esp_lcd esp_timer esp_psram
+    REQUIRES esp_lcd esp_timer esp_psram slate_theme
     PRIV_REQUIRES esp_driver_i2c slate_ch422g slate_touch
 )

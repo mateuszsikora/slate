@@ -292,7 +292,7 @@ The complete M1 response shapes are:
 }
 ```
 
-`themes` is empty until #21 adds the first theme; it lists capabilities present in this firmware rather than work planned for a later milestone. `pairing` is `ready` when a usable device token is available and `degraded` when one is not. It does not mean that a particular browser has stored the token — the device cannot observe browser `localStorage` and does not invent a second pairing database to pretend otherwise.
+`themes` lists capabilities present in this firmware rather than work planned for a later milestone. The first capability is `midnight`; later theme ids appear only in firmware that actually contains their tokens and assets. `pairing` is `ready` when a usable device token is available and `degraded` when one is not. It does not mean that a particular browser has stored the token — the device cannot observe browser `localStorage` and does not invent a second pairing database to pretend otherwise.
 
 ```json
 {

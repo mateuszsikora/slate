@@ -6,7 +6,7 @@ idf_component_register(
     SRCS "slate_api.c"
     INCLUDE_DIRS "include"
     REQUIRES esp_app_format esp_http_server esp_netif esp_timer json slate_display slate_store
-             slate_wifi
+             slate_theme slate_wifi
 )
 
 if(DEFINED SLATE_API_SELFTEST)

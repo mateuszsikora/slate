@@ -35,6 +35,7 @@
 
 #include "slate_ch422g.h"
 #include "slate_display.h"
+#include "slate_theme.h"
 #include "slate_touch.h"
 
 static const char *TAG = "slate_display";
@@ -706,6 +707,7 @@ static void screen_input_event(lv_event_t *event)
 
 static void build_touch_pattern(lv_obj_t *screen)
 {
+    const slate_theme_t *theme = slate_theme_default();
     s_press_count = 0;
     s_last_point.x = -1;
     s_last_point.y = -1;
@@ -732,17 +734,21 @@ static void build_touch_pattern(lv_obj_t *screen)
     }
 
     lv_obj_t *tile = solid_rect(screen, SLATE_BRINGUP_BACKLIGHT_X, SLATE_BRINGUP_BACKLIGHT_Y,
-                                SLATE_BRINGUP_BACKLIGHT_W, SLATE_BRINGUP_BACKLIGHT_H, 0x22252B);
+                                SLATE_BRINGUP_BACKLIGHT_W, SLATE_BRINGUP_BACKLIGHT_H,
+                                theme->surface_alt);
     s_backlight_tile = tile;
-    lv_obj_set_style_border_color(tile, lv_color_hex(0xF5A524), LV_PART_MAIN);
+    lv_obj_set_style_border_color(tile, lv_color_hex(theme->warn), LV_PART_MAIN);
     lv_obj_set_style_border_width(tile, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(tile, theme->radius, LV_PART_MAIN);
     lv_obj_t *tile_label = lv_label_create(tile);
     lv_label_set_text(tile_label, "BACKLIGHT OFF");
-    lv_obj_set_style_text_color(tile_label, lv_color_hex(0xF2F5F9), LV_PART_MAIN);
+    lv_obj_set_style_text_color(tile_label, lv_color_hex(theme->text_hi), LV_PART_MAIN);
+    lv_obj_set_style_text_font(tile_label, theme->body, LV_PART_MAIN);
     lv_obj_center(tile_label);
 
     s_touch_label = lv_label_create(screen);
     lv_obj_set_style_text_color(s_touch_label, lv_color_hex(0x2FBF71), LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_touch_label, theme->caption, LV_PART_MAIN);
     lv_obj_align(s_touch_label, LV_ALIGN_BOTTOM_MID, 0, -22);
 
     const int32_t arm = 2 * SLATE_BRINGUP_CROSS_ARM + 1;
@@ -757,6 +763,7 @@ static void build_touch_pattern(lv_obj_t *screen)
 static void build_test_pattern(void *ctx)
 {
     (void) ctx;
+    const slate_theme_t *theme = slate_theme_default();
 
     static const uint32_t bars[] = {
         0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00,
@@ -769,7 +776,7 @@ static void build_test_pattern(void *ctx)
 
     lv_obj_t *screen = lv_screen_active();
     lv_obj_remove_style_all(screen);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0x101114), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(theme->bg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -781,11 +788,12 @@ static void build_test_pattern(void *ctx)
     /* Fine lines and a centre cross make a swapped pin, crop or porch error
      * visible without needing any UI runtime or font assets. */
     for (int32_t x = 0; x < SLATE_LCD_H_RES; x += 20) {
-        solid_rect(screen, x, 250, 1, 150, x % 100 == 0 ? 0x6C8CFF : 0x343841);
+        solid_rect(screen, x, 250, 1, 150,
+                   x % 100 == 0 ? theme->accent : theme->surface_alt);
     }
     for (int32_t y = 250; y < 400; y += 20) {
         solid_rect(screen, 0, y, SLATE_LCD_H_RES, 1,
-                   y % 100 == 50 ? 0x6C8CFF : 0x343841);
+                   y % 100 == 50 ? theme->accent : theme->surface_alt);
     }
 
     /* Draw the physical edge coordinates explicitly. The regular 20 px grid
@@ -797,18 +805,19 @@ static void build_test_pattern(void *ctx)
     solid_rect(screen, 0, 0, 1, SLATE_LCD_V_RES, 0xFFFFFF);
     solid_rect(screen, SLATE_LCD_H_RES - 1, 0, 1, SLATE_LCD_V_RES, 0xFFFFFF);
 
-    solid_rect(screen, SLATE_LCD_H_RES / 2 - 1, 245, 3, 165, 0xF5A524);
-    solid_rect(screen, 0, 324, SLATE_LCD_H_RES, 3, 0xF5A524);
+    solid_rect(screen, SLATE_LCD_H_RES / 2 - 1, 245, 3, 165, theme->warn);
+    solid_rect(screen, 0, 324, SLATE_LCD_H_RES, 3, theme->warn);
 
     lv_obj_t *label = lv_label_create(screen);
     lv_label_set_text(label, "SLATE DISPLAY  |  800x480 RGB565  |  2FB + VSYNC + BOUNCE");
-    lv_obj_set_style_text_color(label, lv_color_hex(0xF2F5F9), LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, lv_color_hex(theme->text_hi), LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, theme->body, LV_PART_MAIN);
     lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -42);
 
     /* Continuous motion is deliberate: a static pattern cannot reveal the
      * frame skipping/flicker that made S-2 require the VSYNC gate. Its travel
      * stops short of the corner targets below, which share this row. */
-    lv_obj_t *marker = solid_rect(screen, 80, 458, 40, 12, 0x6C8CFF);
+    lv_obj_t *marker = solid_rect(screen, 80, 458, 40, 12, theme->accent);
     lv_anim_t animation;
     lv_anim_init(&animation);
     lv_anim_set_var(&animation, marker);
@@ -828,13 +837,14 @@ static void build_test_pattern(void *ctx)
 /* --- §9 recovery presentation ----------------------------------------- */
 
 static lv_obj_t *setup_label(lv_obj_t *parent, const char *text, uint32_t color,
-                             int32_t width)
+                             const lv_font_t *font, int32_t width)
 {
     lv_obj_t *label = lv_label_create(parent);
     lv_label_set_text(label, text);
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(label, width);
     lv_obj_set_style_text_color(label, lv_color_hex(color), LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, font, LV_PART_MAIN);
     return label;
 }
 
@@ -857,6 +867,7 @@ static void hide_setup_overlay(void *ctx)
 static void show_setup_overlay(void *ctx)
 {
     slate_display_setup_t *setup = ctx;
+    const slate_theme_t *theme = slate_theme_default();
 
     /* A newer show supersedes a hide requested before this work reached the
      * LVGL task. A hide requested after this store remains pending and wins at
@@ -865,22 +876,22 @@ static void show_setup_overlay(void *ctx)
     hide_setup_overlay(NULL);
 
     lv_obj_t *screen = lv_screen_active();
-    const int32_t width = setup->banner ? 772 : SLATE_LCD_H_RES;
+    const int32_t width = setup->banner ? SLATE_LCD_H_RES - 2 * theme->pad : SLATE_LCD_H_RES;
     const int32_t height = setup->banner ? 132 : SLATE_LCD_V_RES;
-    const int32_t x = setup->banner ? 14 : 0;
-    const int32_t y = setup->banner ? 14 : 0;
+    const int32_t x = setup->banner ? theme->pad : 0;
+    const int32_t y = setup->banner ? theme->pad : 0;
 
     lv_obj_t *overlay = lv_obj_create(screen);
     s_setup_overlay = overlay;
     lv_obj_remove_style_all(overlay);
     lv_obj_set_pos(overlay, x, y);
     lv_obj_set_size(overlay, width, height);
-    lv_obj_set_style_bg_color(overlay, lv_color_hex(setup->banner ? 0x22252B : 0x101114),
-                              LV_PART_MAIN);
+    lv_obj_set_style_bg_color(
+        overlay, lv_color_hex(setup->banner ? theme->surface_alt : theme->bg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_color(overlay, lv_color_hex(0xF5A524), LV_PART_MAIN);
+    lv_obj_set_style_border_color(overlay, lv_color_hex(theme->warn), LV_PART_MAIN);
     lv_obj_set_style_border_width(overlay, setup->banner ? 2 : 0, LV_PART_MAIN);
-    lv_obj_set_style_radius(overlay, setup->banner ? 18 : 0, LV_PART_MAIN);
+    lv_obj_set_style_radius(overlay, setup->banner ? theme->radius : 0, LV_PART_MAIN);
     lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(overlay, setup_overlay_deleted, LV_EVENT_DELETE, NULL);
@@ -897,30 +908,30 @@ static void show_setup_overlay(void *ctx)
         lv_obj_remove_style_all(card);
         lv_obj_set_size(card, 650, 330);
         lv_obj_center(card);
-        lv_obj_set_style_bg_color(card, lv_color_hex(0x1A1C21), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(card, lv_color_hex(theme->surface), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_border_color(card, lv_color_hex(0x343841), LV_PART_MAIN);
+        lv_obj_set_style_border_color(card, lv_color_hex(theme->surface_alt), LV_PART_MAIN);
         lv_obj_set_style_border_width(card, 2, LV_PART_MAIN);
-        lv_obj_set_style_radius(card, 18, LV_PART_MAIN);
+        lv_obj_set_style_radius(card, theme->radius, LV_PART_MAIN);
         lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_remove_flag(card, LV_OBJ_FLAG_CLICKABLE);
     }
 
     const int32_t text_width = setup->banner ? width - 40 : 590;
     lv_obj_t *title = setup_label(card, setup->banner ? "NETWORK OFFLINE" : "SET UP NETWORK",
-                                  0xF5A524, text_width);
+                                  theme->warn, theme->body, text_width);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30, setup->banner ? 16 : 28);
 
     char connection[96];
     snprintf(connection, sizeof(connection), "Join %s  |  Open http://%s", setup->network,
              setup->address);
-    lv_obj_t *join = setup_label(card, connection, 0xF2F5F9, text_width);
+    lv_obj_t *join = setup_label(card, connection, theme->text_hi, theme->body, text_width);
     lv_obj_align(join, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30, setup->banner ? 43 : 76);
 
     if (setup->passphrase[0] != '\0') {
         char password[96];
         snprintf(password, sizeof(password), "WiFi password: %s", setup->passphrase);
-        lv_obj_t *pass = setup_label(card, password, 0xF2F5F9, text_width);
+        lv_obj_t *pass = setup_label(card, password, theme->text_hi, theme->body, text_width);
         lv_obj_align(pass, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30,
                      setup->banner ? 68 : 116);
         explicit_bzero(password, sizeof(password));
@@ -928,7 +939,8 @@ static void show_setup_overlay(void *ctx)
 
     const int32_t message_y = setup->banner ? (setup->passphrase[0] ? 93 : 72)
                                              : (setup->passphrase[0] ? 170 : 140);
-    lv_obj_t *message = setup_label(card, setup->message, 0x8A94A6, text_width);
+    lv_obj_t *message = setup_label(card, setup->message, theme->text_lo, theme->caption,
+                                    text_width);
     lv_obj_align(message, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30, message_y);
 
     lv_obj_move_foreground(overlay);

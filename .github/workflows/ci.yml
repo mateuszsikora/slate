@@ -32,8 +32,7 @@ permissions:
   contents: read
 
 jobs:
-  # The generated LVGL fonts are build output (.gitignore) and nothing links them yet
-  # — that is #21. The job earns its place before then anyway: generate.sh fails hard
+  # Generated LVGL fonts are build output (.gitignore). generate.sh fails hard
   # when icons.txt names an icon the pinned MDI release does not carry, and that is a
   # component rendering a blank box at runtime, caught here without flashing anything.
   fonts:
@@ -53,7 +52,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            firmware/main/assets
+            firmware/components/slate_theme/assets
             tools/fonts/.work
           key: fonts-${{ hashFiles('tools/fonts/generate.sh', 'tools/fonts/icons.txt') }}
 
@@ -62,8 +61,8 @@ jobs:
         run: tools/fonts/generate.sh
 
       # Sizes are of the C sources, not of flash. The flash figures in
-      # docs/spikes/s3.md come from the map file and only become comparable once #21
-      # links the fonts into the image; quoting these against those would be wrong.
+      # docs/spikes/s3.md come from the map file; quoting source size against those
+      # linked-image numbers would be wrong.
       - name: Report
         run: |
           {
@@ -71,7 +70,7 @@ jobs:
             echo
             echo '| Source | Bytes |'
             echo '|--------|------:|'
-            for f in firmware/main/assets/*.c; do
+            for f in firmware/components/slate_theme/assets/*.c; do
               echo "| \`$(basename "$f")\` | $(stat -c %s "$f") |"
             done
           } >> "$GITHUB_STEP_SUMMARY"
@@ -79,7 +78,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: fonts
-          path: firmware/main/assets/*.c
+          path: firmware/components/slate_theme/assets/*
           retention-days: 14
 
   firmware:
@@ -116,7 +115,7 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: fonts
-          path: firmware/main/assets
+          path: firmware/components/slate_theme/assets
 
       - uses: actions/cache@v6
         with:

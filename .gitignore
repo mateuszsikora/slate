@@ -14,7 +14,7 @@ firmware/managed_components/
 # tools/fonts/generate.sh; the .c files are build output and would otherwise
 # add ~1.1 MB of unreviewable hex to every glyph-list change, permanently.
 # Run tools/fonts/generate.sh before building the firmware.
-firmware/main/assets/*.c
+firmware/components/slate_theme/assets/*
 
 # Font generation scratch — upstream TTFs are fetched, not vendored
 tools/fonts/.work/
