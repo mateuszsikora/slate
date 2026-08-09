@@ -23,7 +23,17 @@ typedef enum {
     SLATE_WS_MODE_EDIT,
 } slate_ws_mode_t;
 
-/** @brief Register `/api/v1/ws`, start the dispatcher and retain future logs. */
+/**
+ * @brief Start retaining logs before any Slate subsystem initialisation.
+ *
+ * This installs the application log hook and uses no dynamic allocation. Call
+ * at the start of app_main() so the backlog contains the boot report and board
+ * bring-up even though the HTTP server necessarily starts later. Repeated and
+ * concurrent calls are safe; the hook is installed exactly once.
+ */
+esp_err_t slate_ws_capture_init(void);
+
+/** @brief Register `/api/v1/ws` and start its dispatcher task. */
 esp_err_t slate_ws_init(void);
 
 /** @brief Current editor mode; safe from any task. */
