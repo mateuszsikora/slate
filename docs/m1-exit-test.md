@@ -28,7 +28,7 @@ standard input.
 | Core dump | Fetch the rollback dump with `tools/coredump/fetch.sh`, passing the ELF of the image that crashed. | **Pass:** 10,596 bytes were fetched over WiFi and symbolicated to `ota_rollback_selftest()` in `firmware/main/main.c`. |
 | Return to setup | Send authenticated `DELETE /api/v1/wifi`, join `slate-<mac6>`, and query `/api/v1/info` at `192.168.4.1`. Submit new credentials through `POST /api/v1/wifi`. | **Pass:** the panel named the unavailable original SSID on screen; the AP reported `mode: ap` at `192.168.4.1`; and a different target WLAN was provisioned without a cable. `/api/v1/info` then confirmed station mode, no error, and the requested static address `192.168.22.232/24` with gateway and DNS at `192.168.22.1`. |
 | Router unavailable at boot | With credentials for an unavailable WLAN stored, power-cycle the panel and recover through its setup AP without a cable. | **Pass:** on startup the panel named the unavailable original SSID, raised its setup AP and allowed a reachable target WLAN and static address to be configured. The panel then returned in station mode with no network error. |
-| Router lost at runtime | Start in station mode, make the router unavailable without rebooting the panel, and wait five minutes. Restore the router after the fallback AP and banner appear. | **Pending:** verify that the dashboard remains visible below the `NETWORK OFFLINE` banner, the backlight stays on, and the banner and AP disappear after unattended station recovery. |
+| Router lost at runtime | Start in station mode, make the router unavailable without rebooting the panel, and wait five minutes. Restore the router after the fallback AP and banner appear. | **Deferred to #87:** run this on an isolated AP, guest network or dedicated hotspot so the hardware check does not disrupt the production WLAN. Verify that the dashboard remains visible below the `NETWORK OFFLINE` banner, the backlight stays on, and the banner and AP disappear after unattended station recovery. |
 
 OTA through the setup AP is not an M1 exit requirement. The developer's
 cable-free update, rollback and core-dump loop is already exercised on the
@@ -45,5 +45,6 @@ directory. The application image is `0x14acb0` bytes; the 6 MiB OTA slot has
 78% free. `git diff --check` reports no whitespace errors.
 
 The final issue comment must distinguish build evidence, network observations
-and physical-screen observations. Do not mark #15 complete while the
-runtime-loss banner check remains pending.
+and physical-screen observations. Runtime-loss hardware evidence remains an M1
+requirement under #87, but it does not require disabling a production WLAN and
+does not block review of the implementation in #86.
