@@ -9,6 +9,7 @@
  * gate that permits exactly one rendered frame per panel scan.
  */
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -30,6 +31,7 @@
 #include "port/esp_io_expander_ch422g.h"
 
 #include "slate_display.h"
+#include "slate_touch.h"
 
 static const char *TAG = "slate_display";
 
@@ -53,7 +55,8 @@ static const char *TAG = "slate_display";
 #define SLATE_I2C_SCL_GPIO 9
 #define SLATE_I2C_HZ       400000
 
-#define SLATE_EXIO_TP_RST  IO_EXPANDER_PIN_NUM_1
+/* EXIO1 is the touch controller's reset and belongs to slate_touch, which has
+ * to hold it while the controller's I²C address is selected. */
 #define SLATE_EXIO_DISP    IO_EXPANDER_PIN_NUM_2
 #define SLATE_EXIO_LCD_RST IO_EXPANDER_PIN_NUM_3
 
@@ -68,6 +71,7 @@ static const char *TAG = "slate_display";
 #define SLATE_DISPLAY_QUEUE_LEN 16
 #define SLATE_DISPLAY_INIT_TIMEOUT_MS 10000
 #define SLATE_DISPLAY_VSYNC_TIMEOUT_MS 100
+#define SLATE_DISPLAY_EXPANDER_TIMEOUT_MS 100
 #define SLATE_DISPLAY_HEAP_METRICS_PERIOD_US (15LL * 1000000)
 
 static const int SLATE_DATA_GPIOS[16] = {
@@ -84,6 +88,11 @@ typedef struct {
 static QueueHandle_t s_work_queue;
 static SemaphoreHandle_t s_init_done;
 static SemaphoreHandle_t s_vsync;
+/* The CH422G's output register is read-modify-written by the driver, so two
+ * tasks changing two different pins can lose one of them. Only the backlight
+ * changes after start-up, but #28's schedule is a second task and this is
+ * cheaper than remembering that. */
+static SemaphoreHandle_t s_expander_lock;
 static TaskHandle_t s_task;
 static esp_lcd_panel_handle_t s_panel;
 static esp_io_expander_handle_t s_expander;
@@ -93,6 +102,7 @@ static bool s_i2c_installed;
 static bool s_lvgl_initialized;
 static bool s_ready;
 static bool s_backlight_on;
+static bool s_first_frame_shown;
 static slate_display_heap_metrics_t s_heap_metrics;
 static int64_t s_heap_metrics_at_us;
 
@@ -159,7 +169,7 @@ static esp_err_t expander_init(void)
                                        &s_expander),
         TAG, "CH422G");
 
-    const uint32_t outputs = SLATE_EXIO_TP_RST | SLATE_EXIO_DISP | SLATE_EXIO_LCD_RST;
+    const uint32_t outputs = SLATE_EXIO_DISP | SLATE_EXIO_LCD_RST;
     ESP_RETURN_ON_ERROR(esp_io_expander_set_dir(s_expander, outputs, IO_EXPANDER_OUTPUT),
                         TAG, "CH422G direction");
 
@@ -169,13 +179,9 @@ static esp_err_t expander_init(void)
 
     ESP_RETURN_ON_ERROR(esp_io_expander_set_level(s_expander, SLATE_EXIO_LCD_RST, 0),
                         TAG, "panel reset low");
-    ESP_RETURN_ON_ERROR(esp_io_expander_set_level(s_expander, SLATE_EXIO_TP_RST, 0),
-                        TAG, "touch reset low");
     vTaskDelay(pdMS_TO_TICKS(20));
     ESP_RETURN_ON_ERROR(esp_io_expander_set_level(s_expander, SLATE_EXIO_LCD_RST, 1),
                         TAG, "panel reset high");
-    ESP_RETURN_ON_ERROR(esp_io_expander_set_level(s_expander, SLATE_EXIO_TP_RST, 1),
-                        TAG, "touch reset high");
     vTaskDelay(pdMS_TO_TICKS(50));
     return ESP_OK;
 }
@@ -254,14 +260,21 @@ static esp_err_t panel_init(void)
     return ESP_OK;
 }
 
-static void backlight_enable(void)
+/*
+ * Latched on the frame rather than on the backlight's own state. Once the
+ * backlight can be switched from outside, "is it off" stops answering "has
+ * anything been drawn yet" — and a flush arriving while §3.3's screen-off is in
+ * force must not turn the panel back on by itself.
+ */
+static void backlight_enable_first_frame(void)
 {
-    if (s_backlight_on) {
+    if (s_first_frame_shown) {
         return;
     }
-    esp_err_t err = esp_io_expander_set_level(s_expander, SLATE_EXIO_DISP, 1);
+    s_first_frame_shown = true;
+
+    esp_err_t err = slate_display_backlight_set(true);
     if (err == ESP_OK) {
-        s_backlight_on = true;
         ESP_LOGI(TAG, "first frame displayed; backlight on");
     } else {
         ESP_LOGE(TAG, "backlight on: %s", esp_err_to_name(err));
@@ -316,7 +329,7 @@ static void flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t *pixe
             if (!wait_for_vsync_after(submitted_generation)) {
                 ESP_LOGE(TAG, "VSYNC timeout after framebuffer switch");
             } else {
-                backlight_enable();
+                backlight_enable_first_frame();
             }
         }
     }
@@ -376,6 +389,7 @@ static void display_resources_deinit(void)
     if (s_expander) {
         cleanup_error("backlight", esp_io_expander_set_level(s_expander, SLATE_EXIO_DISP, 0));
         s_backlight_on = false;
+        s_first_frame_shown = false;
     }
 
     if (s_lvgl_initialized) {
@@ -416,12 +430,266 @@ static lv_obj_t *solid_rect(lv_obj_t *parent, int32_t x, int32_t y,
     lv_obj_set_style_bg_color(rect, lv_color_hex(color), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(rect, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(rect, LV_OBJ_FLAG_SCROLLABLE);
+    /* Every rectangle in this pattern is decoration. Taking the click flag off
+     * here means the screen receives every press wherever it lands, so the
+     * pattern below can hit-test the whole panel itself instead of depending on
+     * which widget happens to be topmost. */
+    lv_obj_remove_flag(rect, LV_OBJ_FLAG_CLICKABLE);
     return rect;
 }
 
 static void moving_marker_x(void *object, int32_t x)
 {
     lv_obj_set_x((lv_obj_t *) object, x);
+}
+
+/*
+ * The touch half of the bring-up pattern. §7.5 puts the real minimum touch
+ * target at 48 px, and everything here is larger, because what is under test is
+ * whether a coordinate is true rather than whether a person can hit a button.
+ */
+#define SLATE_BRINGUP_CORNER_SIZE 60
+#define SLATE_BRINGUP_CORNER_INSET 2
+#define SLATE_BRINGUP_BACKLIGHT_X 300
+#define SLATE_BRINGUP_BACKLIGHT_Y 60
+#define SLATE_BRINGUP_BACKLIGHT_W 200
+#define SLATE_BRINGUP_BACKLIGHT_H 80
+#define SLATE_BRINGUP_BACKLIGHT_WAKE_MS 5000
+
+/*
+ * Half the length of a crosshair arm, and the reason it is a number at all.
+ *
+ * The first version drew the crosshair as two lines spanning the whole panel,
+ * and following a finger with it was visibly slow. The cause is not the input
+ * device: LVGL joins invalidated areas that intersect into their bounding box,
+ * and a full-width line always intersects a full-height one, so the bounding
+ * box was the entire 800×480 screen — every touch sample repainting all 130-odd
+ * objects of this pattern, twice over, because direct render mode has to keep
+ * the second framebuffer consistent as well.
+ *
+ * A bounded cross costs its own bounding box and nothing else. The lesson
+ * belongs to #20 rather than to this pattern: a widget that spans the screen
+ * turns every update anywhere near it into a full-screen repaint.
+ */
+#define SLATE_BRINGUP_CROSS_ARM 60
+#define SLATE_BRINGUP_CROSS_THICK 2
+
+/* The readout is for reading, and a hundred repaints a second of a line of text
+ * nobody can follow is the same full-screen-repaint mistake in miniature. */
+#define SLATE_BRINGUP_LABEL_PERIOD_MS 100
+
+#define SLATE_BRINGUP_IDLE      0x3A3F4A
+#define SLATE_BRINGUP_HIT       0x2FBF71
+#define SLATE_BRINGUP_CROSSHAIR 0x00E5FF
+
+static lv_obj_t *s_corner[4];
+static lv_obj_t *s_crosshair_h;
+static lv_obj_t *s_crosshair_v;
+static lv_obj_t *s_touch_label;
+static lv_timer_t *s_backlight_timer;
+static bool s_corner_hit[4];
+static uint32_t s_press_count;
+static uint32_t s_label_at_ms;
+static lv_point_t s_last_point = {-1, -1};
+
+static bool point_within(const lv_point_t *point, int32_t x, int32_t y,
+                         int32_t width, int32_t height)
+{
+    return point->x >= x && point->x < x + width && point->y >= y && point->y < y + height;
+}
+
+static void update_touch_label(void)
+{
+    if (!s_touch_label) {
+        return;
+    }
+
+    int corners = 0;
+    for (size_t i = 0; i < 4; i++) {
+        corners += s_corner_hit[i] ? 1 : 0;
+    }
+
+    if (s_last_point.x < 0) {
+        lv_label_set_text_fmt(s_touch_label, "TOUCH  waiting  |  corners 0/4  |  backlight %s",
+                              slate_display_backlight_is_on() ? "on" : "off");
+        return;
+    }
+    lv_label_set_text_fmt(s_touch_label,
+                          "TOUCH  %d,%d  |  presses %" PRIu32 "  |  corners %d/4  |  backlight %s",
+                          (int) s_last_point.x, (int) s_last_point.y, s_press_count, corners,
+                          slate_display_backlight_is_on() ? "on" : "off");
+}
+
+static void backlight_on(void)
+{
+    esp_err_t err = slate_display_backlight_set(true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "backlight on: %s", esp_err_to_name(err));
+    }
+    update_touch_label();
+}
+
+/*
+ * The reason the tile below is safe to press. A dark panel whose touch
+ * controller has just failed is exactly the state this milestone is trying to
+ * make impossible to reach without a cable, so the way back does not depend on
+ * the thing being tested.
+ */
+static void backlight_wake_timer_cb(lv_timer_t *timer)
+{
+    (void) timer;
+    s_backlight_timer = NULL; /* one-shot: LVGL frees it after this callback */
+    ESP_LOGW(TAG, "backlight restored by the safety timer rather than by a touch");
+    backlight_on();
+}
+
+static void backlight_wake_now(void)
+{
+    if (s_backlight_timer) {
+        lv_timer_delete(s_backlight_timer);
+        s_backlight_timer = NULL;
+    }
+    ESP_LOGI(TAG, "backlight restored by a touch");
+    backlight_on();
+}
+
+static void backlight_sleep(void)
+{
+    esp_err_t err = slate_display_backlight_set(false);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "backlight off: %s", esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "backlight off from firmware; a touch or %d s restores it",
+             SLATE_BRINGUP_BACKLIGHT_WAKE_MS / 1000);
+
+    if (!s_backlight_timer) {
+        s_backlight_timer =
+            lv_timer_create(backlight_wake_timer_cb, SLATE_BRINGUP_BACKLIGHT_WAKE_MS, NULL);
+        if (s_backlight_timer) {
+            lv_timer_set_repeat_count(s_backlight_timer, 1);
+        }
+    }
+    update_touch_label();
+}
+
+static void latch_corners(const lv_point_t *point)
+{
+    static const int32_t X[4] = {SLATE_BRINGUP_CORNER_INSET,
+                                 SLATE_LCD_H_RES - SLATE_BRINGUP_CORNER_INSET -
+                                     SLATE_BRINGUP_CORNER_SIZE,
+                                 SLATE_BRINGUP_CORNER_INSET,
+                                 SLATE_LCD_H_RES - SLATE_BRINGUP_CORNER_INSET -
+                                     SLATE_BRINGUP_CORNER_SIZE};
+    static const int32_t Y[4] = {SLATE_BRINGUP_CORNER_INSET, SLATE_BRINGUP_CORNER_INSET,
+                                 SLATE_LCD_V_RES - SLATE_BRINGUP_CORNER_INSET -
+                                     SLATE_BRINGUP_CORNER_SIZE,
+                                 SLATE_LCD_V_RES - SLATE_BRINGUP_CORNER_INSET -
+                                     SLATE_BRINGUP_CORNER_SIZE};
+
+    for (size_t i = 0; i < 4; i++) {
+        if (s_corner_hit[i] || !s_corner[i] ||
+            !point_within(point, X[i], Y[i], SLATE_BRINGUP_CORNER_SIZE,
+                          SLATE_BRINGUP_CORNER_SIZE)) {
+            continue;
+        }
+        s_corner_hit[i] = true;
+        lv_obj_set_style_bg_color(s_corner[i], lv_color_hex(SLATE_BRINGUP_HIT), LV_PART_MAIN);
+    }
+}
+
+/*
+ * One handler on the screen rather than a callback per widget. The pattern is
+ * asking "is this coordinate the one I touched", and that question is about the
+ * whole panel — including the parts of it no widget covers.
+ */
+static void screen_input_event(lv_event_t *event)
+{
+    lv_indev_t *indev = lv_indev_active();
+    if (!indev) {
+        return;
+    }
+
+    lv_point_t point;
+    lv_indev_get_point(indev, &point);
+    s_last_point = point;
+
+    if (lv_event_get_code(event) == LV_EVENT_PRESSED) {
+        s_press_count++;
+        if (!slate_display_backlight_is_on()) {
+            backlight_wake_now();
+        } else if (point_within(&point, SLATE_BRINGUP_BACKLIGHT_X, SLATE_BRINGUP_BACKLIGHT_Y,
+                                SLATE_BRINGUP_BACKLIGHT_W, SLATE_BRINGUP_BACKLIGHT_H)) {
+            backlight_sleep();
+        }
+    }
+
+    /* The crosshair is left where the finger lifted rather than hidden on
+     * release: judging a coordinate against the grid behind it is easier with
+     * nothing on the glass. */
+    if (s_crosshair_h && s_crosshair_v) {
+        lv_obj_set_pos(s_crosshair_h, point.x - SLATE_BRINGUP_CROSS_ARM,
+                       point.y - SLATE_BRINGUP_CROSS_THICK / 2);
+        lv_obj_set_pos(s_crosshair_v, point.x - SLATE_BRINGUP_CROSS_THICK / 2,
+                       point.y - SLATE_BRINGUP_CROSS_ARM);
+    }
+    latch_corners(&point);
+
+    const uint32_t now_ms = lv_tick_get();
+    if (lv_event_get_code(event) != LV_EVENT_PRESSING ||
+        now_ms - s_label_at_ms >= SLATE_BRINGUP_LABEL_PERIOD_MS) {
+        s_label_at_ms = now_ms;
+        update_touch_label();
+    }
+}
+
+static void build_touch_pattern(lv_obj_t *screen)
+{
+    s_press_count = 0;
+    s_last_point.x = -1;
+    s_last_point.y = -1;
+
+    lv_obj_add_flag(screen, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(screen, screen_input_event, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(screen, screen_input_event, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(screen, screen_input_event, LV_EVENT_RELEASED, NULL);
+
+    /* Four targets at the physical corners. An axis that is mirrored lights the
+     * wrong one, and an edge the controller cannot reach never lights at all —
+     * both are the failure this issue has to rule out, and neither needs a
+     * ruler to see. */
+    const int32_t far_x = SLATE_LCD_H_RES - SLATE_BRINGUP_CORNER_INSET - SLATE_BRINGUP_CORNER_SIZE;
+    const int32_t far_y = SLATE_LCD_V_RES - SLATE_BRINGUP_CORNER_INSET - SLATE_BRINGUP_CORNER_SIZE;
+    const int32_t corner_x[4] = {SLATE_BRINGUP_CORNER_INSET, far_x, SLATE_BRINGUP_CORNER_INSET,
+                                 far_x};
+    const int32_t corner_y[4] = {SLATE_BRINGUP_CORNER_INSET, SLATE_BRINGUP_CORNER_INSET, far_y,
+                                 far_y};
+    for (size_t i = 0; i < 4; i++) {
+        s_corner_hit[i] = false;
+        s_corner[i] = solid_rect(screen, corner_x[i], corner_y[i], SLATE_BRINGUP_CORNER_SIZE,
+                                 SLATE_BRINGUP_CORNER_SIZE, SLATE_BRINGUP_IDLE);
+    }
+
+    lv_obj_t *tile = solid_rect(screen, SLATE_BRINGUP_BACKLIGHT_X, SLATE_BRINGUP_BACKLIGHT_Y,
+                                SLATE_BRINGUP_BACKLIGHT_W, SLATE_BRINGUP_BACKLIGHT_H, 0x22252B);
+    lv_obj_set_style_border_color(tile, lv_color_hex(0xF5A524), LV_PART_MAIN);
+    lv_obj_set_style_border_width(tile, 2, LV_PART_MAIN);
+    lv_obj_t *tile_label = lv_label_create(tile);
+    lv_label_set_text(tile_label, "BACKLIGHT OFF");
+    lv_obj_set_style_text_color(tile_label, lv_color_hex(0xF2F5F9), LV_PART_MAIN);
+    lv_obj_center(tile_label);
+
+    s_touch_label = lv_label_create(screen);
+    lv_obj_set_style_text_color(s_touch_label, lv_color_hex(0x2FBF71), LV_PART_MAIN);
+    lv_obj_align(s_touch_label, LV_ALIGN_BOTTOM_MID, 0, -22);
+
+    const int32_t arm = 2 * SLATE_BRINGUP_CROSS_ARM + 1;
+    s_crosshair_h = solid_rect(screen, -arm, -arm, arm, SLATE_BRINGUP_CROSS_THICK,
+                               SLATE_BRINGUP_CROSSHAIR);
+    s_crosshair_v = solid_rect(screen, -arm, -arm, SLATE_BRINGUP_CROSS_THICK, arm,
+                               SLATE_BRINGUP_CROSSHAIR);
+
+    update_touch_label();
 }
 
 static void build_test_pattern(void *ctx)
@@ -476,18 +744,21 @@ static void build_test_pattern(void *ctx)
     lv_obj_align(label, LV_ALIGN_BOTTOM_MID, 0, -42);
 
     /* Continuous motion is deliberate: a static pattern cannot reveal the
-     * frame skipping/flicker that made S-2 require the VSYNC gate. */
-    lv_obj_t *marker = solid_rect(screen, 20, 458, 40, 12, 0x6C8CFF);
+     * frame skipping/flicker that made S-2 require the VSYNC gate. Its travel
+     * stops short of the corner targets below, which share this row. */
+    lv_obj_t *marker = solid_rect(screen, 80, 458, 40, 12, 0x6C8CFF);
     lv_anim_t animation;
     lv_anim_init(&animation);
     lv_anim_set_var(&animation, marker);
     lv_anim_set_exec_cb(&animation, moving_marker_x);
-    lv_anim_set_values(&animation, 20, 740);
+    lv_anim_set_values(&animation, 80, 680);
     lv_anim_set_duration(&animation, 2500);
     lv_anim_set_reverse_duration(&animation, 2500);
     lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
     lv_anim_set_path_cb(&animation, lv_anim_path_linear);
     lv_anim_start(&animation);
+
+    build_touch_pattern(screen);
 
     ESP_LOGI(TAG, "bring-up test pattern built on LVGL task");
 }
@@ -523,10 +794,21 @@ static void display_task(void *ctx)
     }
     s_ready = s_init_result == ESP_OK;
     if (s_ready) {
+        /* Here and not in app_main: lv_indev_create() is LVGL, and §6.1 gives
+         * LVGL exactly one task. A controller that will not answer costs the
+         * panel its input and nothing else — the display, the API and the setup
+         * access point are all still worth having. */
+        esp_err_t touch_err = slate_touch_init(SLATE_I2C_PORT, s_expander);
+        if (touch_err != ESP_OK) {
+            ESP_LOGE(TAG, "touch unavailable: %s — continuing without input",
+                     esp_err_to_name(touch_err));
+        }
+
         update_heap_metrics();
-        ESP_LOGI(TAG, "display ready: %u B internal DMA-capable, %u B PSRAM free",
+        ESP_LOGI(TAG, "display ready: %u B internal DMA-capable, %u B PSRAM free, touch %s",
                  (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
-                 (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+                 (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 slate_touch_ready() ? "up" : "absent");
         xSemaphoreGive(s_init_done);
     } else {
         display_resources_deinit();
@@ -551,6 +833,29 @@ static void display_task(void *ctx)
     }
 }
 
+/* Every synchronisation object the task needs, released together. The three
+ * call sites below differ only in which of them exist yet, and a NULL handle is
+ * one that has already gone. */
+static void primitives_free(void)
+{
+    if (s_work_queue) {
+        vQueueDelete(s_work_queue);
+        s_work_queue = NULL;
+    }
+    if (s_init_done) {
+        vSemaphoreDelete(s_init_done);
+        s_init_done = NULL;
+    }
+    if (s_vsync) {
+        vSemaphoreDelete(s_vsync);
+        s_vsync = NULL;
+    }
+    if (s_expander_lock) {
+        vSemaphoreDelete(s_expander_lock);
+        s_expander_lock = NULL;
+    }
+}
+
 esp_err_t slate_display_init(void)
 {
     if (s_task || s_work_queue || s_ready) {
@@ -571,19 +876,9 @@ esp_err_t slate_display_init(void)
     s_work_queue = xQueueCreate(SLATE_DISPLAY_QUEUE_LEN, sizeof(slate_display_work_t));
     s_init_done = xSemaphoreCreateBinary();
     s_vsync = xSemaphoreCreateBinary();
-    if (!s_work_queue || !s_init_done || !s_vsync) {
-        if (s_work_queue) {
-            vQueueDelete(s_work_queue);
-            s_work_queue = NULL;
-        }
-        if (s_init_done) {
-            vSemaphoreDelete(s_init_done);
-            s_init_done = NULL;
-        }
-        if (s_vsync) {
-            vSemaphoreDelete(s_vsync);
-            s_vsync = NULL;
-        }
+    s_expander_lock = xSemaphoreCreateMutex();
+    if (!s_work_queue || !s_init_done || !s_vsync || !s_expander_lock) {
+        primitives_free();
         return ESP_ERR_NO_MEM;
     }
 
@@ -591,12 +886,7 @@ esp_err_t slate_display_init(void)
                                 NULL, SLATE_DISPLAY_TASK_PRIORITY, &s_task,
                                 SLATE_DISPLAY_TASK_CORE) != pdPASS) {
         s_task = NULL;
-        vQueueDelete(s_work_queue);
-        vSemaphoreDelete(s_init_done);
-        vSemaphoreDelete(s_vsync);
-        s_work_queue = NULL;
-        s_init_done = NULL;
-        s_vsync = NULL;
+        primitives_free();
         return ESP_ERR_NO_MEM;
     }
 
@@ -607,10 +897,7 @@ esp_err_t slate_display_init(void)
     vSemaphoreDelete(s_init_done);
     s_init_done = NULL;
     if (s_init_result != ESP_OK) {
-        vQueueDelete(s_work_queue);
-        vSemaphoreDelete(s_vsync);
-        s_work_queue = NULL;
-        s_vsync = NULL;
+        primitives_free();
         return s_init_result;
     }
 
@@ -638,6 +925,36 @@ esp_err_t slate_display_post(slate_display_work_fn fn, void *ctx, uint32_t timeo
 bool slate_display_ready(void)
 {
     return s_ready;
+}
+
+esp_err_t slate_display_backlight_set(bool on)
+{
+    if (!s_expander || !s_expander_lock) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xSemaphoreTake(s_expander_lock, pdMS_TO_TICKS(SLATE_DISPLAY_EXPANDER_TIMEOUT_MS)) !=
+        pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    esp_err_t err = esp_io_expander_set_level(s_expander, SLATE_EXIO_DISP, on ? 1 : 0);
+    if (err == ESP_OK) {
+        s_backlight_on = on;
+    }
+    xSemaphoreGive(s_expander_lock);
+    return err;
+}
+
+bool slate_display_backlight_is_on(void)
+{
+    return s_backlight_on;
+}
+
+slate_display_backlight_mode_t slate_display_backlight_mode(void)
+{
+    /* S-2 confirmed EXIO2 on this board is a binary output with no PWM path.
+     * #41 owns the soldered variant and the pin it would need. */
+    return SLATE_DISPLAY_BACKLIGHT_ON_OFF;
 }
 
 void slate_display_heap_metrics(slate_display_heap_metrics_t *out)
