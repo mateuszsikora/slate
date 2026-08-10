@@ -137,10 +137,17 @@ class Light:
         if action == "toggle":
             self.on = not self.on
         elif action == "set_power":
-            self.on = bool(params.get("value", 1))
+            value = params.get("value")
+            if not isinstance(value, bool):
+                return False
+            self.on = value
         elif action == "set_brightness":
             value = params.get("value")
-            if not isinstance(value, (int, float)) or not 0 <= value <= 100:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 0 <= value <= 100
+            ):
                 return False
             self.brightness = int(value)
             self.on = self.brightness > 0

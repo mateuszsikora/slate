@@ -43,7 +43,6 @@ typedef struct pending {
     uint32_t id;
     int64_t deadline_us;
     slate_action_phase_t phase;
-    bool acknowledged;
 } pending_t;
 
 static SemaphoreHandle_t s_lock;
@@ -503,7 +502,8 @@ void slate_action_result(const char *provider, uint32_t id, bool success, const 
         remove_locked(pending);
         changed = true;
     } else {
-        pending->acknowledged = true;
+        /* Stateful success deliberately leaves the entry unchanged: delivery
+         * was accepted, but only a provider snapshot confirms physical state. */
     }
     UNLOCK();
 
@@ -710,7 +710,18 @@ esp_err_t slate_action_selftest(void)
           "invalid value enum refused safely");
     request.value_type = SLATE_ACTION_VALUE_NUMBER;
 
+    request.action = SLATE_ACTION_SET_POWER;
+    request.value_type = SLATE_ACTION_VALUE_BOOL;
+    request.value.boolean = true;
+    uint32_t power_id = 0;
+    CHECK(slate_action_dispatch(&request, &power_id) == ESP_OK &&
+              fixture.last_value_type == SLATE_ACTION_VALUE_BOOL && fixture.last_value == 1,
+          "boolean payload remains typed at adapter boundary");
+    CHECK(slate_state_publish(PROVIDER, &lamp) == ESP_OK,
+          "boolean action confirmed by real state");
+
     request.action = SLATE_ACTION_SET_BRIGHTNESS;
+    request.value_type = SLATE_ACTION_VALUE_NUMBER;
     request.value.number = 101;
     CHECK(slate_action_dispatch(&request, NULL) == ESP_ERR_INVALID_SIZE,
           "value outside advertised range refused");
@@ -785,10 +796,12 @@ esp_err_t slate_action_selftest(void)
     fixture.result = ESP_OK;
     uint32_t timeout_id = 0;
     CHECK(slate_action_dispatch(&request, &timeout_id) == ESP_OK,
-          "unanswered action dispatched");
+          "action awaiting confirmation dispatched");
+    slate_action_result(PROVIDER, timeout_id, true, NULL);
     expire_at(esp_timer_get_time() + ACTION_TIMEOUT_US + 1);
     slate_action_feedback(PROVIDER, LIGHT, &feedback);
-    CHECK(feedback.phase == SLATE_ACTION_ERROR, "three-second deadline reverts");
+    CHECK(feedback.phase == SLATE_ACTION_ERROR,
+          "accepted action without snapshot still times out");
     expire_at(esp_timer_get_time() + ACTION_TIMEOUT_US + ERROR_VISIBLE_US + 2);
 
     request.value.number = 55;

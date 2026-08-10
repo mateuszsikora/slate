@@ -428,12 +428,12 @@ static esp_err_t bus_dispatch(void *ctx, uint32_t id, const slate_action_request
     slate_direct_action_t action = {
         .resource = request->resource,
         .action = request->action,
-        .has_value = request->value_type != SLATE_ACTION_VALUE_NONE,
+        .value_type = request->value_type,
     };
     if (request->value_type == SLATE_ACTION_VALUE_BOOL) {
-        action.value = request->value.boolean;
+        action.value.boolean = request->value.boolean;
     } else if (request->value_type == SLATE_ACTION_VALUE_NUMBER) {
-        action.value = request->value.number;
+        action.value.number = request->value.number;
     }
     return slate_direct_dispatch(id, &action);
 }
@@ -441,7 +441,8 @@ static esp_err_t bus_dispatch(void *ctx, uint32_t id, const slate_action_request
 esp_err_t slate_direct_dispatch(uint32_t id, const slate_direct_action_t *action)
 {
     if (action == NULL || action->resource == NULL || action->resource[0] == '\0' ||
-        (unsigned) action->action >= SLATE_ACTION_COUNT) {
+        (unsigned) action->action >= SLATE_ACTION_COUNT ||
+        (unsigned) action->value_type > SLATE_ACTION_VALUE_NUMBER) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -455,9 +456,12 @@ esp_err_t slate_direct_dispatch(uint32_t id, const slate_direct_action_t *action
               cJSON_AddNumberToObject(frame, "id", id) != NULL &&
               cJSON_AddStringToObject(frame, "provider", SLATE_DIRECT_PROVIDER_ID) != NULL &&
               cJSON_AddStringToObject(frame, "resource", action->resource) != NULL &&
-              cJSON_AddStringToObject(frame, "action", slate_action_str(action->action)) != NULL &&
-              (!action->has_value ||
-               cJSON_AddNumberToObject(params, "value", action->value) != NULL);
+              cJSON_AddStringToObject(frame, "action", slate_action_str(action->action)) != NULL;
+    if (ok && action->value_type == SLATE_ACTION_VALUE_BOOL) {
+        ok = cJSON_AddBoolToObject(params, "value", action->value.boolean) != NULL;
+    } else if (ok && action->value_type == SLATE_ACTION_VALUE_NUMBER) {
+        ok = cJSON_AddNumberToObject(params, "value", action->value.number) != NULL;
+    }
 
     char *text = ok ? cJSON_PrintUnformatted(frame) : NULL;
     cJSON_Delete(frame);
@@ -604,14 +608,15 @@ static uint32_t s_demo_id;
 static void selftest_demo_action(void *ctx)
 {
     (void) ctx;
-    const slate_action_request_t toggle = {
+    const slate_action_request_t set_power = {
         .provider = SLATE_DIRECT_PROVIDER_ID,
         .resource = "living-room",
-        .action = SLATE_ACTION_TOGGLE,
-        .value_type = SLATE_ACTION_VALUE_NONE,
+        .action = SLATE_ACTION_SET_POWER,
+        .value_type = SLATE_ACTION_VALUE_BOOL,
+        .value.boolean = false,
     };
 
-    esp_err_t err = slate_action_dispatch(&toggle, &s_demo_id);
+    esp_err_t err = slate_action_dispatch(&set_power, &s_demo_id);
     ESP_LOGI(TAG, "selftest: action bus dispatched %" PRIu32 " (%s)", s_demo_id,
              esp_err_to_name(err));
 }
@@ -657,6 +662,14 @@ esp_err_t slate_direct_selftest(void)
     const slate_direct_action_t nonsense = {.resource = "", .action = SLATE_ACTION_TOGGLE};
     CHECK(slate_direct_dispatch(2, &nonsense) == ESP_ERR_INVALID_ARG,
           "action without a resource is refused");
+
+    const slate_direct_action_t invalid_value = {
+        .resource = "living-room",
+        .action = SLATE_ACTION_SET_POWER,
+        .value_type = (slate_action_value_type_t) -1,
+    };
+    CHECK(slate_direct_dispatch(3, &invalid_value) == ESP_ERR_INVALID_ARG,
+          "action with invalid value type is refused");
 
     const esp_timer_create_args_t timer = {
         .callback = selftest_demo_action,
