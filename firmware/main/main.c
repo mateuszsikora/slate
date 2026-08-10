@@ -30,6 +30,7 @@
 #include "slate_display.h"
 #include "slate_ota.h"
 #include "slate_setup.h"
+#include "slate_state.h"
 #include "slate_store.h"
 #include "slate_time.h"
 #include "slate_wifi.h"
@@ -532,6 +533,25 @@ void app_main(void)
 #endif
 
     provision_setup_ap();
+
+    /*
+     * §5.1's provider-neutral core, before anything that could register a
+     * provider or bind a configuration. It allocates only its lock here: the
+     * active configuration is what sizes the store (§5.1), and at this point in
+     * the boot nothing has read one.
+     *
+     * Degraded rather than fatal, on the same reasoning as the store above it.
+     * A panel whose dashboard cannot hold state is still a panel that must
+     * answer the API and accept the next firmware.
+     */
+    esp_err_t state_err = slate_state_init();
+    if (state_err != ESP_OK) {
+        ESP_LOGE(TAG, "state store degraded: %s — continuing", esp_err_to_name(state_err));
+    }
+
+#ifdef SLATE_STATE_SELFTEST
+    slate_state_selftest();
+#endif
 
     /* Before the radio, so the task and its queue are already present when
      * slate_wifi begins posting the state changes that later screens consume.
