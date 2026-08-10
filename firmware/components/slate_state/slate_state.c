@@ -516,7 +516,12 @@ static void notify_subscribers(void)
 
     const char **ids = NULL;
     if (count > 0) {
-        ids = malloc(count * sizeof(*ids));
+        /* A kilobyte at the ceiling, and transient, but it comes out of the same
+         * PSRAM the table does for the reason §6.2 gives: internal RAM is the
+         * scarce kind, and this allocation happens while the display and the
+         * radio are holding what they hold. */
+        ids = heap_caps_malloc_prefer(count * sizeof(*ids), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (ids == NULL) {
             ESP_LOGE(TAG, "no memory to publish the subscription set; providers keep the old one");
             return;
@@ -561,6 +566,7 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
 
     /* Validated before anything is allocated, so a rejected configuration costs
      * the caller nothing and leaves the active one exactly where it was. */
+    size_t distinct = 0;
     for (size_t i = 0; i < count; i++) {
         if (!identity_ok(bindings[i].provider, SLATE_PROVIDER_ID_MAX) ||
             !identity_ok(bindings[i].resource, SLATE_RESOURCE_ID_MAX) ||
@@ -568,17 +574,48 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
             ESP_LOGE(TAG, "binding %u is not a usable provider/resource pair", (unsigned) i);
             return ESP_ERR_INVALID_ARG;
         }
+
+        /* Several tiles may bind one resource — a 1×1 light beside the same
+         * light in a 2×2 — and the store holds one entry for them. Two tiles
+         * that disagree about its kind are a different thing: at most one can be
+         * right, one entry cannot describe both, and the configuration that says
+         * it is the thing to refuse. #19 reports this against the tile.
+         *
+         * Counting the survivors here rather than while filling is what lets the
+         * table be the size it will actually use, and it keeps every refusal
+         * ahead of the allocation: a contradictory configuration now costs
+         * neither a block nor the free that follows it.
+         */
+        bool duplicate = false;
+        for (size_t j = 0; j < i; j++) {
+            if (strcmp(bindings[i].provider, bindings[j].provider) != 0 ||
+                strcmp(bindings[i].resource, bindings[j].resource) != 0) {
+                continue;
+            }
+            if (bindings[i].kind != bindings[j].kind) {
+                ESP_LOGE(TAG, "%s:%s is bound as both %s and %s", bindings[i].provider,
+                         bindings[i].resource, slate_kind_str(bindings[j].kind),
+                         slate_kind_str(bindings[i].kind));
+                return ESP_ERR_INVALID_STATE;
+            }
+            duplicate = true;
+            break;
+        }
+        if (!duplicate) {
+            distinct++;
+        }
     }
 
     entry_t *fresh = NULL;
-    if (count > 0) {
+    if (distinct > 0) {
         /* §6.2 puts the store in PSRAM, where a saturated configuration's ~72 KB
          * is unremarkable; internal RAM is the fallback rather than the choice,
          * on the same reasoning slate_store_config_read() uses. */
-        fresh = heap_caps_calloc_prefer(count, sizeof(*fresh), 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+        fresh = heap_caps_calloc_prefer(distinct, sizeof(*fresh), 2,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (fresh == NULL) {
-            ESP_LOGE(TAG, "no memory for %u bound resource(s)", (unsigned) count);
+            ESP_LOGE(TAG, "no memory for %u bound resource(s)", (unsigned) distinct);
             return ESP_ERR_NO_MEM;
         }
     }
@@ -587,28 +624,19 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
 
     size_t used = 0;
     bool carried_change = false;
-    esp_err_t err = ESP_OK;
-    for (size_t i = 0; i < count && err == ESP_OK; i++) {
-        /* Several tiles may bind one resource — a 1×1 light beside the same
-         * light in a 2×2 — and the store holds one entry for them. Two tiles
-         * that disagree about its kind are a different thing: at most one can be
-         * right, one entry cannot describe both, and the configuration that says
-         * it is the thing to refuse. #19 reports this against the tile. */
-        entry_t *existing = NULL;
+    /* `used < distinct` cannot bind here — both passes ask the same question of
+     * the same list — and it is written anyway, because the alternative if they
+     * ever disagreed is a write past the end of the table. */
+    for (size_t i = 0; i < count && used < distinct; i++) {
+        bool duplicate = false;
         for (size_t j = 0; j < used; j++) {
             if (strcmp(fresh[j].provider, bindings[i].provider) == 0 &&
                 strcmp(fresh[j].resource, bindings[i].resource) == 0) {
-                existing = &fresh[j];
+                duplicate = true;
                 break;
             }
         }
-        if (existing != NULL) {
-            if (existing->kind != bindings[i].kind) {
-                ESP_LOGE(TAG, "%s:%s is bound as both %s and %s", bindings[i].provider,
-                         bindings[i].resource, slate_kind_str(existing->kind),
-                         slate_kind_str(bindings[i].kind));
-                err = ESP_ERR_INVALID_STATE;
-            }
+        if (duplicate) {
             continue;
         }
 
@@ -644,18 +672,10 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
         }
     }
 
-    entry_t *old = NULL;
-    if (err == ESP_OK) {
-        old = s_entries;
-        s_entries = fresh;
-        s_count = used;
-    }
+    entry_t *old = s_entries;
+    s_entries = fresh;
+    s_count = used;
     UNLOCK();
-
-    if (err != ESP_OK) {
-        free(fresh);
-        return err;
-    }
 
     free(old);
     notify_subscribers();
@@ -1244,6 +1264,30 @@ esp_err_t slate_state_selftest(void)
           "removing the last binding unsubscribes every provider");
     CHECK(slate_state_publish("st-alpha", &lamp) == ESP_ERR_NOT_FOUND,
           "an empty store accepts nothing");
+
+    /*
+     * A collapsed duplicate must not be paid for. The set above holds five
+     * bindings and four pairs; binding the four on their own has to cost the
+     * same, which is a claim about the allocation rather than about
+     * slate_state_count() and so is read off the heap. The store is empty here,
+     * so both measurements start from the same place.
+     */
+    const slate_binding_t without_duplicate[] = {
+        {"st-alpha", "lamp", SLATE_KIND_LIGHT},
+        {"st-alpha", "blind", SLATE_KIND_COVER},
+        {"st-beta", "temp", SLATE_KIND_SENSOR},
+        {"st-nowhere", "thing", SLATE_KIND_SCENE},
+    };
+    size_t before_collapsed = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    slate_state_bind(set, SET_LEN);
+    size_t collapsed_cost = before_collapsed - heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    slate_state_bind(NULL, 0);
+    size_t before_plain = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    slate_state_bind(without_duplicate, 4);
+    size_t plain_cost = before_plain - heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    slate_state_bind(NULL, 0);
+    CHECK(collapsed_cost == plain_cost && plain_cost >= 4 * sizeof(entry_t),
+          "a collapsed duplicate is not allocated for");
 
     /*
      * The allocation half of "rebuilding the same configuration does not leak
