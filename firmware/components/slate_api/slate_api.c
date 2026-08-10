@@ -21,6 +21,7 @@
 
 #include "slate_store.h"
 #include "slate_display.h"
+#include "slate_state.h"
 #include "slate_theme.h"
 #include "slate_wifi.h"
 
@@ -302,15 +303,53 @@ static cJSON *themes_json(void)
     return themes;
 }
 
+/**
+ * How many bound resources the store holds for one provider, and its status.
+ *
+ * §4.1 is explicit that a provider's `resource_count` is not the top-level one:
+ * this is what the dashboard binds through that provider, while the number
+ * beside it is the distinct resources the store holds in total. An id nothing
+ * has registered — `ha` until M3 supplies its adapter — reads as unconfigured
+ * with nothing bound, which is what §5.1 says such a provider is.
+ */
+static slate_state_provider_info_t provider_info(const char *id)
+{
+    slate_state_provider_info_t info = {0};
+    strlcpy(info.id, id, sizeof(info.id));
+
+    for (size_t i = 0; i < slate_state_provider_count(); i++) {
+        slate_state_provider_info_t entry;
+        if (slate_state_provider_at(i, &entry) == ESP_OK && strcmp(entry.id, id) == 0) {
+            return entry;
+        }
+    }
+    return info;
+}
+
 static cJSON *providers_json(void)
 {
+    /*
+     * §5.1 names two provider ids for version 1 and makes both of them always
+     * present in this list — `direct` because it is, and `ha` because it is
+     * "present but `unconfigured` until it has credentials". So the shape is
+     * stated here and the values are read from the store: `direct`'s status is
+     * §5.4's real one, `degraded` with no attached action consumer and `online`
+     * with one, rather than the constant that stood in before it had a provider
+     * to report. `ha` keeps its stand-in until M3 registers an adapter to answer
+     * for it, at which point the same lookup starts telling the truth about it
+     * without this function changing.
+     */
+    const slate_state_provider_info_t direct_info = provider_info("direct");
+
     cJSON *providers = cJSON_CreateArray();
     cJSON *direct = cJSON_CreateObject();
     cJSON *ha = cJSON_CreateObject();
     bool ok = providers && direct && ha &&
               cJSON_AddStringToObject(direct, "id", "direct") != NULL &&
-              cJSON_AddStringToObject(direct, "status", "degraded") != NULL &&
-              cJSON_AddNumberToObject(direct, "resource_count", 0) != NULL &&
+              cJSON_AddStringToObject(
+                  direct, "status", slate_provider_status_str(direct_info.status)) != NULL &&
+              cJSON_AddNumberToObject(direct, "resource_count",
+                                      direct_info.resource_count) != NULL &&
               cJSON_AddStringToObject(ha, "id", "ha") != NULL &&
               cJSON_AddStringToObject(
                   ha, "status",
@@ -591,7 +630,7 @@ static esp_err_t status_handler(httpd_req_t *req)
     ok = ok && cJSON_AddStringToObject(root, "reset_reason",
                                  reset_reason_str(esp_reset_reason())) != NULL &&
          cJSON_AddNumberToObject(root, "reboot_count", slate_store_boot_count()) != NULL &&
-         cJSON_AddNumberToObject(root, "resource_count", 0) != NULL &&
+         cJSON_AddNumberToObject(root, "resource_count", slate_state_count()) != NULL &&
          cJSON_AddBoolToObject(root, "storage_reset",
                                slate_store_storage_was_reset()) != NULL;
     if (!ok) {

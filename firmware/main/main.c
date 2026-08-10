@@ -27,6 +27,7 @@
 
 #include "slate_api.h"
 #include "slate_coredump.h"
+#include "slate_direct.h"
 #include "slate_display.h"
 #include "slate_ota.h"
 #include "slate_setup.h"
@@ -403,14 +404,33 @@ static void start_api(void)
      * authentication: browser WebSockets cannot set that header, so the token
      * is the first frame. Register it before other diagnostics so boot logs
      * from their initialisation enter the retained ring as well. */
-    err = slate_ws_init();
-    if (err != ESP_OK) {
+    esp_err_t ws_err = slate_ws_init();
+    if (ws_err != ESP_OK) {
         ESP_LOGE(TAG, "WebSocket diagnostics unavailable: %s — continuing",
-                 esp_err_to_name(err));
+                 esp_err_to_name(ws_err));
     }
 
+    /*
+     * §5.4's provider, and before the selftests below rather than after: both
+     * report the provider table as they find it, and a check that ran while the
+     * always-present provider had not registered yet would be describing the
+     * order of these lines rather than the firmware.
+     *
+     * Degraded rather than fatal, like everything else here. A panel that cannot
+     * accept published state is still a panel that must answer the API and take
+     * the next firmware.
+     */
+    err = slate_direct_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "direct provider degraded: %s — continuing", esp_err_to_name(err));
+    }
+
+#ifdef SLATE_DIRECT_SELFTEST
+    slate_direct_selftest();
+#endif
+
 #ifdef SLATE_WS_SELFTEST
-    if (err == ESP_OK) {
+    if (ws_err == ESP_OK) {
         slate_ws_selftest();
     }
 #endif

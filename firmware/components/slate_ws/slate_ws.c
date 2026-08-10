@@ -26,6 +26,7 @@
 
 #include "slate_api.h"
 #include "slate_display.h"
+#include "slate_state.h"
 #include "slate_store.h"
 #include "slate_wifi.h"
 
@@ -37,6 +38,25 @@
 static const char *TAG = "ws";
 
 #define SLATE_WS_MAX_CLIENTS       4
+/*
+ * One, and sized from what §5.4 actually asks for rather than from the two
+ * provider ids §5.1 names.
+ *
+ * Attachment is the direct provider's mechanism: §4.2 describes the client that
+ * uses it as "an integration client that wants to receive direct-provider
+ * actions", and the Home Assistant adapter is a WebSocket client of Home
+ * Assistant rather than a consumer of this server's. A second entry would
+ * therefore reserve a whole queue — measured at 1 192 B of internal .bss — for
+ * something that by design never attaches, out of the 104 167 B §6.2 records as
+ * free once the radio is up. That is the memory the design spends a section
+ * defending, and speculative generality is a poor thing to spend it on.
+ *
+ * Raising this is one constant and costs that much again per entry. A provider
+ * that cannot register says so at boot rather than failing quietly later.
+ */
+#define SLATE_WS_MAX_PROVIDERS     1
+#define SLATE_WS_ACTION_BYTES      288
+#define SLATE_WS_ACTION_QUEUE      4
 #define SLATE_WS_LOG_RING_BYTES    8192
 #define SLATE_WS_LOG_CAPTURE_BYTES 512
 #define SLATE_WS_RX_BYTES          256
@@ -69,8 +89,31 @@ typedef enum {
     SEND_LOG,
     SEND_STATUS,
     SEND_RELOADED,
+    SEND_ACTION,
     SEND_POLICY_CLOSE,
 } send_kind_t;
+
+/**
+ * A provider's registration and its single attached action consumer (§5.4).
+ *
+ * The queue is short and static. An action that cannot be queued is refused at
+ * the point of dispatch, which #18 turns into §5.3's immediate revert — a
+ * consumer far enough behind to fill four frames is not one whose answer would
+ * have arrived inside the three seconds anyway, and a queue that grew instead
+ * would spend PSRAM on taps nobody is still waiting for.
+ */
+typedef struct {
+    const char *id;
+    slate_ws_attach_fn on_attach;
+    slate_ws_result_fn on_result;
+    void *ctx;
+    ws_client_t *consumer;
+    uint32_t consumer_generation;
+    size_t head;
+    size_t count;
+    uint16_t frame_len[SLATE_WS_ACTION_QUEUE];
+    char frame[SLATE_WS_ACTION_QUEUE][SLATE_WS_ACTION_BYTES];
+} ws_provider_t;
 
 typedef struct {
     ws_client_t *client;
@@ -87,6 +130,8 @@ static TaskHandle_t s_task;
 static ws_client_t s_clients[SLATE_WS_MAX_CLIENTS];
 static uint32_t s_next_generation;
 static slate_ws_mode_t s_mode;
+static ws_provider_t s_providers[SLATE_WS_MAX_PROVIDERS];
+static size_t s_provider_count;
 static ws_client_t *s_edit_owner;
 static uint32_t s_edit_owner_generation;
 static int64_t s_edit_last_ping_us;
@@ -255,12 +300,20 @@ static ws_client_t *client_for_session(httpd_handle_t server, int fd)
     return (ws_client_t *) httpd_sess_get_ctx(server, fd);
 }
 
+static void provider_release_and_notify(ws_client_t *client, uint32_t generation);
+
 static void client_session_freed(void *ctx)
 {
     ws_client_t *client = ctx;
     if (!client) {
         return;
     }
+
+    /* §5.4's detach arrives as a socket closing far more often than as anything
+     * a client asked for, and this is the one place that sees both. Before the
+     * slot is recycled, so a provider is never told about an attachment that
+     * has already been overwritten by the next connection. */
+    provider_release_and_notify(client, client->generation);
 
     portENTER_CRITICAL(&s_state_lock);
     uint32_t generation = client->generation;
@@ -358,7 +411,277 @@ static void set_mode(slate_ws_mode_t mode, ws_client_t *owner, int64_t now)
     }
 }
 
-static esp_err_t handle_authenticated(ws_client_t *client, int fd, cJSON *root)
+/* --- Provider action consumers (§4.2, §5.4) ------------------------------ */
+
+static void mark_status_immediately(void);
+
+static ws_provider_t *provider_find(const char *id)
+{
+    for (size_t i = 0; i < s_provider_count; i++) {
+        if (strcmp(s_providers[i].id, id) == 0) {
+            return &s_providers[i];
+        }
+    }
+    return NULL;
+}
+
+/**
+ * Release every attachment held by a client, and say who has to be told.
+ *
+ * The callbacks are collected rather than called here because the one caller
+ * that matters runs inside esp_http_server's session teardown and the state
+ * lock is a spinlock: a provider is entitled to do real work — change its
+ * status, fail its outstanding actions — on being told its consumer is gone.
+ */
+static size_t provider_release(ws_client_t *client, uint32_t generation,
+                               ws_provider_t **released, size_t capacity)
+{
+    size_t count = 0;
+
+    portENTER_CRITICAL(&s_state_lock);
+    for (size_t i = 0; i < s_provider_count; i++) {
+        ws_provider_t *provider = &s_providers[i];
+        if (provider->consumer != client || provider->consumer_generation != generation) {
+            continue;
+        }
+        provider->consumer = NULL;
+        provider->consumer_generation = 0;
+        provider->head = 0;
+        provider->count = 0;
+        if (count < capacity) {
+            released[count++] = provider;
+        }
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+    return count;
+}
+
+static void provider_release_and_notify(ws_client_t *client, uint32_t generation)
+{
+    /* Zeroed for the compiler rather than for the logic: provider_release()
+     * writes every element it counts, but at -Os the whole chain down to
+     * client_session_freed() inlines and GCC stops being able to see that the
+     * returned count bounds the writes. -Og does not inline that far, so the
+     * release build is the one that catches it. */
+    ws_provider_t *released[SLATE_WS_MAX_PROVIDERS] = {0};
+    size_t count = provider_release(client, generation, released, SLATE_WS_MAX_PROVIDERS);
+
+    for (size_t i = 0; i < count; i++) {
+        ESP_LOGI(TAG, "provider %s lost its action consumer", released[i]->id);
+        if (released[i]->on_attach) {
+            released[i]->on_attach(released[i]->ctx, false);
+        }
+    }
+    if (count > 0) {
+        mark_status_immediately();
+    }
+}
+
+/**
+ * §5.4's attachment, and the two answers it can receive.
+ *
+ * Success is deliberately silent, because §4.2 has no frame for it and ADR-4
+ * makes that vocabulary a contract rather than a convenience. What a client
+ * gets instead is the `status` frame the attachment itself makes stale — the
+ * provider it just attached to reads `online` there, which is the fact it was
+ * asking about rather than an acknowledgement that it asked.
+ */
+static void handle_provider_attach(httpd_req_t *req, ws_client_t *client, int fd, cJSON *root)
+{
+    cJSON *name = cJSON_GetObjectItemCaseSensitive(root, "provider");
+    if (!cJSON_IsString(name)) {
+        send_text(req, "{\"type\":\"error\",\"error\":\"provider_required\"}");
+        return;
+    }
+
+    ws_provider_t *provider = provider_find(name->valuestring);
+    if (!provider) {
+        send_text(req, "{\"type\":\"error\",\"error\":\"provider_not_found\"}");
+        return;
+    }
+
+    bool attached = false;
+    bool busy = false;
+    portENTER_CRITICAL(&s_state_lock);
+    if (client->used && client->fd == fd && client->authenticated) {
+        if (provider->consumer == NULL) {
+            provider->consumer = client;
+            provider->consumer_generation = client->generation;
+            provider->head = 0;
+            provider->count = 0;
+            attached = true;
+        } else {
+            /* Re-attaching is not an error for the client that is already the
+             * consumer: §5.4's rule is that two processes cannot both operate
+             * the same light, and a repeat from the one that holds it is not a
+             * second process. */
+            busy = provider->consumer != client ||
+                   provider->consumer_generation != client->generation;
+        }
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+
+    if (busy) {
+        ESP_LOGW(TAG, "provider %s already has an action consumer", provider->id);
+        send_text(req, "{\"type\":\"error\",\"error\":\"provider_busy\"}");
+        return;
+    }
+    if (attached) {
+        ESP_LOGI(TAG, "provider %s gained an action consumer", provider->id);
+        if (provider->on_attach) {
+            provider->on_attach(provider->ctx, true);
+        }
+        mark_status_immediately();
+    }
+
+    /* Neither, and deliberately silent: the client stopped being the current
+     * authenticated session between the dispatch above and the lock, which
+     * happens when a send failed and the session is already being torn down.
+     * There is nothing left to answer on — a frame queued to a closing session
+     * is one nobody reads — and the close itself is the answer. */
+}
+
+/**
+ * §4.2's `action_result`, from the consumer that was sent the action.
+ *
+ * Accepted only from the attached client. A result from anyone else is not a
+ * late answer to route on but a second process operating the same resource,
+ * which is the thing the single attachment exists to prevent.
+ */
+static void handle_action_result(ws_client_t *client, cJSON *root)
+{
+    cJSON *id = cJSON_GetObjectItemCaseSensitive(root, "id");
+    cJSON *success = cJSON_GetObjectItemCaseSensitive(root, "success");
+    cJSON *error = cJSON_GetObjectItemCaseSensitive(root, "error");
+    if (!cJSON_IsNumber(id) || id->valuedouble < 0 || id->valuedouble > UINT32_MAX ||
+        !cJSON_IsBool(success)) {
+        return;
+    }
+
+    ws_provider_t *provider = NULL;
+    portENTER_CRITICAL(&s_state_lock);
+    for (size_t i = 0; i < s_provider_count; i++) {
+        if (s_providers[i].consumer == client &&
+            s_providers[i].consumer_generation == client->generation) {
+            provider = &s_providers[i];
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+
+    if (provider && provider->on_result) {
+        provider->on_result(provider->ctx, (uint32_t) id->valuedouble,
+                            cJSON_IsTrue(success),
+                            cJSON_IsString(error) ? error->valuestring : NULL);
+    }
+}
+
+esp_err_t slate_ws_provider_register(const slate_ws_provider_t *provider)
+{
+    if (!provider || !provider->id || provider->id[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (provider_find(provider->id)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_provider_count >= SLATE_WS_MAX_PROVIDERS) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    ws_provider_t *entry = &s_providers[s_provider_count];
+    memset(entry, 0, sizeof(*entry));
+    entry->id = provider->id;
+    entry->on_attach = provider->on_attach;
+    entry->on_result = provider->on_result;
+    entry->ctx = provider->ctx;
+
+    /* Published last: the dispatcher task walks the table by count, so an entry
+     * has to be complete before the count can reach it. */
+    portENTER_CRITICAL(&s_state_lock);
+    s_provider_count++;
+    portEXIT_CRITICAL(&s_state_lock);
+    return ESP_OK;
+}
+
+bool slate_ws_provider_is_attached(const char *id)
+{
+    ws_provider_t *provider = id ? provider_find(id) : NULL;
+    if (!provider) {
+        return false;
+    }
+
+    portENTER_CRITICAL(&s_state_lock);
+    bool attached = provider->consumer != NULL;
+    portEXIT_CRITICAL(&s_state_lock);
+    return attached;
+}
+
+esp_err_t slate_ws_provider_send(const char *id, const char *text, size_t len)
+{
+    ws_provider_t *provider = id ? provider_find(id) : NULL;
+    if (!provider || !text) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (len == 0 || len > SLATE_WS_ACTION_BYTES) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    esp_err_t err = ESP_OK;
+    portENTER_CRITICAL(&s_state_lock);
+    if (provider->consumer == NULL) {
+        err = ESP_ERR_INVALID_STATE;
+    } else if (provider->count >= SLATE_WS_ACTION_QUEUE) {
+        err = ESP_ERR_NO_MEM;
+    } else {
+        size_t slot = (provider->head + provider->count) % SLATE_WS_ACTION_QUEUE;
+        memcpy(provider->frame[slot], text, len);
+        provider->frame_len[slot] = (uint16_t) len;
+        provider->count++;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+    return err;
+}
+
+/** Copy this client's next queued frame, if it is a consumer with one waiting. */
+static ws_provider_t *provider_peek(const ws_client_t *client, uint32_t generation, char *out,
+                                    size_t *len)
+{
+    ws_provider_t *found = NULL;
+
+    portENTER_CRITICAL(&s_state_lock);
+    for (size_t i = 0; i < s_provider_count; i++) {
+        ws_provider_t *provider = &s_providers[i];
+        if (provider->consumer != client || provider->consumer_generation != generation ||
+            provider->count == 0) {
+            continue;
+        }
+        *len = provider->frame_len[provider->head];
+        memcpy(out, provider->frame[provider->head], *len);
+        found = provider;
+        break;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+    return found;
+}
+
+/**
+ * Drop the frame provider_peek() returned, once it is on its way.
+ *
+ * Handed over when the send is queued rather than when it lands, because the
+ * only failure after that point closes the session — and a consumer that has
+ * gone is one §5.3's timeout answers for, not one a retry would reach.
+ */
+static void provider_drop(ws_provider_t *provider)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    if (provider->count > 0) {
+        provider->head = (provider->head + 1) % SLATE_WS_ACTION_QUEUE;
+        provider->count--;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+static esp_err_t handle_authenticated(httpd_req_t *req, ws_client_t *client, int fd, cJSON *root)
 {
     cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
     if (!cJSON_IsString(type)) {
@@ -385,6 +708,16 @@ static esp_err_t handle_authenticated(ws_client_t *client, int fd, cJSON *root)
         } else if (cJSON_IsString(mode) && strcmp(mode->valuestring, "normal") == 0) {
             set_mode(SLATE_WS_MODE_NORMAL, NULL, now);
         }
+        return ESP_OK;
+    }
+
+    if (strcmp(type->valuestring, "provider_attach") == 0) {
+        handle_provider_attach(req, client, fd, root);
+        return ESP_OK;
+    }
+
+    if (strcmp(type->valuestring, "action_result") == 0) {
+        handle_action_result(client, root);
     }
     return ESP_OK;
 }
@@ -482,7 +815,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
         }
         err = handle_first_frame(req, client, fd, root);
     } else if (parsed) {
-        err = handle_authenticated(client, fd, root);
+        err = handle_authenticated(req, client, fd, root);
     } else {
         err = ESP_OK; /* Unknown future application frames are ignored. */
     }
@@ -712,10 +1045,23 @@ static size_t format_status_json(char *out, size_t out_size)
         snprintf(lvgl_frag, sizeof(lvgl_frag), "null");
     }
 
+    /*
+     * `direct` is read out of the store rather than stated here, which is what
+     * makes §5.4's distinction visible to a client: the provider is `degraded`
+     * while it can accept state with no action consumer attached and `online`
+     * while one is. Attaching therefore changes this frame, and that change is
+     * the acknowledgement §4.2 does not spell a frame for.
+     *
+     * `ha` keeps its stand-in until M3 registers the real one. §5.1 makes it a
+     * provider that is always present and `unconfigured` until it has
+     * credentials, so dropping the entry until its adapter exists would report
+     * something less true than this does.
+     */
     int len = snprintf(out, out_size,
-                       "{\"type\":\"status\",\"providers\":{\"direct\":\"degraded\","
+                       "{\"type\":\"status\",\"providers\":{\"direct\":\"%s\","
                        "\"ha\":\"%s\"},\"wifi\":%s,"
                        "\"heap_free\":%u,\"lvgl_heap_free\":%s,\"lvgl_frag_pct\":%s}",
+                       slate_provider_status_str(slate_state_provider_status("direct")),
                        slate_store_ha_token_is_set() ? "offline" : "unconfigured",
                        wifi_value, (unsigned) esp_get_free_heap_size(), lvgl_free, lvgl_frag);
     return len > 0 && (size_t) len < out_size ? (size_t) len : 0;
@@ -730,6 +1076,30 @@ static void mark_status_due(int64_t now)
     }
     s_last_status_us = now;
 
+    for (size_t i = 0; i < SLATE_WS_MAX_CLIENTS; i++) {
+        if (s_clients[i].used && s_clients[i].authenticated &&
+            !s_clients[i].initial_status_pending) {
+            s_clients[i].status_pending = true;
+        }
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+}
+
+/**
+ * Make the next `status` frame due now rather than at the next 15 s heartbeat.
+ *
+ * Used where a provider's lifecycle changed, which is the one thing in that
+ * frame a client is likely to be waiting on: §5.4's attach and detach move
+ * `direct` between `degraded` and `online`, and a consumer that had to wait out
+ * a heartbeat to learn whether it holds the attachment would be reading a
+ * fifteen-second-old answer to a question it asked once.
+ *
+ * The heartbeat's own clock is deliberately left alone, so an attach storm
+ * cannot silence the periodic frame that follows it.
+ */
+static void mark_status_immediately(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
     for (size_t i = 0; i < SLATE_WS_MAX_CLIENTS; i++) {
         if (s_clients[i].used && s_clients[i].authenticated &&
             !s_clients[i].initial_status_pending) {
@@ -800,6 +1170,18 @@ static void service_client(ws_client_t *client, int64_t now, char *line, char *j
             const uint8_t close_code[2] = {0x03, 0xF0};
             queue_send(client, generation, SEND_POLICY_CLOSE, 0,
                        close_code, sizeof(close_code));
+        }
+        return;
+    }
+
+    /* Ahead of the retained backlog and the heartbeat, because §5.3 gives an
+     * action three seconds before the bus reverts it and a tap queued behind
+     * 8 KiB of replayed log lines would spend them on the wrong thing. */
+    size_t action_len = 0;
+    ws_provider_t *provider = provider_peek(client, generation, json, &action_len);
+    if (provider) {
+        if (queue_send(client, generation, SEND_ACTION, 0, json, action_len) == ESP_OK) {
+            provider_drop(provider);
         }
         return;
     }
@@ -1100,8 +1482,8 @@ static bool selftest_wait_for_text(int fd, const char *needle, bool *saw_marker,
             *saw_marker = true;
         }
         if (saw_status && strstr((char *) payload, "\"type\":\"status\"") &&
-            strstr((char *) payload,
-                   "\"providers\":{\"direct\":\"degraded\",\"ha\":") &&
+            strstr((char *) payload, "\"providers\":{\"direct\":\"") &&
+            strstr((char *) payload, "\"ha\":") &&
             strstr((char *) payload, "\"lvgl_heap_free\":")) {
             *saw_status = true;
         }
