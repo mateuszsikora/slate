@@ -536,10 +536,6 @@ static void moving_marker_x(void *object, int32_t x)
  * nobody can follow is the same full-screen-repaint mistake in miniature. */
 #define SLATE_BRINGUP_LABEL_PERIOD_MS 100
 
-#define SLATE_BRINGUP_IDLE      0x3A3F4A
-#define SLATE_BRINGUP_HIT       0x2FBF71
-#define SLATE_BRINGUP_CROSSHAIR 0x00E5FF
-
 static lv_obj_t *s_corner[4];
 static lv_obj_t *s_backlight_tile;
 static lv_obj_t *s_crosshair_h;
@@ -652,12 +648,14 @@ static void backlight_sleep(void)
 
 static void latch_corners(const lv_point_t *point)
 {
+    const slate_diagnostic_palette_t *diagnostics = slate_diagnostic_palette();
     for (size_t i = 0; i < 4; i++) {
         if (s_corner_hit[i] || !point_on_object(s_corner[i], point)) {
             continue;
         }
         s_corner_hit[i] = true;
-        lv_obj_set_style_bg_color(s_corner[i], lv_color_hex(SLATE_BRINGUP_HIT), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(s_corner[i], lv_color_hex(diagnostics->touch_hit),
+                                  LV_PART_MAIN);
     }
 }
 
@@ -708,6 +706,7 @@ static void screen_input_event(lv_event_t *event)
 static void build_touch_pattern(lv_obj_t *screen)
 {
     const slate_theme_t *theme = slate_theme_default();
+    const slate_diagnostic_palette_t *diagnostics = slate_diagnostic_palette();
     s_press_count = 0;
     s_last_point.x = -1;
     s_last_point.y = -1;
@@ -730,7 +729,7 @@ static void build_touch_pattern(lv_obj_t *screen)
     for (size_t i = 0; i < 4; i++) {
         s_corner_hit[i] = false;
         s_corner[i] = solid_rect(screen, corner_x[i], corner_y[i], SLATE_BRINGUP_CORNER_SIZE,
-                                 SLATE_BRINGUP_CORNER_SIZE, SLATE_BRINGUP_IDLE);
+                                 SLATE_BRINGUP_CORNER_SIZE, diagnostics->touch_idle);
     }
 
     lv_obj_t *tile = solid_rect(screen, SLATE_BRINGUP_BACKLIGHT_X, SLATE_BRINGUP_BACKLIGHT_Y,
@@ -747,15 +746,15 @@ static void build_touch_pattern(lv_obj_t *screen)
     lv_obj_center(tile_label);
 
     s_touch_label = lv_label_create(screen);
-    lv_obj_set_style_text_color(s_touch_label, lv_color_hex(0x2FBF71), LV_PART_MAIN);
+    lv_obj_set_style_text_color(s_touch_label, lv_color_hex(diagnostics->touch_hit), LV_PART_MAIN);
     lv_obj_set_style_text_font(s_touch_label, theme->caption, LV_PART_MAIN);
     lv_obj_align(s_touch_label, LV_ALIGN_BOTTOM_MID, 0, -22);
 
     const int32_t arm = 2 * SLATE_BRINGUP_CROSS_ARM + 1;
     s_crosshair_h = solid_rect(screen, -arm, -arm, arm, SLATE_BRINGUP_CROSS_THICK,
-                               SLATE_BRINGUP_CROSSHAIR);
+                               diagnostics->crosshair);
     s_crosshair_v = solid_rect(screen, -arm, -arm, SLATE_BRINGUP_CROSS_THICK, arm,
-                               SLATE_BRINGUP_CROSSHAIR);
+                               diagnostics->crosshair);
 
     update_touch_label();
 }
@@ -764,15 +763,7 @@ static void build_test_pattern(void *ctx)
 {
     (void) ctx;
     const slate_theme_t *theme = slate_theme_default();
-
-    static const uint32_t bars[] = {
-        0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00,
-        0xFF00FF, 0xFF0000, 0x0000FF, 0x000000,
-    };
-    static const uint32_t greys[] = {
-        0xFFFFFF, 0xDADADA, 0xB6B6B6, 0x919191,
-        0x6D6D6D, 0x494949, 0x242424, 0x000000,
-    };
+    const slate_diagnostic_palette_t *diagnostics = slate_diagnostic_palette();
 
     lv_obj_t *screen = lv_screen_active();
     lv_obj_remove_style_all(screen);
@@ -780,9 +771,9 @@ static void build_test_pattern(void *ctx)
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_remove_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
 
-    for (size_t i = 0; i < sizeof(bars) / sizeof(bars[0]); i++) {
-        solid_rect(screen, (int32_t) i * 100, 0, 100, 180, bars[i]);
-        solid_rect(screen, (int32_t) i * 100, 180, 100, 55, greys[i]);
+    for (size_t i = 0; i < SLATE_DIAGNOSTIC_SWATCH_COUNT; i++) {
+        solid_rect(screen, (int32_t) i * 100, 0, 100, 180, diagnostics->rgb[i]);
+        solid_rect(screen, (int32_t) i * 100, 180, 100, 55, diagnostics->greyscale[i]);
     }
 
     /* Fine lines and a centre cross make a swapped pin, crop or porch error
@@ -800,10 +791,10 @@ static void build_test_pattern(void *ctx)
      * ends at x=780, which can look like a cropped right edge even when all
      * 800 columns are being scanned. These one-pixel rails make a real crop or
      * porch error unambiguous on the glass. */
-    solid_rect(screen, 0, 0, SLATE_LCD_H_RES, 1, 0xFFFFFF);
-    solid_rect(screen, 0, SLATE_LCD_V_RES - 1, SLATE_LCD_H_RES, 1, 0xFFFFFF);
-    solid_rect(screen, 0, 0, 1, SLATE_LCD_V_RES, 0xFFFFFF);
-    solid_rect(screen, SLATE_LCD_H_RES - 1, 0, 1, SLATE_LCD_V_RES, 0xFFFFFF);
+    solid_rect(screen, 0, 0, SLATE_LCD_H_RES, 1, diagnostics->edge);
+    solid_rect(screen, 0, SLATE_LCD_V_RES - 1, SLATE_LCD_H_RES, 1, diagnostics->edge);
+    solid_rect(screen, 0, 0, 1, SLATE_LCD_V_RES, diagnostics->edge);
+    solid_rect(screen, SLATE_LCD_H_RES - 1, 0, 1, SLATE_LCD_V_RES, diagnostics->edge);
 
     solid_rect(screen, SLATE_LCD_H_RES / 2 - 1, 245, 3, 165, theme->warn);
     solid_rect(screen, 0, 324, SLATE_LCD_H_RES, 3, theme->warn);

@@ -29,6 +29,21 @@ static const slate_theme_t MIDNIGHT = {
     .icons_large = &slate_font_icons_48,
 };
 
+static const slate_diagnostic_palette_t DIAGNOSTICS = {
+    .touch_idle = 0x3A3F4A,
+    .touch_hit = 0x2FBF71,
+    .crosshair = 0x00E5FF,
+    .edge = 0xFFFFFF,
+    .rgb = {
+        0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00,
+        0xFF00FF, 0xFF0000, 0x0000FF, 0x000000,
+    },
+    .greyscale = {
+        0xFFFFFF, 0xDADADA, 0xB6B6B6, 0x919191,
+        0x6D6D6D, 0x494949, 0x242424, 0x000000,
+    },
+};
+
 static const slate_theme_t *const THEMES[] = {&MIDNIGHT};
 
 const slate_theme_t *slate_theme_default(void)
@@ -57,4 +72,9 @@ size_t slate_theme_count(void)
 const slate_theme_t *slate_theme_at(size_t index)
 {
     return index < slate_theme_count() ? THEMES[index] : NULL;
+}
+
+const slate_diagnostic_palette_t *slate_diagnostic_palette(void)
+{
+    return &DIAGNOSTICS;
 }
