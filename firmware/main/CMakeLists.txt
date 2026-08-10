@@ -1,8 +1,8 @@
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES slate_api slate_coredump slate_direct slate_display slate_ota slate_setup slate_state
-             slate_store slate_wifi slate_time slate_ws app_update esp_system esp_event
+    REQUIRES slate_action slate_api slate_coredump slate_direct slate_display slate_ota slate_setup
+             slate_state slate_store slate_wifi slate_time slate_ws app_update esp_system esp_event
 )
 
 #
@@ -27,6 +27,9 @@ idf_component_register(
 #                              `tools/direct/` can drive the endpoint from
 #                              outside the device. Off by default; it goes away
 #                              with #19, #20 and #22.
+#   -DSLATE_ACTION_SELFTEST=1  exercise capability validation, optimistic
+#                              overlays and every completion path against the
+#                              real state store and a fixture provider.
 #   -DSLATE_OTA_ROLLBACK_SELFTEST=1
 #                              panic before API/network startup, but only when
 #                              the running image is pending verification. OTA
@@ -55,7 +58,7 @@ idf_component_register(
 # `POST /wifi` and the setup page are what M1 exists to replace that with.
 #
 foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_WS_SELFTEST SLATE_STATE_SELFTEST
-             SLATE_DIRECT_SELFTEST SLATE_OTA_ROLLBACK_SELFTEST
+             SLATE_DIRECT_SELFTEST SLATE_ACTION_SELFTEST SLATE_OTA_ROLLBACK_SELFTEST
              SLATE_COREDUMP_SELFTEST SLATE_SETUP_AP_PASSWORD SLATE_TIMEZONE)
     if(DEFINED ${knob})
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${knob}=${${knob}})

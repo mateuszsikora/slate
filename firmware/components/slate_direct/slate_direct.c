@@ -17,6 +17,7 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 
+#include "slate_action.h"
 #include "slate_api.h"
 #include "slate_state.h"
 #include "slate_ws.h"
@@ -40,9 +41,6 @@ static const char *TAG = "direct";
  * be allocated would make the endpoint fail in a new way under memory pressure.
  */
 #define BODY_MAX 768
-
-static slate_direct_result_fn s_result;
-static void *s_result_ctx;
 
 #ifdef SLATE_DIRECT_SELFTEST
 static void selftest_consumer_attached(void);
@@ -398,6 +396,9 @@ static void consumer_changed(void *ctx, bool attached)
     slate_state_provider_set_status(SLATE_DIRECT_PROVIDER_ID, attached
                                                                   ? SLATE_PROVIDER_ONLINE
                                                                   : SLATE_PROVIDER_DEGRADED);
+    if (!attached) {
+        slate_action_provider_unavailable(SLATE_DIRECT_PROVIDER_ID, "consumer_disconnected");
+    }
 #ifdef SLATE_DIRECT_SELFTEST
     if (attached) {
         selftest_consumer_attached();
@@ -418,23 +419,30 @@ static void action_result(void *ctx, uint32_t id, bool success, const char *erro
         ESP_LOGD(TAG, "action %" PRIu32 " accepted by the consumer", id);
     }
 
-    slate_direct_result_fn handler = s_result;
-    void *handler_ctx = s_result_ctx;
-    if (handler) {
-        handler(handler_ctx, id, success, error);
-    }
+    slate_action_result(SLATE_DIRECT_PROVIDER_ID, id, success, error);
 }
 
-void slate_direct_set_result_handler(slate_direct_result_fn fn, void *ctx)
+static esp_err_t bus_dispatch(void *ctx, uint32_t id, const slate_action_request_t *request)
 {
-    s_result_ctx = ctx;
-    s_result = fn;
+    (void) ctx;
+    slate_direct_action_t action = {
+        .resource = request->resource,
+        .action = request->action,
+        .value_type = request->value_type,
+    };
+    if (request->value_type == SLATE_ACTION_VALUE_BOOL) {
+        action.value.boolean = request->value.boolean;
+    } else if (request->value_type == SLATE_ACTION_VALUE_NUMBER) {
+        action.value.number = request->value.number;
+    }
+    return slate_direct_dispatch(id, &action);
 }
 
 esp_err_t slate_direct_dispatch(uint32_t id, const slate_direct_action_t *action)
 {
     if (action == NULL || action->resource == NULL || action->resource[0] == '\0' ||
-        action->action >= SLATE_ACTION_COUNT) {
+        (unsigned) action->action >= SLATE_ACTION_COUNT ||
+        (unsigned) action->value_type > SLATE_ACTION_VALUE_NUMBER) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -448,9 +456,12 @@ esp_err_t slate_direct_dispatch(uint32_t id, const slate_direct_action_t *action
               cJSON_AddNumberToObject(frame, "id", id) != NULL &&
               cJSON_AddStringToObject(frame, "provider", SLATE_DIRECT_PROVIDER_ID) != NULL &&
               cJSON_AddStringToObject(frame, "resource", action->resource) != NULL &&
-              cJSON_AddStringToObject(frame, "action", slate_action_str(action->action)) != NULL &&
-              (!action->has_value ||
-               cJSON_AddNumberToObject(params, "value", action->value) != NULL);
+              cJSON_AddStringToObject(frame, "action", slate_action_str(action->action)) != NULL;
+    if (ok && action->value_type == SLATE_ACTION_VALUE_BOOL) {
+        ok = cJSON_AddBoolToObject(params, "value", action->value.boolean) != NULL;
+    } else if (ok && action->value_type == SLATE_ACTION_VALUE_NUMBER) {
+        ok = cJSON_AddNumberToObject(params, "value", action->value.number) != NULL;
+    }
 
     char *text = ok ? cJSON_PrintUnformatted(frame) : NULL;
     cJSON_Delete(frame);
@@ -499,6 +510,15 @@ esp_err_t slate_direct_init(void)
     }
     slate_state_provider_set_status(SLATE_DIRECT_PROVIDER_ID, SLATE_PROVIDER_DEGRADED);
 
+    const slate_action_provider_t action_provider = {
+        .id = SLATE_DIRECT_PROVIDER_ID,
+        .dispatch = bus_dispatch,
+    };
+    esp_err_t action_err = slate_action_provider_register(&action_provider);
+    if (action_err != ESP_OK) {
+        ESP_LOGE(TAG, "semantic action dispatch unavailable: %s", esp_err_to_name(action_err));
+    }
+
     const slate_ws_provider_t consumer = {
         .id = SLATE_DIRECT_PROVIDER_ID,
         .on_attach = consumer_changed,
@@ -522,6 +542,9 @@ esp_err_t slate_direct_init(void)
     if (err == ESP_OK && route_err == ESP_OK) {
         ESP_LOGI(TAG, "provider ready: POST " SLATE_API_BASE_PATH "/direct/state");
     }
+    if (action_err != ESP_OK) {
+        return action_err;
+    }
     return err != ESP_OK ? err : route_err;
 }
 
@@ -541,9 +564,10 @@ esp_err_t slate_direct_init(void)
  * talking to a real panel, which is a better test of a public contract (ADR-4)
  * than a loopback socket that shares the firmware's own idea of it.
  *
- * The demonstration dispatch is the other half. With no action bus (#18) and no
- * tile (#22) nothing in the firmware can originate a tap, so an attaching
- * consumer is given one to answer. Both go away with #19, #20 and #22.
+ * The demonstration dispatch is the other half. With no tile (#22) nothing in
+ * the firmware can originate a tap yet, so an attaching consumer is given one
+ * through the real action bus to answer. The fixture goes away with #19 and the
+ * synthetic action goes away with #20 and #22.
  */
 static esp_err_t selftest_bind_fixture(void)
 {
@@ -553,7 +577,29 @@ static esp_err_t selftest_bind_fixture(void)
         {.provider = SLATE_DIRECT_PROVIDER_ID, .resource = "hall-temperature",
          .kind = SLATE_KIND_SENSOR},
     };
-    return slate_state_bind(FIXTURE, sizeof(FIXTURE) / sizeof(FIXTURE[0]));
+    esp_err_t err = slate_state_bind(FIXTURE, sizeof(FIXTURE) / sizeof(FIXTURE[0]));
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    const slate_snapshot_t lamp = {
+        .resource = "living-room",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Living room",
+        .available = true,
+        .capabilities = {
+            .actions = (1u << SLATE_ACTION_TOGGLE) | (1u << SLATE_ACTION_SET_POWER) |
+                       (1u << SLATE_ACTION_SET_BRIGHTNESS),
+            .brightness_min = 0,
+            .brightness_max = 100,
+        },
+        .state.light = {
+            .on = true,
+            .brightness = 62,
+            .color_temperature = SLATE_STATE_ABSENT,
+        },
+    };
+    return slate_state_publish(SLATE_DIRECT_PROVIDER_ID, &lamp);
 }
 
 static esp_timer_handle_t s_demo_timer;
@@ -562,21 +608,17 @@ static uint32_t s_demo_id;
 static void selftest_demo_action(void *ctx)
 {
     (void) ctx;
-    const slate_direct_action_t toggle = {
+    const slate_action_request_t set_power = {
+        .provider = SLATE_DIRECT_PROVIDER_ID,
         .resource = "living-room",
-        .action = SLATE_ACTION_TOGGLE,
-    };
-    const slate_direct_action_t brightness = {
-        .resource = "living-room",
-        .action = SLATE_ACTION_SET_BRIGHTNESS,
-        .has_value = true,
-        .value = 40,
+        .action = SLATE_ACTION_SET_POWER,
+        .value_type = SLATE_ACTION_VALUE_BOOL,
+        .value.boolean = false,
     };
 
-    esp_err_t first = slate_direct_dispatch(++s_demo_id, &toggle);
-    esp_err_t second = slate_direct_dispatch(++s_demo_id, &brightness);
-    ESP_LOGI(TAG, "selftest: dispatched actions %" PRIu32 " and %" PRIu32 " (%s, %s)",
-             s_demo_id - 1, s_demo_id, esp_err_to_name(first), esp_err_to_name(second));
+    esp_err_t err = slate_action_dispatch(&set_power, &s_demo_id);
+    ESP_LOGI(TAG, "selftest: action bus dispatched %" PRIu32 " (%s)", s_demo_id,
+             esp_err_to_name(err));
 }
 
 /* Deferred rather than sent from the attach callback: that one runs on the HTTP
@@ -607,15 +649,27 @@ esp_err_t slate_direct_selftest(void)
 
     /* §5.4's immediate failure, which is a return value and not a callback: a
      * caller must never have to decide whether an answer is still coming. */
-    const slate_direct_action_t orphan = {.resource = "living-room",
-                                          .action = SLATE_ACTION_TOGGLE};
-    CHECK(slate_direct_dispatch(1, &orphan) == ESP_ERR_INVALID_STATE,
-          "action with no consumer fails immediately");
+    const slate_action_request_t orphan = {
+        .provider = SLATE_DIRECT_PROVIDER_ID,
+        .resource = "living-room",
+        .action = SLATE_ACTION_TOGGLE,
+        .value_type = SLATE_ACTION_VALUE_NONE,
+    };
+    CHECK(slate_action_dispatch(&orphan, NULL) == ESP_ERR_INVALID_STATE,
+          "bus action with no consumer fails immediately");
     CHECK(!slate_ws_provider_is_attached(SLATE_DIRECT_PROVIDER_ID), "nothing attached at boot");
 
     const slate_direct_action_t nonsense = {.resource = "", .action = SLATE_ACTION_TOGGLE};
     CHECK(slate_direct_dispatch(2, &nonsense) == ESP_ERR_INVALID_ARG,
           "action without a resource is refused");
+
+    const slate_direct_action_t invalid_value = {
+        .resource = "living-room",
+        .action = SLATE_ACTION_SET_POWER,
+        .value_type = (slate_action_value_type_t) -1,
+    };
+    CHECK(slate_direct_dispatch(3, &invalid_value) == ESP_ERR_INVALID_ARG,
+          "action with invalid value type is refused");
 
     const esp_timer_create_args_t timer = {
         .callback = selftest_demo_action,

@@ -39,7 +39,7 @@
 
 #include "esp_err.h"
 
-#include "slate_state.h"
+#include "slate_action.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,10 +48,9 @@ extern "C" {
 /**
  * @brief One semantic action to be carried to the attached consumer (§5.3).
  *
- * As much of §5.3's request as version 1 has a use for: every action in
- * slate_action_t either carries nothing or carries one number, and the pair of
- * flags says which. `params` in the frame is `{}` for the first kind and
- * `{"value": n}` for the second, which is §5.3's own spelling.
+ * As much of §5.3's request as version 1 has a use for: an action carries
+ * nothing, a boolean or a number. `params` in the frame preserves that type as
+ * `{}`, `{"value": true}` or `{"value": n}`.
  *
  * The neutral request type is #18's to define, along with the routing and the
  * capability check that precedes it. This is the narrow thing the bus calls
@@ -60,23 +59,12 @@ extern "C" {
 typedef struct {
     const char *resource;
     slate_action_t action;
-    bool has_value;
-    int32_t value;
+    slate_action_value_type_t value_type;
+    union {
+        bool boolean;
+        int32_t number;
+    } value;
 } slate_direct_action_t;
-
-/**
- * @brief What became of a dispatched action, from §4.2's `action_result`.
- *
- * Runs on the WebSocket receive task, so it must not block. `error` is §5.4's
- * optional stable string and is NULL when the client did not send one; it does
- * not outlive the call.
- *
- * Only a real answer from the consumer arrives here. A dispatch that could not
- * be delivered says so by returning an error instead, so a caller never has to
- * decide whether a callback it has not received yet is still coming.
- */
-typedef void (*slate_direct_result_fn)(void *ctx, uint32_t id, bool success, const char *error);
-
 /**
  * @brief Register the provider, its route and its WebSocket attachment.
  *
@@ -87,9 +75,6 @@ typedef void (*slate_direct_result_fn)(void *ctx, uint32_t id, bool success, con
  * handler slots.
  */
 esp_err_t slate_direct_init(void);
-
-/** @brief Install the result handler. NULL removes it. #18 is its owner. */
-void slate_direct_set_result_handler(slate_direct_result_fn fn, void *ctx);
 
 /**
  * @brief Send one action to the attached consumer (§5.4).

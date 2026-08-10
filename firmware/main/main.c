@@ -26,6 +26,7 @@
 #include "esp_system.h"
 
 #include "slate_api.h"
+#include "slate_action.h"
 #include "slate_coredump.h"
 #include "slate_direct.h"
 #include "slate_display.h"
@@ -571,6 +572,19 @@ void app_main(void)
 
 #ifdef SLATE_STATE_SELFTEST
     slate_state_selftest();
+#endif
+
+    /* §5.3's neutral bus observes provider publications and therefore comes
+     * after the state store, but before adapters register in start_api(). */
+    esp_err_t action_err = slate_action_init();
+    if (action_err != ESP_OK) {
+        ESP_LOGE(TAG, "action bus degraded: %s — continuing", esp_err_to_name(action_err));
+    }
+
+#ifdef SLATE_ACTION_SELFTEST
+    if (action_err == ESP_OK) {
+        slate_action_selftest();
+    }
 #endif
 
     /* Before the radio, so the task and its queue are already present when
