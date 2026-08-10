@@ -12,6 +12,7 @@
 
 #include "cJSON.h"
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_system.h"
@@ -19,17 +20,16 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 
-#include "slate_store.h"
+#include "slate_config.h"
 #include "slate_display.h"
 #include "slate_state.h"
+#include "slate_store.h"
 #include "slate_theme.h"
 #include "slate_wifi.h"
 
 static const char *TAG = "api";
 
 #define MODEL_ID   "waveshare-s3-touch-7"
-#define SCHEMA_MAX 1
-
 typedef struct {
     bool used;
     slate_api_auth_t auth;
@@ -583,7 +583,7 @@ static esp_err_t info_handler(httpd_req_t *req)
 
     bool ok = cJSON_AddStringToObject(root, "model", MODEL_ID) != NULL &&
               cJSON_AddStringToObject(root, "firmware_version", app->version) != NULL &&
-              cJSON_AddNumberToObject(root, "schema_max", SCHEMA_MAX) != NULL &&
+              cJSON_AddNumberToObject(root, "schema_max", SLATE_CONFIG_SCHEMA_MAX) != NULL &&
               cJSON_AddStringToObject(root, "name", slate_store_device_name()) != NULL &&
               add_item(root, "themes", themes_json()) &&
               cJSON_AddStringToObject(root, "pairing",
@@ -638,6 +638,74 @@ static esp_err_t status_handler(httpd_req_t *req)
         return slate_api_send_json(req, NULL);
     }
     return slate_api_send_json(req, root);
+}
+
+/* --- POST /config/validate (§3, §4.1) ---------------------------------- */
+
+static esp_err_t config_validate_handler(httpd_req_t *req)
+{
+    if (req->content_len == 0) {
+        return slate_api_refuse(req, "400 Bad Request", "empty_body");
+    }
+    if (req->content_len > SLATE_CONFIG_MAX_BYTES) {
+        return slate_api_refuse(req, "413 Payload Too Large", "too_large");
+    }
+
+    char *body = heap_caps_malloc_prefer(req->content_len + 1, 2,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (body == NULL) {
+        return slate_api_refuse(req, "500 Internal Server Error", "out_of_memory");
+    }
+
+    size_t received = 0;
+    while (received < req->content_len) {
+        int chunk = httpd_req_recv(req, body + received, req->content_len - received);
+        if (chunk <= 0) {
+            free(body);
+            return slate_api_refuse(req, "400 Bad Request", "invalid_json");
+        }
+        received += (size_t) chunk;
+    }
+    body[received] = '\0';
+
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t result =
+        slate_config_parse(body, received, &config, &report);
+    free(body);
+
+    esp_err_t err;
+    switch (result) {
+    case SLATE_CONFIG_PARSE_OK:
+        slate_config_free(config);
+        httpd_resp_set_status(req, "204 No Content");
+        err = httpd_resp_send(req, NULL, 0);
+        break;
+    case SLATE_CONFIG_PARSE_INVALID_CONFIG: {
+        cJSON *response = slate_config_report_json(&report);
+        if (response != NULL) {
+            httpd_resp_set_status(req, "400 Bad Request");
+        }
+        err = slate_api_send_json(req, response);
+        break;
+    }
+    case SLATE_CONFIG_PARSE_TOO_LARGE:
+        err = slate_api_refuse(req, "413 Payload Too Large", "too_large");
+        break;
+    case SLATE_CONFIG_PARSE_OUT_OF_MEMORY:
+        err = slate_api_refuse(req, "500 Internal Server Error", "out_of_memory");
+        break;
+    case SLATE_CONFIG_PARSE_EMPTY_BODY:
+        err = slate_api_refuse(req, "400 Bad Request", "empty_body");
+        break;
+    case SLATE_CONFIG_PARSE_INVALID_JSON:
+    default:
+        err = slate_api_refuse(req, "400 Bad Request", "invalid_json");
+        break;
+    }
+    slate_config_report_free(&report);
+    return err;
 }
 
 static esp_err_t options_handler(httpd_req_t *req)
@@ -728,6 +796,11 @@ esp_err_t slate_api_init(void)
         .method = HTTP_GET,
         .handler = status_handler,
     };
+    const httpd_uri_t config_validate = {
+        .uri = SLATE_API_BASE_PATH "/config/validate",
+        .method = HTTP_POST,
+        .handler = config_validate_handler,
+    };
     const httpd_uri_t options = {
         .uri = SLATE_API_BASE_PATH "/*",
         .method = HTTP_OPTIONS,
@@ -737,6 +810,9 @@ esp_err_t slate_api_init(void)
     err = slate_api_register_uri(&info, SLATE_API_AUTH_PUBLIC);
     if (err == ESP_OK) {
         err = slate_api_register_uri(&status, SLATE_API_AUTH_DEVICE_TOKEN);
+    }
+    if (err == ESP_OK) {
+        err = slate_api_register_uri(&config_validate, SLATE_API_AUTH_DEVICE_TOKEN);
     }
     if (err == ESP_OK) {
         err = slate_api_register_uri(&options, SLATE_API_AUTH_PUBLIC);
