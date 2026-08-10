@@ -125,9 +125,10 @@ CONFIG_LV_COLOR_DEPTH_16=y
 # than this timer, decide when the next rendered frame may begin.
 CONFIG_LV_DEF_REFR_PERIOD=10
 
-# #21 owns Slate's real bpp:4 type scale. The bring-up pattern needs one small
-# built-in face only, and cannot depend on generated theme assets that do not
-# exist in the firmware tree yet.
+# Keep one built-in face as LVGL's allocator-safe fallback. Slate-owned widgets
+# select #21's generated bpp:4 faces explicitly through slate_theme; this face
+# remains for LVGL internals and any emergency presentation built before those
+# widgets exist.
 CONFIG_LV_FONT_MONTSERRAT_14=y
 
 # The firmware consumes LVGL as a runtime, not as an example gallery. These do

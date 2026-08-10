@@ -11,10 +11,11 @@ firmware/managed_components/
 # on the first boot after an OTA.
 
 # Generated LVGL fonts. The sources of truth are tools/fonts/icons.txt and
-# tools/fonts/generate.sh; the .c files are build output and would otherwise
-# add ~1.1 MB of unreviewable hex to every glyph-list change, permanently.
+# tools/fonts/generate.sh; the generated sources would otherwise add ~1.1 MB
+# of unreviewable hex to every glyph-list change, permanently.
 # Run tools/fonts/generate.sh before building the firmware.
-firmware/main/assets/*.c
+firmware/components/slate_theme/assets/slate_font_*.c
+firmware/components/slate_theme/assets/slate_icons.h
 
 # Font generation scratch — upstream TTFs are fetched, not vendored
 tools/fonts/.work/

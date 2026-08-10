@@ -21,6 +21,7 @@
 
 #include "slate_store.h"
 #include "slate_display.h"
+#include "slate_theme.h"
 #include "slate_wifi.h"
 
 static const char *TAG = "api";
@@ -282,6 +283,25 @@ static bool add_string_or_null(cJSON *object, const char *name, const char *valu
     return cJSON_AddNullToObject(object, name) != NULL;
 }
 
+static cJSON *themes_json(void)
+{
+    cJSON *themes = cJSON_CreateArray();
+    if (themes == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < slate_theme_count(); i++) {
+        const slate_theme_t *theme = slate_theme_at(i);
+        cJSON *id = theme != NULL ? cJSON_CreateString(theme->id) : NULL;
+        if (id == NULL || !cJSON_AddItemToArray(themes, id)) {
+            cJSON_Delete(id);
+            cJSON_Delete(themes);
+            return NULL;
+        }
+    }
+    return themes;
+}
+
 static cJSON *providers_json(void)
 {
     cJSON *providers = cJSON_CreateArray();
@@ -526,7 +546,7 @@ static esp_err_t info_handler(httpd_req_t *req)
               cJSON_AddStringToObject(root, "firmware_version", app->version) != NULL &&
               cJSON_AddNumberToObject(root, "schema_max", SCHEMA_MAX) != NULL &&
               cJSON_AddStringToObject(root, "name", slate_store_device_name()) != NULL &&
-              add_item(root, "themes", cJSON_CreateArray()) &&
+              add_item(root, "themes", themes_json()) &&
               cJSON_AddStringToObject(root, "pairing",
                                       pairing_ready ? "ready" : "degraded") != NULL &&
               add_item(root, "network", network_json(&wifi));
@@ -874,6 +894,8 @@ esp_err_t slate_api_selftest(void)
     int failures = 0;
     failures += !selftest_request("GET /info is public", INFO, 200,
                                   "\"model\":\"" MODEL_ID "\"");
+    failures += !selftest_request("GET /info advertises Midnight", INFO, 200,
+                                  "\"themes\":[\"midnight\"]");
     failures += !selftest_request("GET /status needs a token", STATUS_NO_TOKEN, 401,
                                   "\"error\":\"unauthorized\"");
     failures += !selftest_request("wrong bearer token rejected", STATUS_WRONG_TOKEN, 401,

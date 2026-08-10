@@ -49,6 +49,6 @@ direct_dependencies:
 - idf
 - joltwallet/littlefs
 - lvgl/lvgl
-manifest_hash: 838966a9887508c31d4a9a85d63654f235ab3d5d1489c766c6da501b8107c423
+manifest_hash: edbe1f910ce51bb924cc6195010ba39d381e9f3fc164a9db83cafa33c731469b
 target: esp32s3
 version: 2.0.0
