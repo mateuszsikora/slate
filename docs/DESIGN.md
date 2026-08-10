@@ -205,7 +205,7 @@ Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: B
 | GET    | `/info`            | model, firmware version, `schema_max`, name, available themes, pairing state, current network state. No auth. |
 | GET    | `/config`          | current UI configuration |
 | PUT    | `/config`          | replace configuration; validates, rebuilds the UI, persists. With `?transient=1` (edit mode only) the rebuild happens in RAM and nothing is written to flash — this is what live preview uses, so a drag session does not wear the flash. |
-| POST   | `/config/validate` | validate without saving — returns errors keyed by `tile.id` |
+| POST   | `/config/validate` | validate without saving — `204` when valid, detailed `400` when invalid |
 | GET    | `/providers`       | available providers: id, status and resource count |
 | GET    | `/resources?provider=<id>` | normalized resources available from one provider; used by the picker |
 | POST   | `/direct/state`    | publish one normalized resource snapshot through the direct provider |
@@ -219,6 +219,49 @@ Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: B
 | POST   | `/ota/upload`      | development OTA; raw `.bin` body (section 11.1) |
 | GET    | `/coredump`        | last core dump, if any |
 | POST   | `/factory_reset`   | wipes NVS and LittleFS |
+
+`POST /config/validate` has no ambiguous success state: a valid configuration
+returns `204 No Content`, while an invalid one returns `400 Bad Request`. There
+is no `200 {"valid": false}` response. Validation does not change the active or
+stored configuration.
+
+Document-wide errors and errors belonging to an identifiable tile are kept
+separate. `tile_errors` is keyed by `tile.id`, and each value is an array because
+one tile may violate more than one rule:
+
+```json
+{
+  "error": "invalid_config",
+  "config_errors": [
+    {"code": "home_page_not_found", "path": "/home_page"}
+  ],
+  "tile_errors": {
+    "living-room": [
+      {"code": "tile_overlap", "path": "/pages/0/tiles/2/pos"},
+      {"code": "invalid_size", "path": "/pages/0/tiles/2/size"}
+    ]
+  }
+}
+```
+
+`path` is a JSON Pointer into the submitted document. Codes and paths are the
+public machine-readable contract; firmware does not return presentation text,
+so the editor can localize it. The schema-1 validation vocabulary is
+`schema_required`, `schema_invalid`, `schema_too_new`, `theme_required`,
+`theme_not_found`, `pages_required`, `duplicate_page_id`,
+`home_page_not_found`, `tile_id_required`, `duplicate_tile_id`,
+`invalid_position`, `invalid_size`, `tile_out_of_bounds`, `tile_overlap`,
+`binding_required`, `provider_required` and `resource_required`. A tile without
+an id and a duplicate tile id are document-wide errors because neither has an
+unambiguous `tile.id` bucket. Unknown fields, component types and provider ids
+retain section 3's forward-compatible behavior and are not validation errors.
+
+An empty body and malformed JSON return the standard `400` documents
+`{"error":"empty_body"}` and `{"error":"invalid_json"}`. A body above the
+64 KB limit returns `413 {"error":"too_large"}`, and an allocation failure
+returns `500 {"error":"out_of_memory"}`. `PUT /config` uses the same detailed
+`invalid_config` document on validation failure, leaving the current UI and
+subscriptions untouched.
 
 Network state appears in `/info` as well as `/status`, because a browser that has just joined the setup access point has no token and still has to know what it is looking at:
 
