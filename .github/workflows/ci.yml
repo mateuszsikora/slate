@@ -177,6 +177,7 @@ jobs:
                  -DSLATE_SETUP_SELFTEST=1 \
                  -DSLATE_STATE_SELFTEST=1 \
                  -DSLATE_DIRECT_SELFTEST=1 \
+                 -DSLATE_ACTION_SELFTEST=1 \
                  -DSLATE_COREDUMP_SELFTEST=1 \
                  build
 

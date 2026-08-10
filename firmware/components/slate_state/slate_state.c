@@ -75,6 +75,8 @@ static entry_t *s_entries;
 static size_t s_count;
 static slate_state_wake_fn s_wake;
 static void *s_wake_ctx;
+static slate_state_publish_observer_fn s_publish_observer;
+static void *s_publish_observer_ctx;
 
 #define LOCK()   xSemaphoreTake(s_lock, portMAX_DELAY)
 #define UNLOCK() xSemaphoreGive(s_lock)
@@ -178,7 +180,7 @@ const char *slate_provider_status_str(slate_provider_status_t status)
 
 const char *slate_action_str(slate_action_t action)
 {
-    return action < SLATE_ACTION_COUNT ? ACTION_NAMES[action] : "?";
+    return (unsigned) action < SLATE_ACTION_COUNT ? ACTION_NAMES[action] : "?";
 }
 
 bool slate_action_from_str(const char *name, slate_action_t *out)
@@ -214,7 +216,7 @@ const char *slate_presentation_str(slate_presentation_t presentation)
 
 bool slate_capabilities_have(const slate_capabilities_t *caps, slate_action_t action)
 {
-    return caps != NULL && action < SLATE_ACTION_COUNT &&
+    return caps != NULL && (unsigned) action < SLATE_ACTION_COUNT &&
            (caps->actions & (uint16_t) (1u << action)) != 0;
 }
 
@@ -842,6 +844,8 @@ esp_err_t slate_state_publish(const char *provider, const slate_snapshot_t *snap
      * the moment this one releases it, and a pointer tested afterwards would be
      * asking a question about memory that is no longer ours. */
     bool touched = entry != NULL;
+    slate_state_publish_observer_fn observer = NULL;
+    void *observer_ctx = NULL;
     if (entry == NULL) {
         /* §5.4: publishing an id the configuration does not reference is what
          * `404 resource_not_bound` refuses, and it is the store's memory bound
@@ -878,13 +882,29 @@ esp_err_t slate_state_publish(const char *provider, const slate_snapshot_t *snap
         case SLATE_KIND_SCENE:
             break;
         }
+        observer = s_publish_observer;
+        observer_ctx = s_publish_observer_ctx;
     }
     UNLOCK();
 
+    if (err == ESP_OK && observer != NULL) {
+        observer(observer_ctx, provider, snapshot);
+    }
     if (touched) {
         wake_observer();
     }
     return err;
+}
+
+void slate_state_set_publish_observer(slate_state_publish_observer_fn observer, void *ctx)
+{
+    if (s_lock == NULL) {
+        return;
+    }
+    LOCK();
+    s_publish_observer = observer;
+    s_publish_observer_ctx = ctx;
+    UNLOCK();
 }
 
 /* --- Reading ------------------------------------------------------------- */

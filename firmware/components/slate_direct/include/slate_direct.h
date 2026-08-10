@@ -75,8 +75,6 @@ typedef struct {
  * be delivered says so by returning an error instead, so a caller never has to
  * decide whether a callback it has not received yet is still coming.
  */
-typedef void (*slate_direct_result_fn)(void *ctx, uint32_t id, bool success, const char *error);
-
 /**
  * @brief Register the provider, its route and its WebSocket attachment.
  *
@@ -87,9 +85,6 @@ typedef void (*slate_direct_result_fn)(void *ctx, uint32_t id, bool success, con
  * handler slots.
  */
 esp_err_t slate_direct_init(void);
-
-/** @brief Install the result handler. NULL removes it. #18 is its owner. */
-void slate_direct_set_result_handler(slate_direct_result_fn fn, void *ctx);
 
 /**
  * @brief Send one action to the attached consumer (§5.4).

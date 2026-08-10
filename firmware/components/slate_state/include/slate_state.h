@@ -539,6 +539,24 @@ size_t slate_state_count(void);
  */
 esp_err_t slate_state_publish(const char *provider, const slate_snapshot_t *snapshot);
 
+/**
+ * @brief Observe a successful provider publication after it enters the store.
+ *
+ * The callback runs synchronously on the publishing task, after the store lock
+ * has been released. It therefore must be cheap and may call back into the
+ * store. `provider` and `snapshot` are borrowed for the duration of the call.
+ *
+ * This is deliberately separate from the UI wake/drain path below. A consumer
+ * that has to distinguish a real provider snapshot from a coalesced redraw —
+ * §5.3's action confirmation is the first one — observes the publication here;
+ * components still receive complete current resources on the LVGL task.
+ */
+typedef void (*slate_state_publish_observer_fn)(void *ctx, const char *provider,
+                                                const slate_snapshot_t *snapshot);
+
+/** @brief Install the sole publication observer. NULL removes it. */
+void slate_state_set_publish_observer(slate_state_publish_observer_fn observer, void *ctx);
+
 /* --- Reading (§7) --------------------------------------------------------- */
 
 /**
