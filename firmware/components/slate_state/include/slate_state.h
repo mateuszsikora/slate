@@ -189,6 +189,14 @@ bool slate_action_from_str(const char *name, slate_action_t *out);
  * while their bit is set, and they are here rather than inside the state union
  * because §7.1 hides a control the resource does not advertise — a slider is
  * drawn from the capability, not from the current value.
+ *
+ * An advertised percentage with a zeroed range means the whole range: §5.2
+ * spells one capability as `true` and the next as `{"min":0,"max":100}`, so a
+ * bit without limits is the ordinary encoding and the store fills 0..100 in
+ * rather than leaving each component to invent the same fallback. A range that
+ * is inverted or outside that scale is malformed and the snapshot carrying it
+ * is refused. Colour temperature keeps a zeroed range as "unstated", having no
+ * natural scale to substitute.
  */
 typedef struct {
     uint16_t actions; /**< bitmask of `1u << slate_action_t` */
@@ -377,7 +385,8 @@ esp_err_t slate_state_init(void);
  * borrowed for the duration of the call and belong to the store; a provider
  * that needs them afterwards copies them. `count == 0` is a real instruction
  * and means unsubscribe from everything — §5.1: "Removing the last binding
- * removes the state on the same rebuild."
+ * removes the state on the same rebuild." `resources` is NULL in that case, so
+ * a provider must read the count before the pointer.
  *
  * Called on the binding task, outside the store's lock, so an adapter may call
  * back into the store. A provider that cannot subscribe should report its own
@@ -517,7 +526,8 @@ size_t slate_state_count(void);
  *                           §3.3's "incompatible-binding placeholder" reaches
  *                           the screen for a mismatch that arrived at runtime
  *                           rather than in the configuration.
- *   ESP_ERR_INVALID_ARG     malformed common or kind-specific state —
+ *   ESP_ERR_INVALID_ARG     malformed common or kind-specific state, or a
+ *                           capability range that cannot be drawn —
  *                           `400 invalid_state`.
  *
  * "None disturbs the last confirmed value" (§5.4), the mismatch included: a
@@ -571,8 +581,14 @@ typedef void (*slate_state_visit_fn)(const slate_resource_t *resource, void *ctx
  * superseded. What a component needs is the current value (§5.2), so the drain
  * carries the current value and each resource appears at most once.
  *
- * `fn` runs outside the store's lock, so it may read, publish or bind. A change
- * arriving during the drain is picked up by the next one, with its own wake.
+ * `fn` runs outside the store's lock, so it may read the store and publish into
+ * it. It must not call slate_state_bind(): the drain walks the table by index,
+ * and a rebuild underneath it would renumber the entries it has not reached —
+ * some delivered twice, some not at all. A rebuild is what the drain feeds
+ * anyway, so it belongs after the loop rather than inside it.
+ *
+ * A change arriving during the drain is picked up by the next one, with its own
+ * wake.
  */
 size_t slate_state_drain(slate_state_visit_fn fn, void *ctx);
 

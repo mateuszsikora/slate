@@ -586,6 +586,7 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
     LOCK();
 
     size_t used = 0;
+    bool carried_change = false;
     esp_err_t err = ESP_OK;
     for (size_t i = 0; i < count && err == ESP_OK; i++) {
         /* Several tiles may bind one resource — a 1×1 light beside the same
@@ -628,6 +629,18 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
             entry->updated_us = previous->updated_us;
             entry->available = previous->available;
             entry->mismatch = previous->mismatch;
+
+            /* An undelivered change survives too, and this is not bookkeeping
+             * tidiness. §6.4 builds the replacement tree before activating it,
+             * so the tree is drawn from values read a moment before this call; a
+             * snapshot landing in that window has already set `changed` on the
+             * table being replaced. Dropping the flag here would leave the new
+             * tile showing the value the old table held, with nothing to correct
+             * it until the resource happens to change again — indefinitely, for
+             * a light somebody toggles twice a day. A redundant delivery costs a
+             * tile update; a dropped one is wrong until the next one. */
+            entry->changed = previous->changed;
+            carried_change = carried_change || previous->changed;
         }
     }
 
@@ -646,6 +659,9 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
 
     free(old);
     notify_subscribers();
+    if (carried_change) {
+        wake_observer();
+    }
     ESP_LOGI(TAG, "bound %u resource(s) from %u binding(s)", (unsigned) used, (unsigned) count);
     return ESP_OK;
 }
@@ -707,25 +723,80 @@ static bool state_is_valid(const slate_snapshot_t *snapshot)
     return false;
 }
 
-/** Drop what §5.2 says to ignore, and the ranges of capabilities not advertised. */
+/**
+ * Drop what §5.2 says to ignore, and settle what an unstated range means.
+ *
+ * §5.2 spells one capability as `true` and the next as `{"min":0,"max":100}`,
+ * so an advertised percentage with no range is the ordinary encoding rather
+ * than an adapter's oversight, and every component would otherwise invent the
+ * same fallback separately. A percentage's whole range is the obvious one and
+ * it is filled in here, once. Colour temperature has no such natural scale, so
+ * an unstated range stays unstated and §7.1's control decides what to do with
+ * a capability whose limits it was not given.
+ */
 static slate_capabilities_t normalize_capabilities(const slate_snapshot_t *snapshot)
 {
     slate_capabilities_t caps = snapshot->capabilities;
     caps.actions &= kind_actions(snapshot->kind);
 
-    if (!slate_capabilities_have(&caps, SLATE_ACTION_SET_BRIGHTNESS)) {
+    if (slate_capabilities_have(&caps, SLATE_ACTION_SET_BRIGHTNESS)) {
+        if (caps.brightness_min == 0 && caps.brightness_max == 0) {
+            caps.brightness_max = 100;
+        }
+    } else {
         caps.brightness_min = 0;
         caps.brightness_max = 0;
+    }
+    if (slate_capabilities_have(&caps, SLATE_ACTION_SET_POSITION)) {
+        if (caps.position_min == 0 && caps.position_max == 0) {
+            caps.position_max = 100;
+        }
+    } else {
+        caps.position_min = 0;
+        caps.position_max = 0;
     }
     if (!slate_capabilities_have(&caps, SLATE_ACTION_SET_COLOR_TEMPERATURE)) {
         caps.color_temperature_min = 0;
         caps.color_temperature_max = 0;
     }
-    if (!slate_capabilities_have(&caps, SLATE_ACTION_SET_POSITION)) {
-        caps.position_min = 0;
-        caps.position_max = 0;
-    }
     return caps;
+}
+
+/**
+ * Whether the advertised ranges describe a control that can be drawn.
+ *
+ * Checked after masking, so a range belonging to a capability the kind cannot
+ * have is not held against a snapshot that is otherwise fine. An inverted or
+ * out-of-scale range is malformed rather than unknown, and §5.2's "unknown
+ * capabilities are ignored" is not a licence to hand #18 a `set_brightness`
+ * whose maximum is below its minimum — that is an action bus that refuses
+ * every value a slider can produce, reported against the tile rather than
+ * against the adapter that made it up.
+ *
+ * The percentage capabilities are held to §5.2's own scale, because a state
+ * value outside 0..100 is refused a few lines above and a capability that
+ * promised a wider one would be promising an action whose result cannot be
+ * published back.
+ */
+static bool ranges_are_valid(const slate_capabilities_t *caps)
+{
+    if (slate_capabilities_have(caps, SLATE_ACTION_SET_BRIGHTNESS) &&
+        (caps->brightness_min < 0 || caps->brightness_max > 100 ||
+         caps->brightness_min > caps->brightness_max)) {
+        return false;
+    }
+    if (slate_capabilities_have(caps, SLATE_ACTION_SET_POSITION) &&
+        (caps->position_min < 0 || caps->position_max > 100 ||
+         caps->position_min > caps->position_max)) {
+        return false;
+    }
+    if (slate_capabilities_have(caps, SLATE_ACTION_SET_COLOR_TEMPERATURE) &&
+        !(caps->color_temperature_min == 0 && caps->color_temperature_max == 0) &&
+        (caps->color_temperature_min <= 0 ||
+         caps->color_temperature_min > caps->color_temperature_max)) {
+        return false;
+    }
+    return true;
 }
 
 esp_err_t slate_state_publish(const char *provider, const slate_snapshot_t *snapshot)
@@ -735,6 +806,12 @@ esp_err_t slate_state_publish(const char *provider, const slate_snapshot_t *snap
     }
     if (provider == NULL || snapshot == NULL || !identity_ok(snapshot->resource, SLATE_RESOURCE_ID_MAX) ||
         snapshot->kind > SLATE_KIND_SCENE || !state_is_valid(snapshot)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Before the lock, because it depends on nothing the store holds. */
+    const slate_capabilities_t capabilities = normalize_capabilities(snapshot);
+    if (!ranges_are_valid(&capabilities)) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -757,7 +834,7 @@ esp_err_t slate_state_publish(const char *provider, const slate_snapshot_t *snap
     } else {
         copy_field(entry->name, sizeof(entry->name), snapshot->name);
         copy_field(entry->area, sizeof(entry->area), snapshot->area);
-        entry->capabilities = normalize_capabilities(snapshot);
+        entry->capabilities = capabilities;
         entry->available = snapshot->available;
         entry->mismatch = false;
         entry->changed = true;
@@ -1061,6 +1138,11 @@ esp_err_t slate_state_selftest(void)
     wordless.state.sensor.text[0] = '\0';
     CHECK(slate_state_publish("st-beta", &wordless) == ESP_ERR_INVALID_ARG,
           "a textual sensor with no text is refused");
+    slate_snapshot_t inverted = lamp;
+    inverted.capabilities.brightness_min = 100;
+    inverted.capabilities.brightness_max = 0;
+    CHECK(slate_state_publish("st-alpha", &inverted) == ESP_ERR_INVALID_ARG,
+          "an inverted capability range is refused");
     CHECK(slate_state_get("st-alpha", "lamp", &r) == ESP_OK && r.presentation == SLATE_PRESENT_OK &&
               r.state.light.brightness == 62,
           "no refusal disturbs the last confirmed value");
@@ -1114,6 +1196,30 @@ esp_err_t slate_state_selftest(void)
     CHECK(slate_state_get("st-alpha", "lamp", &r) == ESP_OK && r.presentation == SLATE_PRESENT_OK &&
               r.state.light.brightness == 40,
           "a surviving binding keeps its value across a rebuild");
+
+    slate_snapshot_t unstated = lamp;
+    unstated.capabilities.brightness_min = 0;
+    unstated.capabilities.brightness_max = 0;
+    CHECK(slate_state_publish("st-alpha", &unstated) == ESP_OK &&
+              slate_state_get("st-alpha", "lamp", &r) == ESP_OK &&
+              r.capabilities.brightness_min == 0 && r.capabilities.brightness_max == 100,
+          "an unstated percentage range becomes the whole one");
+
+    /* §6.4 draws the replacement tree from values read before the rebuild, so a
+     * snapshot landing in that window is one the new tree has not seen. It has
+     * to survive the swap, or the tile keeps the old table's value until the
+     * resource happens to move again. */
+    slate_snapshot_t late = lamp;
+    late.state.light.brightness = 7;
+    slate_state_drain(NULL, NULL);
+    s_wakes = 0;
+    CHECK(slate_state_publish("st-alpha", &late) == ESP_OK &&
+              slate_state_bind(set, SET_LEN) == ESP_OK,
+          "publish, then rebuild before draining");
+    visit = (visit_t){0};
+    CHECK(slate_state_drain(fixture_visit, &visit) == 1 && visit.last.state.light.brightness == 7,
+          "an undelivered change survives the rebuild");
+    CHECK(s_wakes == 2, "the rebuild wakes the observer for what it carried");
 
     slate_state_provider_info_t info;
     size_t found = 0;
