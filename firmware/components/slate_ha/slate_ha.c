@@ -865,19 +865,22 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         context->before_connect_count = 0;
         context->redirected = false;
         payload_reset(&context->message);
-        atomic_store(&connection->authenticated, false);
+        bool was_authenticated = atomic_exchange(&connection->authenticated, false);
         atomic_store(&connection->subscription_id, 0);
+        if (was_authenticated) {
+            /* ERROR is sometimes followed by DISCONNECTED, and sometimes is
+             * the only event visible before the socket stalls. Close action
+             * delivery on the first transport failure exactly once. */
+            slate_action_provider_unavailable(SLATE_HA_PROVIDER_ID,
+                                              "transport_disconnected");
+            command_send(CMD_CLEAR_ACTIONS, context->generation, NULL, 0);
+        }
         if (!atomic_load(&connection->auth_rejected)) {
             slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_OFFLINE);
             /* A transport failure emits ERROR then DISCONNECTED; a clean
              * server shutdown emits CLOSED instead. Advance on either terminal
              * event, never on ERROR, so one outage consumes exactly one step. */
             if (id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_CLOSED) {
-                /* Revert on the transport event rather than behind the manager
-                 * queue; the queued command only owns its private id table. */
-                slate_action_provider_unavailable(SLATE_HA_PROVIDER_ID,
-                                                  "transport_disconnected");
-                command_send(CMD_CLEAR_ACTIONS, context->generation, NULL, 0);
                 size_t index = atomic_load(&connection->backoff_index);
                 esp_websocket_client_set_reconnect_timeout(event->client,
                                                            (int) backoff_at(index));
@@ -1128,6 +1131,7 @@ static void manager_task(void *arg)
             break;
         case CMD_WIFI_DOWN:
             s_wifi_up = false;
+            atomic_store(&s_main.authenticated, false);
             clear_bus_actions("wifi_disconnected");
             if (slate_store_ha_token_is_set() &&
                 !atomic_load(&s_main.auth_rejected)) {

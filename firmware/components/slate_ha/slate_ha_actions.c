@@ -315,6 +315,19 @@ esp_err_t slate_ha_actions_selftest(void)
               request.bus_id == 41 && strcmp(request.resource, source.resource) == 0,
           "copy borrowed semantic request");
 
+    slate_action_request_t invalid = source;
+    invalid.provider = "direct";
+    CHECK(slate_ha_action_request_copy(&request, 45, &invalid) == ESP_ERR_INVALID_ARG,
+          "reject request for another provider");
+    invalid = source;
+    invalid.resource = "switch.slate_selftest";
+    CHECK(slate_ha_action_request_copy(&request, 45, &invalid) == ESP_ERR_INVALID_ARG,
+          "reject non-light resource");
+    invalid = source;
+    invalid.action = SLATE_ACTION_OPEN;
+    CHECK(slate_ha_action_request_copy(&request, 45, &invalid) == ESP_ERR_NOT_SUPPORTED,
+          "reject unsupported light action");
+
     cJSON *frame = NULL;
     CHECK(slate_ha_action_frame(101, &request, &frame) == ESP_OK &&
               number_field(frame, "id", 101) &&
@@ -346,6 +359,9 @@ esp_err_t slate_ha_actions_selftest(void)
                            "brightness_pct", 62),
           "brightness maps to turn_on percentage");
     cJSON_Delete(frame);
+    source.value.number = 101;
+    CHECK(slate_ha_action_request_copy(&request, 45, &source) == ESP_ERR_INVALID_ARG,
+          "reject brightness above percentage range");
 
     source.action = SLATE_ACTION_SET_COLOR_TEMPERATURE;
     source.value.number = 2700;
@@ -355,12 +371,23 @@ esp_err_t slate_ha_actions_selftest(void)
                            "color_temp_kelvin", 2700),
           "colour temperature maps to kelvin");
     cJSON_Delete(frame);
+    source.value.number = 0;
+    CHECK(slate_ha_action_request_copy(&request, 45, &source) == ESP_ERR_INVALID_ARG,
+          "reject non-positive colour temperature");
+
+    cJSON *accepted = cJSON_Parse("{\"success\":true,\"result\":null}");
+    bool success = false;
+    char error[SLATE_HA_ACTION_ERROR_MAX + 1] = "stale";
+    CHECK(accepted != NULL &&
+              slate_ha_action_result_fields(accepted, &success, error, sizeof(error)) == ESP_OK &&
+              success && error[0] == '\0',
+          "successful HA result has no failure reason");
+    cJSON_Delete(accepted);
 
     cJSON *denied = cJSON_Parse(
         "{\"success\":false,\"error\":{\"code\":\"home_assistant_error\","
         "\"message\":\"Unauthorized\"}}");
-    bool success = true;
-    char error[SLATE_HA_ACTION_ERROR_MAX + 1];
+    success = true;
     CHECK(denied != NULL &&
               slate_ha_action_result_fields(denied, &success, error, sizeof(error)) == ESP_OK &&
               !success && strcmp(error, "unauthorized") == 0,
@@ -376,6 +403,13 @@ esp_err_t slate_ha_actions_selftest(void)
           "ordinary HA failure code preserved");
     cJSON_Delete(failed);
 
+    cJSON *malformed = cJSON_Parse("{\"success\":\"yes\"}");
+    CHECK(malformed != NULL &&
+              slate_ha_action_result_fields(malformed, &success, error, sizeof(error)) ==
+                  ESP_ERR_INVALID_ARG,
+          "reject malformed HA result");
+    cJSON_Delete(malformed);
+
     slate_ha_action_clear();
     uint32_t bus_id = 0;
     CHECK(track_at(7, 201, 51, 1000) == ESP_OK &&
@@ -386,6 +420,18 @@ esp_err_t slate_ha_actions_selftest(void)
     CHECK(track_at(7, 202, 52, 1000) == ESP_OK &&
               !take_at(7, 202, &bus_id, 1000 + ACTION_CORRELATION_US),
           "late result correlation expires");
+    slate_ha_action_clear();
+
+    bool filled = true;
+    for (uint32_t i = 1; i <= SLATE_STATE_MAX_RESOURCES; i++) {
+        if (track_at(8, i, i, 2000) != ESP_OK) {
+            filled = false;
+            break;
+        }
+    }
+    CHECK(filled && track_at(8, SLATE_STATE_MAX_RESOURCES + 1,
+                             SLATE_STATE_MAX_RESOURCES + 1, 2000) == ESP_ERR_NO_MEM,
+          "correlation table enforces the resource bound");
     slate_ha_action_clear();
 
 #undef CHECK
