@@ -46,6 +46,15 @@ static const slate_diagnostic_palette_t DIAGNOSTICS = {
 
 static const slate_theme_t *const THEMES[] = {&MIDNIGHT};
 
+typedef struct {
+    const char *name;
+    const char *glyph;
+} icon_entry_t;
+
+#define ICON_ENTRY(name, glyph) {name, glyph},
+static const icon_entry_t ICONS[] = {SLATE_ICON_FOREACH(ICON_ENTRY)};
+#undef ICON_ENTRY
+
 const slate_theme_t *slate_theme_default(void)
 {
     return THEMES[0];
@@ -72,6 +81,19 @@ size_t slate_theme_count(void)
 const slate_theme_t *slate_theme_at(size_t index)
 {
     return index < slate_theme_count() ? THEMES[index] : NULL;
+}
+
+const char *slate_icon_find(const char *name)
+{
+    if (name == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0; i < sizeof(ICONS) / sizeof(ICONS[0]); i++) {
+        if (strcmp(ICONS[i].name, name) == 0) {
+            return ICONS[i].glyph;
+        }
+    }
+    return NULL;
 }
 
 const slate_diagnostic_palette_t *slate_diagnostic_palette(void)
