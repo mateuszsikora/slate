@@ -20,6 +20,7 @@
 
 #include "slate_action.h"
 #include "slate_display.h"
+#include "slate_sensor.h"
 #include "slate_state.h"
 #include "slate_store.h"
 #include "slate_theme.h"
@@ -50,6 +51,7 @@ typedef struct {
     lv_obj_t *tile;
     lv_obj_t *name;
     lv_obj_t *detail;
+    slate_sensor_view_t sensor;
 } binding_view_t;
 
 typedef struct {
@@ -203,12 +205,35 @@ static void style_presentation(binding_view_t *view, slate_presentation_t presen
         LV_PART_MAIN);
 }
 
+static void update_sensor_view(binding_view_t *view, const slate_resource_t *resource,
+                               const slate_theme_t *theme)
+{
+    slate_sensor_update(&view->sensor, resource, theme);
+
+    if (resource->presentation == SLATE_PRESENT_MISSING ||
+        resource->presentation == SLATE_PRESENT_MISSING_PROVIDER ||
+        resource->presentation == SLATE_PRESENT_INCOMPATIBLE) {
+        char identity[SLATE_PROVIDER_ID_MAX + SLATE_RESOURCE_ID_MAX + 2];
+        snprintf(identity, sizeof(identity), "%s:%s", view->provider, view->resource);
+        lv_label_set_text(view->name, identity);
+    } else if (!view->label_override) {
+        lv_label_set_text(view->name,
+                          resource->name[0] != '\0' ? resource->name : view->resource);
+    }
+}
+
 static void update_view(binding_view_t *view, const slate_resource_t *resource,
                         const slate_theme_t *theme)
 {
     slate_action_feedback_t feedback = {0};
     if (slate_action_feedback(view->provider, view->resource, &feedback) != ESP_OK) {
         feedback.phase = SLATE_ACTION_IDLE;
+    }
+
+    if (view->kind == SLATE_KIND_SENSOR && view->sensor.value != NULL) {
+        update_sensor_view(view, resource, theme);
+        style_presentation(view, resource->presentation, feedback.phase, theme);
+        return;
     }
 
     if (!view->label_override && resource->name[0] != '\0') {
@@ -403,6 +428,25 @@ static bool build_unknown_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
     return true;
 }
 
+static bool build_sensor_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
+                              lv_obj_t *object, size_t *view_index)
+{
+    const slate_theme_t *theme = tree->theme;
+    const slate_config_binding_t *binding = &tile->bindings[0];
+    binding_view_t *view = &tree->views[(*view_index)++];
+
+    if (strlcpy(view->provider, binding->provider, sizeof(view->provider)) >=
+            sizeof(view->provider) ||
+        strlcpy(view->resource, binding->resource, sizeof(view->resource)) >=
+            sizeof(view->resource)) {
+        return false;
+    }
+    view->kind = SLATE_KIND_SENSOR;
+    view->label_override = tile->label != NULL;
+    view->tile = object;
+    return slate_sensor_build(object, tile, theme, &view->sensor, &view->name);
+}
+
 static bool build_known_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
                              lv_obj_t *object, size_t *view_index)
 {
@@ -490,6 +534,11 @@ static ui_tree_t *build_config_tree(const slate_config_t *config)
 #endif
         if (tile->component == SLATE_COMPONENT_UNKNOWN) {
             if (!build_unknown_tile(tree, tile, object)) {
+                tree_destroy(tree);
+                return NULL;
+            }
+        } else if (tile->component == SLATE_COMPONENT_SENSOR) {
+            if (!build_sensor_tile(tree, tile, object, &view_index)) {
                 tree_destroy(tree);
                 return NULL;
             }
@@ -1002,6 +1051,30 @@ static slate_config_t *test_config(int cycle)
     return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
 }
 
+static slate_config_t *sensor_test_config(void)
+{
+    static const char JSON[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"sensors\",\"pages\":[{"
+        "\"id\":\"sensors\",\"title\":\"Sensor component #23\",\"tiles\":["
+        "{\"id\":\"temperature\",\"type\":\"sensor\",\"pos\":[0,0],\"size\":[1,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"temperature\"}},"
+        "{\"id\":\"humidity\",\"type\":\"sensor\",\"pos\":[1,0],\"size\":[1,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"humidity\"}},"
+        "{\"id\":\"pressure\",\"type\":\"sensor\",\"pos\":[2,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"pressure\"}},"
+        "{\"id\":\"power\",\"type\":\"sensor\",\"pos\":[0,1],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"power\"}},"
+        "{\"id\":\"status\",\"type\":\"sensor\",\"pos\":[2,1],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"status\"}}]}]}";
+
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
 static void settle_frame(void)
 {
     /* The real RGB flush completes from VSYNC. Yielding the owner task lets the
@@ -1156,6 +1229,71 @@ static esp_err_t publish_test_states(void)
     return err;
 }
 
+static esp_err_t publish_sensor_test_states(void)
+{
+    static const slate_snapshot_t SENSORS[] = {
+        {
+            .resource = "temperature",
+            .kind = SLATE_KIND_SENSOR,
+            .name = "Outdoor temperature",
+            .available = true,
+            .state.sensor = {.numeric = true, .value = -12.4, .unit = "°C",
+                             .measurement = SLATE_MEASUREMENT_TEMPERATURE},
+        },
+        {
+            .resource = "humidity",
+            .kind = SLATE_KIND_SENSOR,
+            .name = "Bathroom humidity",
+            .available = true,
+            .state.sensor = {.numeric = true, .value = 58.6, .unit = "%",
+                             .measurement = SLATE_MEASUREMENT_HUMIDITY},
+        },
+        {
+            .resource = "pressure",
+            .kind = SLATE_KIND_SENSOR,
+            .name = "Air pressure",
+            .available = true,
+            .state.sensor = {.numeric = true, .value = 1013.25, .unit = "hPa",
+                             .measurement = SLATE_MEASUREMENT_PRESSURE},
+        },
+        {
+            .resource = "power",
+            .kind = SLATE_KIND_SENSOR,
+            .name = "House power",
+            .available = true,
+            .state.sensor = {.numeric = true, .value = 42.75, .unit = "W",
+                             .measurement = SLATE_MEASUREMENT_POWER},
+        },
+        {
+            .resource = "status",
+            .kind = SLATE_KIND_SENSOR,
+            .name = "Air quality",
+            .available = true,
+            .state.sensor = {.numeric = false, .text = "Nominal",
+                             .measurement = SLATE_MEASUREMENT_NONE},
+        },
+    };
+
+    for (size_t i = 0; i < sizeof(SENSORS) / sizeof(SENSORS[0]); i++) {
+        esp_err_t err = slate_state_publish("direct", &SENSORS[i]);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    slate_state_drain(discard_changed, NULL);
+    update_all();
+    return ESP_OK;
+}
+
+static bool sensor_view_text(const char *resource, const char *value, const char *unit)
+{
+    binding_view_t *view = find_view("direct", resource);
+    return view != NULL && view->kind == SLATE_KIND_SENSOR && view->sensor.value != NULL &&
+           view->sensor.unit != NULL &&
+           strcmp(lv_label_get_text(view->sensor.value), value) == 0 &&
+           strcmp(lv_label_get_text(view->sensor.unit), unit) == 0;
+}
+
 static esp_err_t selftest_on_task(void)
 {
     unsigned checks = 0;
@@ -1266,8 +1404,62 @@ static esp_err_t selftest_on_task(void)
              "the direct-provider tile observed its state");
     UI_CHECK(fixture_view != NULL &&
                  strcmp(lv_label_get_text(fixture_view->name), "Fixture temperature") == 0 &&
-                 strstr(lv_label_get_text(fixture_view->detail), "ok") != NULL,
+                 strcmp(lv_label_get_text(fixture_view->sensor.value), "21.4") == 0 &&
+                 strcmp(lv_label_get_text(fixture_view->sensor.unit), "°C") == 0,
              "the fixture tile observed the same normalized path");
+
+    slate_config_t *sensors = sensor_test_config();
+    UI_CHECK(sensors != NULL && rebuild_on_task(sensors) == ESP_OK,
+             "sensor component test dashboard activated");
+    if (sensors != NULL) {
+        slate_config_free(sensors);
+    }
+    UI_CHECK(publish_sensor_test_states() == ESP_OK,
+             "all normalized sensor measurements published");
+    UI_CHECK(sensor_view_text("temperature", "-12.4", "°C"),
+             "temperature keeps one decimal and its unit");
+    UI_CHECK(sensor_view_text("humidity", "59", "%"),
+             "humidity rounds to a readable whole percent");
+    UI_CHECK(sensor_view_text("pressure", "1013", "hPa"),
+             "pressure rounds to a readable whole value");
+    UI_CHECK(sensor_view_text("power", "42.8", "W"),
+             "power keeps useful precision and its unit");
+    UI_CHECK(sensor_view_text("status", "Nominal", ""),
+             "textual normalized sensor values render unchanged");
+
+    binding_view_t *temperature = find_view("direct", "temperature");
+    binding_view_t *humidity = find_view("direct", "humidity");
+    binding_view_t *pressure = find_view("direct", "pressure");
+    binding_view_t *power = find_view("direct", "power");
+    UI_CHECK(temperature != NULL && temperature->sensor.icon == NULL && humidity != NULL &&
+                 humidity->sensor.icon == NULL,
+             "1x1 sensors omit the leading icon");
+    UI_CHECK(pressure != NULL && pressure->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(pressure->sensor.icon), SLATE_ICON_GAUGE) == 0 &&
+                 power != NULL && power->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(power->sensor.icon), SLATE_ICON_LIGHTNING_BOLT) == 0,
+             "2x1 sensors select icons from normalized measurement");
+    UI_CHECK(temperature != NULL && !lv_obj_has_flag(temperature->tile, LV_OBJ_FLAG_CLICKABLE) &&
+                 pressure != NULL && !lv_obj_has_flag(pressure->tile, LV_OBJ_FLAG_CLICKABLE),
+             "sensor variants expose no action target");
+
+    const slate_snapshot_t unavailable = {
+        .resource = "humidity",
+        .kind = SLATE_KIND_SENSOR,
+        .name = "Bathroom humidity",
+        .available = false,
+        .state.sensor = {.numeric = true, .value = 58.6, .unit = "%",
+                         .measurement = SLATE_MEASUREMENT_HUMIDITY},
+    };
+    esp_err_t unavailable_err = slate_state_publish("direct", &unavailable);
+    if (unavailable_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(unavailable_err == ESP_OK && sensor_view_text("humidity", "-", "%") &&
+                 humidity != NULL &&
+                 lv_obj_get_style_opa(humidity->tile, LV_PART_MAIN) == LV_OPA_50,
+             "unavailable sensor keeps its unit and renders a dimmed dash");
 
     ESP_LOGI(TAG, "selftest: %u check(s), %u failure(s)", checks, failures);
 #undef UI_CHECK
