@@ -3,6 +3,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "lvgl.h"
 
@@ -18,6 +19,11 @@ typedef struct {
     bool label_override;
     bool compact;
     bool updating;
+    bool pending_animation;
+    bool temperature_range_valid;
+    bool temperature_range_advertised;
+    int32_t temperature_min;
+    int32_t temperature_max;
     lv_obj_t *tile;
     lv_obj_t *icon;
     lv_obj_t *name;

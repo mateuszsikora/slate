@@ -1190,6 +1190,24 @@ static slate_config_t *light_test_config(void)
     return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
 }
 
+static slate_config_t *light_layout_test_config(void)
+{
+    static const char JSON[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"layouts\",\"pages\":[{"
+        "\"id\":\"layouts\",\"title\":\"Light layout fallbacks #22\",\"tiles\":["
+        "{\"id\":\"vertical\",\"type\":\"light\",\"pos\":[0,0],\"size\":[1,2],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"living-room\"}},"
+        "{\"id\":\"panoramic\",\"type\":\"light\",\"pos\":[0,2],\"size\":[4,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"kitchen\"}}]}]}";
+
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
 static slate_config_t *light_action_test_config(void)
 {
     static const char JSON[] =
@@ -1198,7 +1216,10 @@ static slate_config_t *light_action_test_config(void)
         "{\"id\":\"toggle\",\"type\":\"light\",\"pos\":[0,0],\"size\":[1,1],"
         "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"action-toggle\"}},"
         "{\"id\":\"dimmer\",\"type\":\"light\",\"pos\":[1,0],\"size\":[2,1],"
-        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"action-dimmer\"}}]}]}";
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"action-dimmer\"}},"
+        "{\"id\":\"temperature\",\"type\":\"light\",\"pos\":[0,1],\"size\":[2,2],"
+        "\"binding\":{\"provider\":\"ui-fixture\","
+        "\"resource\":\"action-temperature\"}}]}]}";
 
     slate_config_t *config = NULL;
     slate_config_report_t report;
@@ -1490,7 +1511,43 @@ static esp_err_t publish_light_test_states(void)
     return ESP_OK;
 }
 
-static esp_err_t publish_action_test_states(bool toggled, int16_t brightness)
+static esp_err_t publish_light_layout_test_states(void)
+{
+    const slate_snapshot_t vertical = {
+        .resource = "living-room",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Living room",
+        .available = true,
+        .capabilities = {.actions = 1u << SLATE_ACTION_TOGGLE},
+        .state.light = {.on = true, .brightness = SLATE_STATE_ABSENT,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    const slate_snapshot_t panoramic = {
+        .resource = "kitchen",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Kitchen",
+        .available = true,
+        .capabilities = {
+            .actions = 1u << SLATE_ACTION_SET_BRIGHTNESS,
+            .brightness_min = 0,
+            .brightness_max = 100,
+        },
+        .state.light = {.on = true, .brightness = 62,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    esp_err_t err = slate_state_publish("direct", &vertical);
+    if (err == ESP_OK) {
+        err = slate_state_publish("direct", &panoramic);
+    }
+    if (err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    return err;
+}
+
+static esp_err_t publish_action_test_states(bool toggled, int16_t brightness,
+                                            int16_t color_temperature)
 {
     const slate_snapshot_t toggle = {
         .resource = "action-toggle",
@@ -1514,9 +1571,23 @@ static esp_err_t publish_action_test_states(bool toggled, int16_t brightness)
         .state.light = {.on = true, .brightness = brightness,
                         .color_temperature = SLATE_STATE_ABSENT},
     };
+    const slate_snapshot_t temperature = {
+        .resource = "action-temperature",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Action temperature",
+        .available = true,
+        .capabilities = {
+            .actions = 1u << SLATE_ACTION_SET_COLOR_TEMPERATURE,
+        },
+        .state.light = {.on = true, .brightness = SLATE_STATE_ABSENT,
+                        .color_temperature = color_temperature},
+    };
     esp_err_t err = slate_state_publish("ui-fixture", &toggle);
     if (err == ESP_OK) {
         err = slate_state_publish("ui-fixture", &dimmer);
+    }
+    if (err == ESP_OK) {
+        err = slate_state_publish("ui-fixture", &temperature);
     }
     if (err == ESP_OK) {
         slate_state_drain(discard_changed, NULL);
@@ -1792,9 +1863,11 @@ static esp_err_t selftest_on_task(void)
     UI_CHECK(compact != NULL && compact->light.compact && compact->light.state_dot != NULL &&
                  compact->light.brightness_slider == NULL &&
                  lv_obj_has_flag(compact->tile, LV_OBJ_FLAG_CLICKABLE) &&
+                 !lv_obj_has_flag(compact->light.state_dot, LV_OBJ_FLAG_CLICKABLE) &&
+                 !lv_obj_has_flag(compact->light.state_dot, LV_OBJ_FLAG_SCROLLABLE) &&
                  strcmp(lv_label_get_text(compact->light.icon),
                         SLATE_ICON_LIGHTBULB_ON) == 0,
-             "1x1 light renders state and exposes semantic toggle");
+             "1x1 light exposes toggle without a dead state-dot target");
     UI_CHECK(wide != NULL && wide->light.brightness_slider != NULL &&
                  wide->light.temperature_slider == NULL &&
                  !lv_obj_has_flag(wide->light.brightness_slider, LV_OBJ_FLAG_HIDDEN) &&
@@ -1854,10 +1927,28 @@ static esp_err_t selftest_on_task(void)
     }
     UI_CHECK(unknown_temperature_err == ESP_OK && large != NULL &&
                  !lv_obj_has_flag(large->light.temperature_slider, LV_OBJ_FLAG_HIDDEN) &&
-                 lv_slider_get_min_value(large->light.temperature_slider) == 2000 &&
-                 lv_slider_get_max_value(large->light.temperature_slider) == 6500 &&
+                 lv_slider_get_min_value(large->light.temperature_slider) == 1800 &&
+                 lv_slider_get_max_value(large->light.temperature_slider) == 4800 &&
                  strcmp(lv_label_get_text(large->light.temperature_value), "-") == 0,
-             "unstated colour range falls back to a useful neutral range");
+             "unstated colour range remains stable when the value disappears");
+
+    slate_snapshot_t no_temperature = unknown_temperature;
+    no_temperature.capabilities.actions = 1u << SLATE_ACTION_SET_BRIGHTNESS;
+    esp_err_t no_temperature_err = slate_state_publish("direct", &no_temperature);
+    if (no_temperature_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    esp_err_t default_temperature_err = slate_state_publish("direct", &unknown_temperature);
+    if (default_temperature_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(no_temperature_err == ESP_OK && default_temperature_err == ESP_OK &&
+                 large != NULL &&
+                 lv_slider_get_min_value(large->light.temperature_slider) == 2000 &&
+                 lv_slider_get_max_value(large->light.temperature_slider) == 6500,
+             "new unstated colour control receives the neutral fallback range");
 
     const slate_snapshot_t unavailable_light = {
         .resource = "kitchen",
@@ -1883,17 +1974,40 @@ static esp_err_t selftest_on_task(void)
                  lv_obj_get_style_opa(wide->tile, LV_PART_MAIN) == LV_OPA_50,
              "unavailable light keeps controls but renders a dimmed dash");
 
+    slate_config_t *light_layouts = light_layout_test_config();
+    bool light_layouts_active = light_layouts != NULL &&
+                                rebuild_on_task(light_layouts) == ESP_OK;
+    UI_CHECK(light_layouts_active && verify_layout(light_layouts),
+             "valid 1x2 and 4x1 light layouts keep exact grid geometry");
+    if (light_layouts != NULL) {
+        slate_config_free(light_layouts);
+    }
+    UI_CHECK(light_layouts_active && publish_light_layout_test_states() == ESP_OK,
+             "fallback light layouts received normalized state");
+    binding_view_t *vertical = find_view("direct", "living-room");
+    binding_view_t *panoramic = find_view("direct", "kitchen");
+    UI_CHECK(vertical != NULL && vertical->light.compact &&
+                 vertical->light.brightness_slider == NULL &&
+                 vertical->light.state_dot != NULL &&
+                 !lv_obj_has_flag(vertical->light.state_dot, LV_OBJ_FLAG_CLICKABLE),
+             "1x2 light uses the width-safe compact presentation");
+    UI_CHECK(panoramic != NULL && panoramic->light.brightness_slider != NULL &&
+                 lv_obj_get_width(panoramic->light.brightness_slider) ==
+                     lv_obj_get_content_width(panoramic->tile) - 64,
+             "4x1 brightness control expands without leaving its tile");
+
     slate_config_t *light_actions = light_action_test_config();
     UI_CHECK(light_actions != NULL && rebuild_on_task(light_actions) == ESP_OK,
              "semantic light action dashboard activated");
     if (light_actions != NULL) {
         slate_config_free(light_actions);
     }
-    UI_CHECK(publish_action_test_states(true, 62) == ESP_OK,
+    UI_CHECK(publish_action_test_states(true, 62, 3200) == ESP_OK,
              "action fixtures published normalized light state");
 
     binding_view_t *action_toggle = find_view("ui-fixture", "action-toggle");
     binding_view_t *action_dimmer = find_view("ui-fixture", "action-dimmer");
+    binding_view_t *action_temperature = find_view("ui-fixture", "action-temperature");
     unsigned calls_before = s_fixture.action_calls;
     lv_result_t toggle_result = action_toggle != NULL
                                     ? lv_obj_send_event(action_toggle->tile,
@@ -1902,6 +2016,7 @@ static esp_err_t selftest_on_task(void)
     slate_action_feedback_t toggle_feedback = {0};
     esp_err_t toggle_feedback_err = slate_action_feedback(
         "ui-fixture", "action-toggle", &toggle_feedback);
+    update_all();
     UI_CHECK(toggle_result == LV_RESULT_OK &&
                  s_fixture.action_calls == calls_before + 1 &&
                  strcmp(s_fixture.action_resource, "action-toggle") == 0 &&
@@ -1909,12 +2024,14 @@ static esp_err_t selftest_on_task(void)
                  s_fixture.value_type == SLATE_ACTION_VALUE_NONE &&
                  toggle_feedback_err == ESP_OK &&
                  toggle_feedback.phase == SLATE_ACTION_PENDING &&
-                 !toggle_feedback.optimistic.light.on,
-             "1x1 tap emits provider-neutral toggle with optimistic state");
-    UI_CHECK(publish_action_test_states(false, 62) == ESP_OK,
+                 !toggle_feedback.optimistic.light.on &&
+                 action_toggle->light.pending_animation,
+             "1x1 tap emits optimistic toggle with a pending pulse");
+    UI_CHECK(publish_action_test_states(false, 62, 3200) == ESP_OK,
              "matching state confirms optimistic toggle");
     UI_CHECK(slate_action_feedback("ui-fixture", "action-toggle", &toggle_feedback) == ESP_OK &&
-                 toggle_feedback.phase == SLATE_ACTION_IDLE,
+                 toggle_feedback.phase == SLATE_ACTION_IDLE &&
+                 !action_toggle->light.pending_animation,
              "matching toggle snapshot clears pending state");
 
     if (action_dimmer != NULL) {
@@ -1939,26 +2056,75 @@ static esp_err_t selftest_on_task(void)
                  brightness_feedback.phase == SLATE_ACTION_PENDING &&
                  brightness_feedback.optimistic.light.brightness == 37 &&
                  strcmp(lv_label_get_text(action_dimmer->light.brightness_value), "37%") == 0 &&
-                 lv_obj_has_state(action_dimmer->light.brightness_slider, LV_STATE_DISABLED),
+                 lv_obj_has_state(action_dimmer->light.brightness_slider, LV_STATE_DISABLED) &&
+                 action_dimmer->light.pending_animation,
              "brightness release emits one semantic optimistic action");
 
     slate_action_result("ui-fixture", s_fixture.action_id, false, "fixture_failure");
     update_all();
     UI_CHECK(action_dimmer != NULL &&
                  strcmp(lv_label_get_text(action_dimmer->light.brightness_value), "62%") == 0 &&
-                 lv_obj_get_style_border_width(action_dimmer->tile, LV_PART_MAIN) == 2,
+                 lv_obj_get_style_border_width(action_dimmer->tile, LV_PART_MAIN) == 2 &&
+                 !action_dimmer->light.pending_animation,
              "failed brightness action reverts and renders error state");
 
     if (action_dimmer != NULL) {
         lv_slider_set_value(action_dimmer->light.brightness_slider, 55, LV_ANIM_OFF);
         lv_obj_send_event(action_dimmer->light.brightness_slider, LV_EVENT_RELEASED, NULL);
     }
-    UI_CHECK(publish_action_test_states(false, 55) == ESP_OK,
+    UI_CHECK(publish_action_test_states(false, 55, 3200) == ESP_OK,
              "matching brightness snapshot confirms action");
     UI_CHECK(slate_action_feedback("ui-fixture", "action-dimmer", &brightness_feedback) == ESP_OK &&
                  brightness_feedback.phase == SLATE_ACTION_IDLE && action_dimmer != NULL &&
                  strcmp(lv_label_get_text(action_dimmer->light.brightness_value), "55%") == 0,
              "confirmed brightness clears pending presentation");
+
+    int32_t temperature_min = action_temperature != NULL
+                                  ? lv_slider_get_min_value(
+                                        action_temperature->light.temperature_slider)
+                                  : 0;
+    int32_t temperature_max = action_temperature != NULL
+                                  ? lv_slider_get_max_value(
+                                        action_temperature->light.temperature_slider)
+                                  : 0;
+    if (action_temperature != NULL) {
+        lv_slider_set_value(action_temperature->light.temperature_slider,
+                            4100, LV_ANIM_OFF);
+    }
+    calls_before = s_fixture.action_calls;
+    lv_result_t temperature_result =
+        action_temperature != NULL
+            ? lv_obj_send_event(action_temperature->light.temperature_slider,
+                                LV_EVENT_RELEASED, NULL)
+            : LV_RESULT_INVALID;
+    slate_action_feedback_t temperature_feedback = {0};
+    esp_err_t temperature_feedback_err = slate_action_feedback(
+        "ui-fixture", "action-temperature", &temperature_feedback);
+    update_all();
+    UI_CHECK(temperature_result == LV_RESULT_OK &&
+                 s_fixture.action_calls == calls_before + 1 &&
+                 strcmp(s_fixture.action_resource, "action-temperature") == 0 &&
+                 s_fixture.action == SLATE_ACTION_SET_COLOR_TEMPERATURE &&
+                 s_fixture.value_type == SLATE_ACTION_VALUE_NUMBER &&
+                 s_fixture.value == 4100 && temperature_feedback_err == ESP_OK &&
+                 temperature_feedback.phase == SLATE_ACTION_PENDING &&
+                 temperature_feedback.optimistic.light.color_temperature == 4100 &&
+                 action_temperature->light.pending_animation &&
+                 lv_slider_get_min_value(action_temperature->light.temperature_slider) ==
+                     temperature_min &&
+                 lv_slider_get_max_value(action_temperature->light.temperature_slider) ==
+                     temperature_max,
+             "colour release emits one action without recentering its range");
+    UI_CHECK(publish_action_test_states(false, 55, 4100) == ESP_OK,
+             "matching colour-temperature snapshot confirms action");
+    UI_CHECK(slate_action_feedback("ui-fixture", "action-temperature",
+                                   &temperature_feedback) == ESP_OK &&
+                 temperature_feedback.phase == SLATE_ACTION_IDLE &&
+                 action_temperature != NULL &&
+                 !action_temperature->light.pending_animation &&
+                 strcmp(lv_label_get_text(action_temperature->light.temperature_value),
+                        "4100 K") == 0,
+             "confirmed colour temperature clears pending presentation");
 
     lights = light_test_config();
     UI_CHECK(lights != NULL && rebuild_on_task(lights) == ESP_OK,

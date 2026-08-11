@@ -16,6 +16,8 @@ static const char *TAG = "slate_light";
 #define LIGHT_TEMPERATURE_SPAN_K  1500
 #define LIGHT_TEMPERATURE_MIN_K   2000
 #define LIGHT_TEMPERATURE_MAX_K   6500
+#define LIGHT_PENDING_OPA_LOW     LV_OPA_40
+#define LIGHT_PENDING_PULSE_MS    650
 
 static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t *font,
                             uint32_t color)
@@ -52,6 +54,36 @@ static void set_enabled(lv_obj_t *object, bool enabled)
     } else {
         lv_obj_add_state(object, LV_STATE_DISABLED);
     }
+}
+
+static void pending_border_opa(void *object, int32_t opacity)
+{
+    lv_obj_set_style_border_opa(object, (lv_opa_t) opacity, LV_PART_MAIN);
+}
+
+static void set_pending_animation(slate_light_view_t *view, bool pending)
+{
+    if (pending == view->pending_animation) {
+        return;
+    }
+
+    if (!pending) {
+        lv_anim_delete(view->tile, pending_border_opa);
+        lv_obj_set_style_border_opa(view->tile, LV_OPA_COVER, LV_PART_MAIN);
+        view->pending_animation = false;
+        return;
+    }
+
+    lv_anim_t animation;
+    lv_anim_init(&animation);
+    lv_anim_set_var(&animation, view->tile);
+    lv_anim_set_exec_cb(&animation, pending_border_opa);
+    lv_anim_set_values(&animation, LIGHT_PENDING_OPA_LOW, LV_OPA_COVER);
+    lv_anim_set_duration(&animation, LIGHT_PENDING_PULSE_MS);
+    lv_anim_set_reverse_duration(&animation, LIGHT_PENDING_PULSE_MS);
+    lv_anim_set_repeat_count(&animation, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&animation, lv_anim_path_ease_in_out);
+    view->pending_animation = lv_anim_start(&animation) != NULL;
 }
 
 static void dispatch_action(slate_light_view_t *view, slate_action_t action,
@@ -158,6 +190,9 @@ static bool build_compact(lv_obj_t *tile, const slate_theme_t *theme,
     lv_obj_align(view->name, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
     lv_obj_remove_style_all(view->state_dot);
+    lv_obj_remove_flag(view->state_dot,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE |
+                           LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_set_size(view->state_dot, 12, 12);
     lv_obj_set_style_radius(view->state_dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(view->state_dot, LV_OPA_COVER, LV_PART_MAIN);
@@ -182,11 +217,17 @@ static bool build_wide(lv_obj_t *tile, const slate_theme_t *theme,
     lv_obj_set_size(view->icon, 36, 36);
     lv_obj_set_style_text_align(view->icon, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_pos(view->name, 52, 0);
-    lv_obj_set_width(view->name, 218);
+    /* The shell's coordinates are resolved lazily by LVGL. Read its configured
+     * width so wide controls also size correctly before the first layout pass. */
+    int32_t content_width = lv_obj_calc_dynamic_width(tile, LV_STYLE_WIDTH) -
+                            lv_obj_get_style_space_left(tile, LV_PART_MAIN) -
+                            lv_obj_get_style_space_right(tile, LV_PART_MAIN);
+    int32_t controls_width = content_width - 64;
+    lv_obj_set_width(view->name, controls_width - 64);
     lv_label_set_long_mode(view->name, LV_LABEL_LONG_DOT);
     lv_obj_align(view->brightness_value, LV_ALIGN_TOP_RIGHT, 0, 0);
     lv_obj_set_pos(view->brightness_slider, 52, 54);
-    lv_obj_set_width(view->brightness_slider, 284);
+    lv_obj_set_width(view->brightness_slider, controls_width);
     return true;
 }
 
@@ -218,6 +259,9 @@ static bool build_large(lv_obj_t *tile, const slate_theme_t *theme,
     lv_label_set_long_mode(view->name, LV_LABEL_LONG_DOT);
 
     lv_obj_remove_style_all(view->state_dot);
+    lv_obj_remove_flag(view->state_dot,
+                       LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE |
+                           LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_set_size(view->state_dot, 12, 12);
     lv_obj_set_style_radius(view->state_dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
     lv_obj_set_style_bg_opa(view->state_dot, LV_OPA_COVER, LV_PART_MAIN);
@@ -253,7 +297,10 @@ bool slate_light_build(lv_obj_t *tile, const slate_config_tile_t *config,
     view->resource = resource;
     view->tile = tile;
     view->label_override = config->label != NULL;
-    view->compact = config->width == 1 && config->height == 1;
+    /* A 1x2 tile is valid in schema 1 even though §7.1 has no dedicated
+     * presentation for it. Use the compact, width-safe fallback rather than
+     * placing the 2x1 horizontal controls outside its content area. */
+    view->compact = config->width == 1;
     if (config->icon != NULL) {
         view->icon_override = slate_icon_find(config->icon);
         if (view->icon_override == NULL) {
@@ -298,25 +345,35 @@ static bool missing_presentation(slate_presentation_t presentation)
            presentation == SLATE_PRESENT_INCOMPATIBLE;
 }
 
-static void temperature_range(const slate_capabilities_t *caps, int16_t current,
+static void temperature_range(slate_light_view_t *view,
+                              const slate_capabilities_t *caps, int16_t current,
                               int32_t *minimum, int32_t *maximum)
 {
-    if (caps->color_temperature_min != 0 || caps->color_temperature_max != 0) {
-        *minimum = caps->color_temperature_min;
-        *maximum = caps->color_temperature_max;
-        return;
-    }
+    bool advertised = caps->color_temperature_min != 0 ||
+                      caps->color_temperature_max != 0;
+    bool current_outside = current != SLATE_STATE_ABSENT &&
+                           (current < view->temperature_min ||
+                            current > view->temperature_max);
 
-    if (current == SLATE_STATE_ABSENT) {
-        *minimum = LIGHT_TEMPERATURE_MIN_K;
-        *maximum = LIGHT_TEMPERATURE_MAX_K;
-        return;
+    if (advertised) {
+        view->temperature_min = caps->color_temperature_min;
+        view->temperature_max = caps->color_temperature_max;
+    } else if (!view->temperature_range_valid ||
+               view->temperature_range_advertised || current_outside) {
+        if (current == SLATE_STATE_ABSENT) {
+            view->temperature_min = LIGHT_TEMPERATURE_MIN_K;
+            view->temperature_max = LIGHT_TEMPERATURE_MAX_K;
+        } else {
+            int32_t low = (int32_t) current - LIGHT_TEMPERATURE_SPAN_K;
+            int32_t high = (int32_t) current + LIGHT_TEMPERATURE_SPAN_K;
+            view->temperature_min = low > 0 ? low : 1;
+            view->temperature_max = high <= INT16_MAX ? high : INT16_MAX;
+        }
     }
-
-    int32_t low = (int32_t) current - LIGHT_TEMPERATURE_SPAN_K;
-    int32_t high = (int32_t) current + LIGHT_TEMPERATURE_SPAN_K;
-    *minimum = low > 0 ? low : 1;
-    *maximum = high <= INT16_MAX ? high : INT16_MAX;
+    view->temperature_range_valid = true;
+    view->temperature_range_advertised = advertised;
+    *minimum = view->temperature_min;
+    *maximum = view->temperature_max;
 }
 
 void slate_light_update(slate_light_view_t *view, const slate_resource_t *resource,
@@ -329,6 +386,7 @@ void slate_light_update(slate_light_view_t *view, const slate_resource_t *resour
     bool pending = feedback != NULL && feedback->phase == SLATE_ACTION_PENDING;
     const slate_light_state_t *state = pending ? &feedback->optimistic.light
                                                : &resource->state.light;
+    set_pending_animation(view, pending);
 
     char identity[SLATE_PROVIDER_ID_MAX + SLATE_RESOURCE_ID_MAX + 2];
     snprintf(identity, sizeof(identity), "%s:%s", view->provider, view->resource);
@@ -350,6 +408,10 @@ void slate_light_update(slate_light_view_t *view, const slate_resource_t *resour
                                           &resource->capabilities,
                                           SLATE_ACTION_SET_COLOR_TEMPERATURE);
     bool show_temperature = temperature_cap;
+    if (!temperature_cap) {
+        view->temperature_range_valid = false;
+        view->temperature_range_advertised = false;
+    }
 
     set_visible(view->brightness_label, !missing && brightness_cap);
     set_visible(view->brightness_value, !missing && brightness_cap);
@@ -404,7 +466,7 @@ void slate_light_update(slate_light_view_t *view, const slate_resource_t *resour
         int32_t minimum = 0;
         int32_t maximum = 0;
         int16_t current = state->color_temperature;
-        temperature_range(&resource->capabilities, current, &minimum, &maximum);
+        temperature_range(view, &resource->capabilities, current, &minimum, &maximum);
         lv_slider_set_range(view->temperature_slider, minimum, maximum);
         lv_slider_set_value(view->temperature_slider,
                             current == SLATE_STATE_ABSENT ? minimum : current,
