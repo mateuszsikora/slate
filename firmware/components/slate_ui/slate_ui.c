@@ -80,6 +80,8 @@ static ui_tree_t *s_tree;
 static bool s_ready;
 static atomic_bool s_update_posted = ATOMIC_VAR_INIT(false);
 
+static void tree_destroy(ui_tree_t *tree);
+
 static void *ui_calloc(size_t count, size_t size)
 {
     if (count == 0 || size == 0) {
@@ -127,6 +129,9 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t 
                             uint32_t color)
 {
     lv_obj_t *label = lv_label_create(parent);
+    if (label == NULL) {
+        return NULL;
+    }
     lv_label_set_text(label, text != NULL ? text : "");
     lv_obj_set_style_text_font(label, font, LV_PART_MAIN);
     lv_obj_set_style_text_color(label, lv_color_hex(color), LV_PART_MAIN);
@@ -299,6 +304,10 @@ static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title)
     lv_obj_set_style_bg_opa(tree->screen, LV_OPA_COVER, LV_PART_MAIN);
 
     lv_obj_t *bar = lv_obj_create(tree->screen);
+    if (bar == NULL) {
+        tree_destroy(tree);
+        return NULL;
+    }
     style_plain(bar);
     lv_obj_set_pos(bar, 0, 0);
     lv_obj_set_size(bar, UI_WIDTH, UI_BAR_HEIGHT);
@@ -307,15 +316,27 @@ static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title)
     lv_obj_set_style_pad_hor(bar, UI_MARGIN, LV_PART_MAIN);
 
     tree->clock = make_label(bar, "--:--", theme->body, theme->text_hi);
+    if (tree->clock == NULL) {
+        tree_destroy(tree);
+        return NULL;
+    }
     lv_obj_align(tree->clock, LV_ALIGN_LEFT_MID, 0, 0);
 
     lv_obj_t *page_title = make_label(bar, title != NULL ? title : "Slate",
                                       theme->body, theme->text_hi);
+    if (page_title == NULL) {
+        tree_destroy(tree);
+        return NULL;
+    }
     lv_label_set_long_mode(page_title, LV_LABEL_LONG_DOT);
     lv_obj_set_width(page_title, 320);
     lv_obj_align(page_title, LV_ALIGN_CENTER, 0, 0);
 
     tree->provider = make_label(bar, "PROVIDERS DEGRADED", theme->caption, theme->text_lo);
+    if (tree->provider == NULL) {
+        tree_destroy(tree);
+        return NULL;
+    }
     lv_obj_align(tree->provider, LV_ALIGN_RIGHT_MID, 0, 0);
 
     tree->bar_timer = lv_timer_create(bar_timer_cb, 1000, NULL);
@@ -353,6 +374,9 @@ static lv_obj_t *build_tile_shell(ui_tree_t *tree, const slate_config_tile_t *ti
     int32_t y = UI_BAR_HEIGHT + UI_MARGIN + tile->row * (UI_CELL_HEIGHT + UI_GAP);
 
     lv_obj_t *object = lv_obj_create(tree->screen);
+    if (object == NULL) {
+        return NULL;
+    }
     style_plain(object);
     lv_obj_set_pos(object, x, y);
     lv_obj_set_size(object, width, height);
@@ -364,15 +388,19 @@ static lv_obj_t *build_tile_shell(ui_tree_t *tree, const slate_config_tile_t *ti
     return object;
 }
 
-static void build_unknown_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
+static bool build_unknown_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
                                lv_obj_t *object)
 {
     char text[UI_LABEL_LIMIT * 2];
     snprintf(text, sizeof(text), "Unknown component\n%s", tile->type);
     lv_obj_t *label = make_label(object, text, tree->theme->caption, tree->theme->warn);
+    if (label == NULL) {
+        return false;
+    }
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_set_width(label, lv_pct(100));
     lv_obj_center(label);
+    return true;
 }
 
 static bool build_known_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
@@ -382,6 +410,9 @@ static bool build_known_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
     const slate_config_binding_t *first = &tile->bindings[0];
     const char *name = tile->label != NULL ? tile->label : tile->type;
     lv_obj_t *name_label = make_label(object, name, theme->body, theme->text_hi);
+    if (name_label == NULL) {
+        return false;
+    }
     lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);
     lv_obj_set_width(name_label, lv_pct(100));
     lv_obj_align(name_label, LV_ALIGN_TOP_LEFT, 0, 0);
@@ -389,6 +420,9 @@ static bool build_known_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
     char identity[SLATE_PROVIDER_ID_MAX + SLATE_RESOURCE_ID_MAX + 16];
     snprintf(identity, sizeof(identity), "%s:%s  ·  missing", first->provider, first->resource);
     lv_obj_t *detail = make_label(object, identity, theme->caption, theme->text_lo);
+    if (detail == NULL) {
+        return false;
+    }
     lv_label_set_long_mode(detail, LV_LABEL_LONG_DOT);
     lv_obj_set_width(detail, lv_pct(100));
     lv_obj_align(detail, LV_ALIGN_BOTTOM_LEFT, 0, 0);
@@ -449,13 +483,16 @@ static ui_tree_t *build_config_tree(const slate_config_t *config)
             tree_destroy(tree);
             return NULL;
         }
-#if defined(SLATE_UI_LEAK_BYTES) && SLATE_UI_LEAK_BYTES > 0
+#if defined(SLATE_UI_SELFTEST) && defined(SLATE_UI_LEAK_BYTES) && SLATE_UI_LEAK_BYTES > 0
         /* Instrument negative control only. It is deliberately unreachable in
          * ordinary builds and must turn the 500-cycle verifier red. */
         (void) lv_malloc(SLATE_UI_LEAK_BYTES);
 #endif
         if (tile->component == SLATE_COMPONENT_UNKNOWN) {
-            build_unknown_tile(tree, tile, object);
+            if (!build_unknown_tile(tree, tile, object)) {
+                tree_destroy(tree);
+                return NULL;
+            }
         } else if (!build_known_tile(tree, tile, object, &view_index)) {
             tree_destroy(tree);
             return NULL;
@@ -542,6 +579,9 @@ static esp_err_t rebuild_on_task(const slate_config_t *config)
         return err;
     }
 
+    if (config->settings.timezone != NULL) {
+        (void) slate_time_set_timezone(config->settings.timezone);
+    }
     activate_tree(fresh);
     slate_state_drain(discard_changed, NULL);
     update_all();
@@ -585,9 +625,6 @@ esp_err_t slate_ui_rebuild(const slate_config_t *config)
         err = request.result;
     }
     vSemaphoreDelete(done);
-    if (err == ESP_OK && config->settings.timezone != NULL) {
-        (void) slate_time_set_timezone(config->settings.timezone);
-    }
     return err;
 }
 
@@ -600,6 +637,10 @@ static ui_tree_t *build_message_tree(const char *title, const char *message)
     }
 
     lv_obj_t *card = lv_obj_create(tree->screen);
+    if (card == NULL) {
+        tree_destroy(tree);
+        return NULL;
+    }
     style_plain(card);
     lv_obj_set_size(card, 650, 250);
     lv_obj_center(card);
@@ -609,8 +650,16 @@ static ui_tree_t *build_message_tree(const char *title, const char *message)
     lv_obj_set_style_pad_all(card, 30, LV_PART_MAIN);
 
     lv_obj_t *heading = make_label(card, title, theme->body, theme->warn);
+    if (heading == NULL) {
+        tree_destroy(tree);
+        return NULL;
+    }
     lv_obj_align(heading, LV_ALIGN_TOP_LEFT, 0, 0);
     lv_obj_t *body = make_label(card, message, theme->caption, theme->text_lo);
+    if (body == NULL) {
+        tree_destroy(tree);
+        return NULL;
+    }
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(body, 590);
     lv_obj_align(body, LV_ALIGN_TOP_LEFT, 0, 55);
@@ -963,39 +1012,76 @@ static void settle_frame(void)
     lv_refr_now(NULL);
 }
 
-static esp_err_t activate_baseline(void)
+static lv_obj_t *activate_selftest_anchor(void)
 {
-    ui_tree_t *baseline = build_message_tree("UI SELFTEST", "Measuring rebuild idempotency");
-    if (baseline == NULL) {
-        return ESP_ERR_NO_MEM;
+    lv_obj_t *anchor = lv_obj_create(NULL);
+    if (anchor == NULL) {
+        return NULL;
     }
-    esp_err_t err = slate_state_bind(NULL, 0);
-    if (err != ESP_OK) {
-        tree_destroy(baseline);
-        return err;
+    style_plain(anchor);
+    lv_obj_set_style_bg_color(anchor, lv_color_hex(slate_theme_default()->bg), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(anchor, LV_OPA_COVER, LV_PART_MAIN);
+
+    ui_tree_t *old = s_tree;
+    lv_obj_t *previous = lv_screen_active();
+    lv_screen_load(anchor);
+    s_tree = NULL;
+    if (old != NULL) {
+        tree_destroy(old);
+    } else if (previous != NULL && previous != anchor) {
+        lv_obj_delete(previous);
     }
-    activate_tree(baseline);
     settle_frame();
-    return ESP_OK;
+    return anchor;
 }
 
-static esp_err_t measured_cycle(int cycle, heap_sample_t *built, heap_sample_t *after)
+static esp_err_t measured_cycle(int cycle, lv_obj_t *anchor,
+                                heap_sample_t *built, heap_sample_t *after)
 {
     slate_config_t *config = test_config(cycle);
     if (config == NULL) {
         return ESP_FAIL;
     }
-    esp_err_t err = rebuild_on_task(config);
+
+    size_t binding_count = 0;
+    slate_binding_t *bindings = config_bindings(config, &binding_count);
+    if (binding_count > 0 && bindings == NULL) {
+        slate_config_free(config);
+        return ESP_ERR_NO_MEM;
+    }
+    ui_tree_t *fresh = build_config_tree(config);
+    if (fresh == NULL) {
+        free(bindings);
+        slate_config_free(config);
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t err = slate_state_bind(bindings, binding_count);
+    free(bindings);
     slate_config_free(config);
     if (err != ESP_OK) {
+        tree_destroy(fresh);
         return err;
     }
+
+    lv_screen_load(fresh->screen);
+    s_tree = fresh;
+    slate_state_drain(discard_changed, NULL);
+    update_all();
     settle_frame();
     sample_heap(built);
 
-    err = activate_baseline();
+    err = slate_state_bind(NULL, 0);
     if (err == ESP_OK) {
+        lv_screen_load(anchor);
+        s_tree = NULL;
+        tree_destroy(fresh);
+        settle_frame();
         sample_heap(after);
+    } else {
+        lv_screen_load(anchor);
+        s_tree = NULL;
+        tree_destroy(fresh);
     }
     return err;
 }
@@ -1094,25 +1180,37 @@ static esp_err_t selftest_on_task(void)
     UI_CHECK(slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_ONLINE) == ESP_OK,
              "fixture provider online");
 
+    lv_obj_t *anchor = activate_selftest_anchor();
+    if (anchor == NULL) {
+        UI_CHECK(false, "persistent heap baseline activated");
+        return ESP_ERR_NO_MEM;
+    }
+
     for (int i = -UI_TEST_WARMUP; i < 0; i++) {
         heap_sample_t built;
         heap_sample_t after;
-        if (measured_cycle(i, &built, &after) != ESP_OK) {
+        if (measured_cycle(i, anchor, &built, &after) != ESP_OK) {
             UI_CHECK(false, "warm-up rebuild completed");
             return ESP_FAIL;
         }
     }
 
+    heap_sample_t endpoint_start;
+    sample_heap(&endpoint_start);
+
     heap_series_t series = {0};
     for (int i = 1; i <= UI_TEST_CYCLES; i++) {
         heap_sample_t built;
         heap_sample_t after;
-        if (measured_cycle(i, &built, &after) != ESP_OK) {
+        if (measured_cycle(i, anchor, &built, &after) != ESP_OK) {
             UI_CHECK(false, "measured rebuild completed");
             return ESP_FAIL;
         }
         series_add(&series, (unsigned) i, &built, &after);
     }
+
+    heap_sample_t endpoint_end;
+    sample_heap(&endpoint_end);
 
     int64_t delta = (int64_t) series.last - series.first;
     double delta_pct = 100.0 * (double) delta / (double) series.first;
@@ -1133,14 +1231,22 @@ static esp_err_t selftest_on_task(void)
              "selftest: ESP heaps internal %" PRIu32 " -> %" PRIu32
              " B, PSRAM %" PRIu32 " -> %" PRIu32 " B",
              series.int_first, series.int_last, series.psram_first, series.psram_last);
+    ESP_LOGI(TAG,
+             "selftest: persistent LVGL baseline free %" PRIu32 " -> %" PRIu32
+             " B, live %" PRIu32 " -> %" PRIu32 ", fragmentation %u -> %u%%",
+             endpoint_start.free_size, endpoint_end.free_size,
+             endpoint_start.used_count, endpoint_end.used_count,
+             endpoint_start.frag_pct, endpoint_end.frag_pct);
 
     UI_CHECK(series.count == UI_TEST_CYCLES, "500 varied rebuilds measured");
     UI_CHECK(series.tree_max > 0, "standing trees allocated LVGL memory");
-    UI_CHECK(delta_pct >= -1.0 && delta_pct <= 1.0,
-             "LVGL free heap returned within one percent");
+    UI_CHECK(endpoint_end.free_size == endpoint_start.free_size,
+             "LVGL free heap returned exactly to its baseline");
     UI_CHECK(slope >= -0.5, "LVGL free heap has no downward trend");
-    UI_CHECK(series.used_last == series.used_first,
+    UI_CHECK(endpoint_end.used_count == endpoint_start.used_count,
              "LVGL live allocation count returned to its baseline");
+    UI_CHECK(endpoint_end.frag_pct == endpoint_start.frag_pct,
+             "LVGL fragmentation returned to its baseline");
     slate_config_t *final = test_config(0);
     UI_CHECK(final != NULL && rebuild_on_task(final) == ESP_OK,
              "final mixed-provider tree activated");

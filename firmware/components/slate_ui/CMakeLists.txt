@@ -10,6 +10,10 @@ idf_component_register(
              slate_time lvgl__lvgl
 )
 
+if(DEFINED SLATE_UI_LEAK_BYTES AND NOT DEFINED SLATE_UI_SELFTEST)
+    message(FATAL_ERROR "SLATE_UI_LEAK_BYTES is a self-test-only negative control")
+endif()
+
 foreach(knob SLATE_UI_SELFTEST SLATE_UI_LEAK_BYTES)
     if(DEFINED ${knob})
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${knob}=${${knob}})
