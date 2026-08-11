@@ -35,6 +35,7 @@
 #include "slate_state.h"
 #include "slate_store.h"
 #include "slate_time.h"
+#include "slate_ui.h"
 #include "slate_wifi.h"
 #include "slate_ws.h"
 
@@ -485,6 +486,15 @@ static void start_display(void)
     }
 }
 
+static void start_ui(void)
+{
+    esp_err_t err = slate_ui_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "UI runtime degraded: %s — keeping the current screen",
+                 esp_err_to_name(err));
+    }
+}
+
 void app_main(void)
 {
     /* §11.3's retained backlog starts before the boot report and board
@@ -597,6 +607,7 @@ void app_main(void)
      * access point has a page to serve and a subscriber in place by the time the
      * station has an opinion about whether one is needed. */
     start_api();
+    start_ui();
     start_network();
 
     /* Before the health check is armed, not after: the panic is supposed to
@@ -614,4 +625,18 @@ void app_main(void)
     if (health_err != ESP_OK) {
         ESP_LOGE(TAG, "OTA boot health unavailable: %s", esp_err_to_name(health_err));
     }
+
+#ifdef SLATE_UI_SELFTEST
+    if (slate_ui_ready()) {
+        /* A full 500-cycle display test intentionally outlives an OTA health
+         * budget. Let the independently scheduled network and health tasks
+         * settle before taking heap baselines, while the API is already able
+         * to prove this diagnostic image booted. */
+        vTaskDelay(pdMS_TO_TICKS(3000));
+        esp_err_t ui_test_err = slate_ui_selftest();
+        if (ui_test_err != ESP_OK) {
+            ESP_LOGE(TAG, "UI runtime selftest failed: %s", esp_err_to_name(ui_test_err));
+        }
+    }
+#endif
 }

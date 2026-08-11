@@ -147,10 +147,12 @@ static void on_station_up(void *arg, esp_event_base_t base, int32_t id, void *da
 
 esp_err_t slate_time_init(void)
 {
-    /* §3.3's zone arrives with the configuration (#19). Until it does, UTC is
-     * the honest default: a clock that is an hour out looks correct, and a
-     * clock labelled UTC does not. */
-    setenv("TZ", "UTC0", 1);
+    /* The UI runtime may have loaded §3.3's persisted timezone before the
+     * station starts. Preserve that choice instead of resetting it to UTC
+     * during network bring-up; UTC remains the initial value when no config
+     * supplied one. */
+    const char *posix = posix_for(s_zone);
+    setenv("TZ", posix != NULL ? posix : "UTC0", 1);
     tzset();
 
     /*

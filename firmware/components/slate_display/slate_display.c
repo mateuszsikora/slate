@@ -759,6 +759,20 @@ static void build_touch_pattern(lv_obj_t *screen)
     update_touch_label();
 }
 
+static void bringup_screen_deleted(lv_event_t *event)
+{
+    (void) event;
+    if (s_backlight_timer != NULL) {
+        lv_timer_delete(s_backlight_timer);
+        s_backlight_timer = NULL;
+    }
+    memset(s_corner, 0, sizeof(s_corner));
+    s_backlight_tile = NULL;
+    s_crosshair_h = NULL;
+    s_crosshair_v = NULL;
+    s_touch_label = NULL;
+}
+
 static void build_test_pattern(void *ctx)
 {
     (void) ctx;
@@ -766,6 +780,7 @@ static void build_test_pattern(void *ctx)
     const slate_diagnostic_palette_t *diagnostics = slate_diagnostic_palette();
 
     lv_obj_t *screen = lv_screen_active();
+    lv_obj_add_event_cb(screen, bringup_screen_deleted, LV_EVENT_DELETE, NULL);
     lv_obj_remove_style_all(screen);
     lv_obj_set_style_bg_color(screen, lv_color_hex(theme->bg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN);

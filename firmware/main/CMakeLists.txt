@@ -2,7 +2,8 @@ idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
     REQUIRES slate_action slate_api slate_coredump slate_direct slate_display slate_ota slate_setup
-             slate_state slate_store slate_wifi slate_time slate_ws app_update esp_system esp_event
+             slate_state slate_store slate_ui slate_wifi slate_time slate_ws app_update esp_system
+             esp_event
 )
 
 #
@@ -30,6 +31,11 @@ idf_component_register(
 #   -DSLATE_ACTION_SELFTEST=1  exercise capability validation, optimistic
 #                              overlays and every completion path against the
 #                              real state store and a fixture provider.
+#   -DSLATE_UI_SELFTEST=1      exercise the real declarative runtime on the
+#                              panel, including 500 varied rebuild cycles.
+#   -DSLATE_UI_LEAK_BYTES=64   negative control for the UI heap verifier. It is
+#                              meaningful only together with UI_SELFTEST and
+#                              must make that run fail.
 #   -DSLATE_OTA_ROLLBACK_SELFTEST=1
 #                              panic before API/network startup, but only when
 #                              the running image is pending verification. OTA
@@ -59,7 +65,8 @@ idf_component_register(
 #
 foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_WS_SELFTEST SLATE_STATE_SELFTEST
              SLATE_DIRECT_SELFTEST SLATE_ACTION_SELFTEST SLATE_OTA_ROLLBACK_SELFTEST
-             SLATE_COREDUMP_SELFTEST SLATE_SETUP_AP_PASSWORD SLATE_TIMEZONE)
+             SLATE_UI_SELFTEST SLATE_UI_LEAK_BYTES SLATE_COREDUMP_SELFTEST
+             SLATE_SETUP_AP_PASSWORD SLATE_TIMEZONE)
     if(DEFINED ${knob})
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${knob}=${${knob}})
     endif()
