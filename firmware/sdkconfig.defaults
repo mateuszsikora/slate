@@ -99,6 +99,14 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 
+# --- Home Assistant WebSocket client (design.md §5.5, issue #16) ---
+# The manual fallback may point at an HTTPS Home Assistant URL. Verify public
+# certificates against the same compact common-roots bundle S-3 measured;
+# disabling verification would send the long-lived token to an unauthenticated
+# peer and contradict §12's treatment of it as a credential.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+
 # --- Display and LVGL (design.md §6.1–§6.2, issue #6) ---
 # S-2 measured frame time with these cache settings. The RGB peripheral reads
 # two 800×480 RGB565 framebuffers continuously from PSRAM; the 64-byte line and
