@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
@@ -26,6 +27,7 @@
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "http_parser.h"
 #include "mdns.h"
 #include "slate_api.h"
 #include "slate_state.h"
@@ -39,6 +41,9 @@
 #define MANAGER_QUEUE_DEPTH      8
 #define MANAGER_TASK_STACK       6144
 #define MANAGER_TASK_PRIORITY    5
+#define CONFIG_QUEUE_DEPTH       2
+#define CONFIG_TASK_STACK        6144
+#define CONFIG_TASK_PRIORITY     5
 #define DISCOVERY_MAX_RESULTS    8
 #define DISCOVERY_TIMEOUT_MS     3000
 #define CONNECT_TEST_TIMEOUT_MS  12000
@@ -52,6 +57,13 @@ typedef enum {
     CMD_WIFI_DOWN,
     CMD_RELOAD,
     CMD_AUTH_INVALID,
+    CMD_PROTOCOL_ERROR,
+} manager_command_kind_t;
+
+typedef struct {
+    manager_command_kind_t kind;
+    uint32_t generation;
+    TaskHandle_t waiter;
 } manager_command_t;
 
 typedef struct {
@@ -65,28 +77,50 @@ typedef struct {
     size_t used;
 } message_buffer_t;
 
+typedef struct main_connection main_connection_t;
+
 typedef struct {
+    main_connection_t *connection;
+    uint32_t generation;
+    unsigned before_connect_count;
+    bool redirected;
+    message_buffer_t message;
+} main_event_context_t;
+
+struct main_connection {
     esp_websocket_client_handle_t client;
+    main_event_context_t *event_context;
     char url[SLATE_HA_URL_MAX_LEN];
     char uri[WS_URI_MAX];
     char token[SLATE_HA_TOKEN_MAX_LEN];
-    message_buffer_t message;
+    uint32_t generation;
     atomic_bool enabled;
     atomic_bool auth_rejected;
     atomic_size_t backoff_index;
-} main_connection_t;
+};
 
 typedef struct {
     EventGroupHandle_t events;
     const char *token;
+    unsigned before_connect_count;
+    bool redirected;
     message_buffer_t message;
 } connection_test_t;
 
+typedef struct {
+    httpd_req_t *request;
+    char url[SLATE_HA_URL_MAX_LEN];
+    char uri[WS_URI_MAX];
+    char token[SLATE_HA_TOKEN_MAX_LEN];
+} configure_job_t;
+
 static QueueHandle_t s_commands;
+static QueueHandle_t s_config_jobs;
 static TaskHandle_t s_manager_task;
+static TaskHandle_t s_config_task;
 static main_connection_t s_main;
 static bool s_wifi_up;
-static bool s_mdns_ready;
+static atomic_bool s_mdns_ready;
 static bool s_auth_blocked;
 static bool s_initialized;
 static bool s_started;
@@ -113,10 +147,10 @@ static size_t backoff_next(size_t index)
 /**
  * Turn the base URL the editor displays into HA's WebSocket endpoint.
  *
- * Redirects are intentionally not relied on: esp_websocket_client does not
- * promise to follow one, and an HTTP-to-HTTPS redirect would move credentials
- * before Slate had authenticated the destination. Query strings, fragments,
- * whitespace and an empty authority are rejected as `bad_url` instead.
+ * The same parser the WebSocket client uses validates the authority here, so
+ * malformed ports and hosts are `bad_url` rather than later masquerading as
+ * `ha_unreachable`. Redirects are detected separately before an auth frame is
+ * sent. Query strings, fragments and userinfo are not valid base URLs.
  */
 static bool websocket_uri(const char *url, char *out, size_t out_len)
 {
@@ -124,25 +158,34 @@ static bool websocket_uri(const char *url, char *out, size_t out_len)
         return false;
     }
 
-    const char *rest = NULL;
+    struct http_parser_url parsed;
+    http_parser_url_init(&parsed);
+    if (http_parser_parse_url(url, strlen(url), false, &parsed) != 0 ||
+        !(parsed.field_set & (1U << UF_SCHEMA)) ||
+        !(parsed.field_set & (1U << UF_HOST)) ||
+        parsed.field_data[UF_HOST].len == 0 ||
+        (parsed.field_set & ((1U << UF_USERINFO) | (1U << UF_QUERY) |
+                             (1U << UF_FRAGMENT))) != 0 ||
+        ((parsed.field_set & (1U << UF_PORT)) != 0 && parsed.port == 0)) {
+        return false;
+    }
+
+    const char *scheme_at = url + parsed.field_data[UF_SCHEMA].off;
+    size_t scheme_len = parsed.field_data[UF_SCHEMA].len;
     const char *scheme = NULL;
-    if (strncmp(url, "http://", 7) == 0) {
+    if (scheme_len == 4 && strncasecmp(scheme_at, "http", scheme_len) == 0) {
         scheme = "ws://";
-        rest = url + 7;
-    } else if (strncmp(url, "https://", 8) == 0) {
+    } else if (scheme_len == 5 && strncasecmp(scheme_at, "https", scheme_len) == 0) {
         scheme = "wss://";
-        rest = url + 8;
     } else {
         return false;
     }
 
-    const char *path = strchr(rest, '/');
-    size_t authority_len = path != NULL ? (size_t) (path - rest) : strlen(rest);
-    if (*rest == '\0' || *rest == '/' || *rest == ':' || authority_len == 0 ||
-        memchr(rest, '@', authority_len) != NULL || strchr(rest, '?') != NULL ||
-        strchr(rest, '#') != NULL) {
+    const char *rest = scheme_at + scheme_len;
+    if (strncmp(rest, "://", 3) != 0) {
         return false;
     }
+    rest += 3;
     for (const unsigned char *at = (const unsigned char *) rest; *at != '\0'; at++) {
         if (*at <= 0x20 || *at == 0x7f) {
             return false;
@@ -271,7 +314,7 @@ static esp_err_t discover_instances(discovered_instance_t *instances, size_t cap
                                     size_t *out_count)
 {
     *out_count = 0;
-    if (!s_mdns_ready) {
+    if (!atomic_load(&s_mdns_ready)) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -298,10 +341,10 @@ static esp_err_t discover_instances(discovered_instance_t *instances, size_t cap
             result->instance_name != NULL) {
             strlcpy(candidate.name, result->instance_name, sizeof(candidate.name));
         }
-        if (!txt_value(result, "uuid", candidate.uuid, sizeof(candidate.uuid)) &&
-            result->hostname != NULL) {
-            strlcpy(candidate.uuid, result->hostname, sizeof(candidate.uuid));
-        }
+        /* A hostname is useful for transport but is not HA's stable UUID. If a
+         * non-conforming advertisement omits the field, expose it as empty
+         * rather than giving clients a false identity that may later change. */
+        txt_value(result, "uuid", candidate.uuid, sizeof(candidate.uuid));
         if (candidate.name[0] == '\0') {
             strlcpy(candidate.name, "Home Assistant", sizeof(candidate.name));
         }
@@ -323,15 +366,33 @@ static void test_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     connection_test_t *test = arg;
     esp_websocket_event_data_t *event = data;
 
+    if (id == WEBSOCKET_EVENT_BEFORE_CONNECT) {
+        test->redirected = ++test->before_connect_count > 1;
+        return;
+    }
+    if (id == WEBSOCKET_EVENT_CONNECTED) {
+        if (test->redirected) {
+            /* esp_websocket_client follows HTTP redirects internally. Refuse
+             * before a redirected peer can ask for the credential. */
+            xEventGroupSetBits(test->events, TEST_PROTOCOL);
+        }
+        return;
+    }
     if (id == WEBSOCKET_EVENT_ERROR || id == WEBSOCKET_EVENT_DISCONNECTED ||
         id == WEBSOCKET_EVENT_CLOSED) {
+        test->before_connect_count = 0;
+        test->redirected = false;
         EventBits_t done = xEventGroupGetBits(test->events);
-        if ((done & (TEST_AUTH_OK | TEST_AUTH_INVALID)) == 0) {
+        if ((done & (TEST_AUTH_OK | TEST_AUTH_INVALID | TEST_PROTOCOL)) == 0) {
             xEventGroupSetBits(test->events, TEST_TRANSPORT);
         }
         return;
     }
     if (id != WEBSOCKET_EVENT_DATA) {
+        return;
+    }
+    if (test->redirected) {
+        xEventGroupSetBits(test->events, TEST_PROTOCOL);
         return;
     }
 
@@ -417,31 +478,56 @@ static test_result_t test_credentials(const char *uri, const char *token)
 
 /* --- Long-lived provider connection ----------------------------------- */
 
-static void command(manager_command_t command)
+static bool command_send(manager_command_kind_t kind, uint32_t generation,
+                         TaskHandle_t waiter, TickType_t timeout)
 {
-    if (s_commands == NULL || xQueueSend(s_commands, &command, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "manager queue full; dropped command %d", command);
+    const manager_command_t command = {
+        .kind = kind,
+        .generation = generation,
+        .waiter = waiter,
+    };
+    if (s_commands == NULL || xQueueSend(s_commands, &command, timeout) != pdTRUE) {
+        ESP_LOGW(TAG, "manager queue full; dropped command %d", kind);
+        return false;
     }
+    return true;
+}
+
+static void command(manager_command_kind_t kind)
+{
+    command_send(kind, 0, NULL, 0);
 }
 
 static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void) base;
-    main_connection_t *connection = arg;
+    main_event_context_t *context = arg;
+    main_connection_t *connection = context->connection;
     esp_websocket_event_data_t *event = data;
     if (!atomic_load(&connection->enabled)) {
         return;
     }
 
     if (id == WEBSOCKET_EVENT_BEFORE_CONNECT) {
+        context->redirected = ++context->before_connect_count > 1;
         if (!atomic_load(&connection->auth_rejected)) {
             slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_CONNECTING);
+        }
+        return;
+    }
+    if (id == WEBSOCKET_EVENT_CONNECTED) {
+        if (context->redirected) {
+            ESP_LOGE(TAG, "refusing redirected Home Assistant WebSocket endpoint");
+            slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
+            command_send(CMD_PROTOCOL_ERROR, context->generation, NULL, 0);
         }
         return;
     }
 
     if (id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_CLOSED ||
         id == WEBSOCKET_EVENT_ERROR) {
+        context->before_connect_count = 0;
+        context->redirected = false;
         if (!atomic_load(&connection->auth_rejected)) {
             slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_OFFLINE);
             /* A transport failure emits ERROR then DISCONNECTED; a clean
@@ -459,9 +545,12 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (id != WEBSOCKET_EVENT_DATA) {
         return;
     }
+    if (context->redirected) {
+        return;
+    }
 
     bool complete = false;
-    if (!message_append(&connection->message, event, &complete)) {
+    if (!message_append(&context->message, event, &complete)) {
         ESP_LOGW(TAG, "discarding malformed authentication frame");
         return;
     }
@@ -470,9 +559,11 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     }
 
     char type[24];
-    bool typed = message_type(&connection->message, type, sizeof(type));
+    bool typed = message_type(&context->message, type, sizeof(type));
     if (typed && strcmp(type, "auth_required") == 0) {
-        if (!send_auth(event->client, connection->token)) {
+        if (atomic_load(&connection->auth_rejected)) {
+            ESP_LOGW(TAG, "refusing to resend a rejected Home Assistant token");
+        } else if (!send_auth(event->client, connection->token)) {
             ESP_LOGW(TAG, "could not send Home Assistant authentication frame");
         }
     } else if (typed && strcmp(type, "auth_ok") == 0) {
@@ -484,20 +575,23 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         atomic_store(&connection->auth_rejected, true);
         slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
         ESP_LOGE(TAG, "Home Assistant rejected the stored token; waiting for new credentials");
-        command(CMD_AUTH_INVALID);
+        command_send(CMD_AUTH_INVALID, context->generation, NULL, 0);
     }
 }
 
 static void connection_destroy(void)
 {
     if (s_main.client == NULL) {
+        free(s_main.event_context);
+        s_main.event_context = NULL;
         return;
     }
     atomic_store(&s_main.enabled, false);
     esp_websocket_client_stop(s_main.client);
     esp_websocket_client_destroy(s_main.client);
     s_main.client = NULL;
-    s_main.message.used = 0;
+    free(s_main.event_context);
+    s_main.event_context = NULL;
 }
 
 static esp_err_t connection_start(void)
@@ -523,6 +617,19 @@ static esp_err_t connection_start(void)
         return ESP_ERR_INVALID_ARG;
     }
 
+    main_event_context_t *context = calloc(1, sizeof(*context));
+    if (context == NULL) {
+        slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_OFFLINE);
+        explicit_bzero(s_main.token, sizeof(s_main.token));
+        return ESP_ERR_NO_MEM;
+    }
+    if (++s_main.generation == 0) {
+        s_main.generation = 1;
+    }
+    context->connection = &s_main;
+    context->generation = s_main.generation;
+    s_main.event_context = context;
+
     const esp_websocket_client_config_t config = {
         .uri = s_main.uri,
         .disable_auto_reconnect = false,
@@ -539,7 +646,7 @@ static esp_err_t connection_start(void)
         .keep_alive_interval = 10,
         .keep_alive_count = 3,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .user_context = &s_main,
+        .user_context = context,
     };
 
     atomic_store(&s_main.auth_rejected, false);
@@ -547,10 +654,13 @@ static esp_err_t connection_start(void)
     s_main.client = esp_websocket_client_init(&config);
     if (s_main.client == NULL) {
         slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_OFFLINE);
+        free(s_main.event_context);
+        s_main.event_context = NULL;
+        explicit_bzero(s_main.token, sizeof(s_main.token));
         return ESP_ERR_NO_MEM;
     }
     esp_err_t err = esp_websocket_register_events(s_main.client, WEBSOCKET_EVENT_ANY,
-                                                   main_event, &s_main);
+                                                   main_event, context);
     if (err == ESP_OK) {
         atomic_store(&s_main.enabled, true);
         slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_CONNECTING);
@@ -572,7 +682,7 @@ static void manager_task(void *arg)
         if (xQueueReceive(s_commands, &received, portMAX_DELAY) != pdTRUE) {
             continue;
         }
-        switch (received) {
+        switch (received.kind) {
         case CMD_WIFI_UP:
             s_wifi_up = true;
             if (s_main.client == NULL) {
@@ -604,11 +714,29 @@ static void manager_task(void *arg)
                     slate_store_ha_token_is_set() ? SLATE_PROVIDER_OFFLINE
                                                   : SLATE_PROVIDER_UNCONFIGURED);
             }
+            if (received.waiter != NULL) {
+                xTaskNotifyGive(received.waiter);
+            }
             break;
         case CMD_AUTH_INVALID:
+            if (received.generation != s_main.generation) {
+                ESP_LOGD(TAG, "ignoring stale auth failure from generation %u",
+                         (unsigned) received.generation);
+                break;
+            }
             s_auth_blocked = true;
             connection_destroy();
+            explicit_bzero(s_main.token, sizeof(s_main.token));
             /* ERROR is sticky until CMD_RELOAD supplies tested credentials. */
+            slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
+            break;
+        case CMD_PROTOCOL_ERROR:
+            if (received.generation != s_main.generation) {
+                break;
+            }
+            s_auth_blocked = true;
+            connection_destroy();
+            explicit_bzero(s_main.token, sizeof(s_main.token));
             slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
             break;
         }
@@ -700,12 +828,13 @@ static esp_err_t configure_handler(httpd_req_t *req)
         error = "bad_url";
     }
 
-    test_result_t tested = TEST_RESULT_UNREACHABLE;
-    esp_err_t stored = ESP_OK;
+    configure_job_t *job = NULL;
     if (error == NULL) {
-        tested = test_credentials(uri, token);
-        if (tested == TEST_RESULT_OK) {
-            stored = slate_store_ha_set(url, token);
+        job = calloc(1, sizeof(*job));
+        if (job != NULL) {
+            strlcpy(job->url, url, sizeof(job->url));
+            strlcpy(job->uri, uri, sizeof(job->uri));
+            strlcpy(job->token, token, sizeof(job->token));
         }
     }
 
@@ -715,19 +844,66 @@ static esp_err_t configure_handler(httpd_req_t *req)
     if (error != NULL) {
         return slate_api_refuse(req, "400 Bad Request", error);
     }
-    if (tested == TEST_RESULT_AUTH_INVALID) {
-        return slate_api_refuse(req, "422 Unprocessable Content", "ha_auth_invalid");
-    }
-    if (tested != TEST_RESULT_OK) {
-        return slate_api_refuse(req, "502 Bad Gateway", "ha_unreachable");
-    }
-    if (stored != ESP_OK) {
-        return slate_api_refuse(req, "500 Internal Server Error", "store_failed");
+    if (job == NULL) {
+        return slate_api_send_json(req, NULL);
     }
 
-    command(CMD_RELOAD);
-    httpd_resp_set_status(req, "204 No Content");
-    return httpd_resp_send(req, NULL, 0);
+    esp_err_t err = httpd_req_async_handler_begin(req, &job->request);
+    if (err != ESP_OK) {
+        explicit_bzero(job->token, sizeof(job->token));
+        free(job);
+        return slate_api_send_json(req, NULL);
+    }
+
+    if (xQueueSend(s_config_jobs, &job, 0) != pdTRUE) {
+        slate_api_refuse(job->request, "503 Service Unavailable", "ha_busy");
+        httpd_req_async_handler_complete(job->request);
+        explicit_bzero(job->token, sizeof(job->token));
+        free(job);
+    }
+    return ESP_OK;
+}
+
+static void configure_task(void *arg)
+{
+    (void) arg;
+    configure_job_t *job;
+
+    for (;;) {
+        if (xQueueReceive(s_config_jobs, &job, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        test_result_t tested = test_credentials(job->uri, job->token);
+        esp_err_t stored = ESP_OK;
+        if (tested == TEST_RESULT_OK) {
+            stored = slate_store_ha_set(job->url, job->token);
+        }
+
+        if (tested == TEST_RESULT_AUTH_INVALID) {
+            slate_api_refuse(job->request, "422 Unprocessable Content", "ha_auth_invalid");
+        } else if (tested != TEST_RESULT_OK) {
+            slate_api_refuse(job->request, "502 Bad Gateway", "ha_unreachable");
+        } else if (stored != ESP_OK) {
+            slate_api_refuse(job->request, "500 Internal Server Error", "store_failed");
+        } else {
+            /* The dedicated worker is the only sender that waits for reload,
+             * so its task notification cannot collide with another protocol. */
+            ulTaskNotifyTake(pdTRUE, 0);
+            if (!command_send(CMD_RELOAD, 0, xTaskGetCurrentTaskHandle(),
+                              portMAX_DELAY)) {
+                slate_api_refuse(job->request, "500 Internal Server Error", "reload_failed");
+            } else {
+                ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+                httpd_resp_set_status(job->request, "204 No Content");
+                httpd_resp_send(job->request, NULL, 0);
+            }
+        }
+
+        httpd_req_async_handler_complete(job->request);
+        explicit_bzero(job->token, sizeof(job->token));
+        free(job);
+    }
 }
 
 static esp_err_t discovery_handler(httpd_req_t *req)
@@ -778,8 +954,26 @@ esp_err_t slate_ha_init(void)
     if (s_commands == NULL) {
         return ESP_ERR_NO_MEM;
     }
+    s_config_jobs = xQueueCreate(CONFIG_QUEUE_DEPTH, sizeof(configure_job_t *));
+    if (s_config_jobs == NULL) {
+        vQueueDelete(s_commands);
+        s_commands = NULL;
+        return ESP_ERR_NO_MEM;
+    }
     if (xTaskCreate(manager_task, "slate_ha", MANAGER_TASK_STACK, NULL,
                     MANAGER_TASK_PRIORITY, &s_manager_task) != pdPASS) {
+        vQueueDelete(s_config_jobs);
+        s_config_jobs = NULL;
+        vQueueDelete(s_commands);
+        s_commands = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTaskCreate(configure_task, "slate_ha_cfg", CONFIG_TASK_STACK, NULL,
+                    CONFIG_TASK_PRIORITY, &s_config_task) != pdPASS) {
+        vTaskDelete(s_manager_task);
+        s_manager_task = NULL;
+        vQueueDelete(s_config_jobs);
+        s_config_jobs = NULL;
         vQueueDelete(s_commands);
         s_commands = NULL;
         return ESP_ERR_NO_MEM;
@@ -823,7 +1017,7 @@ esp_err_t slate_ha_start(void)
 
     esp_err_t err = mdns_init();
     if (err == ESP_OK) {
-        s_mdns_ready = true;
+        atomic_store(&s_mdns_ready, true);
         err = mdns_hostname_set(slate_store_device_name());
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "setting mDNS hostname: %s", esp_err_to_name(err));
@@ -866,8 +1060,14 @@ esp_err_t slate_ha_selftest(void)
     CHECK(websocket_uri("https://ha.example.test/", uri, sizeof(uri)) &&
               strcmp(uri, "wss://ha.example.test/api/websocket") == 0,
           "HTTPS trailing slash");
+    CHECK(websocket_uri("HTTP://ha.example.test:8123", uri, sizeof(uri)) &&
+              strcmp(uri, "ws://ha.example.test:8123/api/websocket") == 0,
+          "case-insensitive HTTP scheme");
     CHECK(!websocket_uri("ftp://ha.example.test", uri, sizeof(uri)), "scheme refused");
     CHECK(!websocket_uri("http://ha/#fragment", uri, sizeof(uri)), "fragment refused");
+    CHECK(!websocket_uri("http://ha:abc", uri, sizeof(uri)), "non-numeric port refused");
+    CHECK(!websocket_uri("http://ha:0", uri, sizeof(uri)), "zero port refused");
+    CHECK(!websocket_uri("http://user@ha", uri, sizeof(uri)), "userinfo refused");
 
     const uint32_t expected[] = {1000, 2000, 4000, 8000, 15000, 30000, 30000};
     size_t index = 0;

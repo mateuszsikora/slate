@@ -7,7 +7,7 @@
 idf_component_register(
     SRCS "slate_ha.c"
     INCLUDE_DIRS "include"
-    REQUIRES esp_event esp_http_server json mbedtls slate_api slate_state slate_store slate_wifi
+    REQUIRES esp_event esp_http_server http_parser json mbedtls slate_api slate_state slate_store slate_wifi
              espressif__esp_websocket_client espressif__mdns
 )
 

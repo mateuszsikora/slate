@@ -547,9 +547,11 @@ The HA provider uses Home Assistant's WebSocket API at `/api/websocket`, authent
 
 The device discovers local instances through Home Assistant's
 `_home-assistant._tcp.local.` service. `GET /ha/discover` returns the advertised
-`location_name`, stable `uuid` and `internal_url` as `name`, `uuid` and `url`;
-an empty result is valid because multicast DNS may not cross a VLAN. The editor
-fills the URL from a sole result or offers a choice when several answer. It
+`location_name`, `uuid` and `internal_url` as `name`, `uuid` and `url`; `uuid`
+is empty if a non-conforming advertisement omits it rather than being replaced
+with a hostname that is not the instance identity. An empty result is valid
+because multicast DNS may not cross a VLAN. The editor fills the URL from a
+sole result or offers a choice when several answer. It
 always sends an explicit `url` together with the token to `POST /ha`, and manual
 entry remains the fallback for routed networks and instances that do not
 advertise an internal URL. Firmware never chooses an arbitrary instance.
@@ -562,6 +564,11 @@ authentication and reachability failures are `422 ha_auth_invalid` and
 `502 ha_unreachable`; an oversized body is `413 too_large`, and persistence
 failure is `500 store_failed`. Existing
 credentials and the live connection remain unchanged on every failed request.
+The credential test runs outside the HTTP server task, and any WebSocket HTTP
+redirect is refused before Slate sends the token; the configured URL is the
+credential boundary, not merely the first hop toward one.
+A full configuration-work queue returns `503 ha_busy`, and an unexpected
+manager handoff failure after persistence returns `500 reload_failed`.
 
 Reconnect with exponential backoff: 1 s → 2 → 4 → 8 → 15 → 30 s (ceiling). `auth_invalid` is not retried forever: it moves the provider to `error` until credentials change. A network or HA restart moves it through `offline` and `connecting` while the last confirmed states remain visible as stale.
 
