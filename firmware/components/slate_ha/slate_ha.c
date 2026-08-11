@@ -2,12 +2,13 @@
  * Slate — Home Assistant discovery, authentication and reconnect lifecycle.
  *
  * Home Assistant transport and payload types terminate here. Authentication,
- * reconnect and subscribe_entities feed the provider-neutral state store; #76
- * adds the other direction by mapping semantic actions onto call_service.
+ * reconnect and subscribe_entities feed the provider-neutral state store;
+ * semantic actions travel the other direction through call_service.
  */
 
 #include "slate_ha.h"
 
+#include <inttypes.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -30,7 +31,9 @@
 #include "freertos/task.h"
 #include "http_parser.h"
 #include "mdns.h"
+#include "slate_action.h"
 #include "slate_api.h"
+#include "slate_ha_actions.h"
 #include "slate_ha_entities.h"
 #include "slate_state.h"
 #include "slate_store.h"
@@ -63,12 +66,23 @@ typedef enum {
     CMD_AUTH_INVALID,
     CMD_PROTOCOL_ERROR,
     CMD_RESUBSCRIBE,
+    CMD_ACTION,
+    CMD_ACTION_RESULT,
+    CMD_CLEAR_ACTIONS,
 } manager_command_kind_t;
 
 typedef struct {
     manager_command_kind_t kind;
     uint32_t generation;
     TaskHandle_t waiter;
+    union {
+        slate_ha_action_request_t action;
+        struct {
+            uint32_t command_id;
+            bool success;
+            char error[SLATE_HA_ACTION_ERROR_MAX + 1];
+        } action_result;
+    } data;
 } manager_command_t;
 
 typedef struct {
@@ -600,6 +614,25 @@ static void command(manager_command_kind_t kind)
     command_send(kind, 0, NULL, 0);
 }
 
+/** Copy a borrowed bus request into the manager's single transport queue. */
+static esp_err_t provider_action_dispatch(void *ctx, uint32_t id,
+                                          const slate_action_request_t *request)
+{
+    (void) ctx;
+    if (!atomic_load(&s_main.authenticated)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    manager_command_t queued = {
+        .kind = CMD_ACTION,
+    };
+    esp_err_t err = slate_ha_action_request_copy(&queued.data.action, id, request);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return xQueueSend(s_commands, &queued, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
+}
+
 static uint32_t next_command_id(void)
 {
     s_main.next_command_id++;
@@ -634,6 +667,67 @@ static esp_err_t send_json_frame(cJSON *root)
                                                pdMS_TO_TICKS(3000));
     cJSON_free(frame);
     return sent == (int) len ? ESP_OK : ESP_FAIL;
+}
+
+static void fail_bus_action(uint32_t bus_id, const char *error)
+{
+    slate_action_result(SLATE_HA_PROVIDER_ID, bus_id, false, error);
+}
+
+/** Allocate an HA command id, remember the bus id, then put the frame on wire. */
+static void connection_send_action(const slate_ha_action_request_t *request)
+{
+    if (s_main.client == NULL || !atomic_load(&s_main.authenticated)) {
+        fail_bus_action(request->bus_id, "transport_unavailable");
+        return;
+    }
+
+    uint32_t command_id = next_command_id();
+    cJSON *frame = NULL;
+    esp_err_t err = slate_ha_action_frame(command_id, request, &frame);
+    if (err != ESP_OK) {
+        fail_bus_action(request->bus_id, esp_err_to_name(err));
+        return;
+    }
+
+    err = slate_ha_action_track(s_main.generation, command_id, request->bus_id);
+    if (err == ESP_OK) {
+        err = send_json_frame(frame);
+    }
+    cJSON_Delete(frame);
+
+    if (err != ESP_OK) {
+        uint32_t ignored = 0;
+        slate_ha_action_take(s_main.generation, command_id, &ignored);
+        fail_bus_action(request->bus_id,
+                        err == ESP_ERR_NO_MEM ? "too_many_actions"
+                                              : "transport_unavailable");
+        ESP_LOGW(TAG, "could not send HA action %" PRIu32 ": %s",
+                 request->bus_id, esp_err_to_name(err));
+    }
+}
+
+static void complete_bus_action(const manager_command_t *command)
+{
+    uint32_t bus_id = 0;
+    if (!slate_ha_action_take(command->generation,
+                              command->data.action_result.command_id, &bus_id)) {
+        ESP_LOGD(TAG, "ignored unknown or late HA result for command %" PRIu32,
+                 command->data.action_result.command_id);
+        return;
+    }
+
+    slate_action_result(SLATE_HA_PROVIDER_ID, bus_id,
+                        command->data.action_result.success,
+                        command->data.action_result.error[0] != '\0'
+                            ? command->data.action_result.error
+                            : NULL);
+}
+
+static void clear_bus_actions(const char *error)
+{
+    slate_ha_action_clear();
+    slate_action_provider_unavailable(SLATE_HA_PROVIDER_ID, error);
 }
 
 static esp_err_t send_unsubscribe(uint32_t subscription)
@@ -779,6 +873,11 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
              * server shutdown emits CLOSED instead. Advance on either terminal
              * event, never on ERROR, so one outage consumes exactly one step. */
             if (id == WEBSOCKET_EVENT_DISCONNECTED || id == WEBSOCKET_EVENT_CLOSED) {
+                /* Revert on the transport event rather than behind the manager
+                 * queue; the queued command only owns its private id table. */
+                slate_action_provider_unavailable(SLATE_HA_PROVIDER_ID,
+                                                  "transport_disconnected");
+                command_send(CMD_CLEAR_ACTIONS, context->generation, NULL, 0);
                 size_t index = atomic_load(&connection->backoff_index);
                 esp_websocket_client_set_reconnect_timeout(event->client,
                                                            (int) backoff_at(index));
@@ -851,16 +950,37 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         const cJSON *id_item = cJSON_GetObjectItemCaseSensitive(root, "id");
         const cJSON *success = cJSON_GetObjectItemCaseSensitive(root, "success");
         uint32_t id_value = 0;
-        if (command_id(id_item, &id_value) &&
-            id_value == atomic_load(&connection->subscription_id) &&
-            !cJSON_IsTrue(success)) {
-            const cJSON *error = cJSON_GetObjectItemCaseSensitive(root, "error");
-            const cJSON *code = cJSON_GetObjectItemCaseSensitive(error, "code");
-            ESP_LOGE(TAG, "Home Assistant refused entity subscription %u: %s",
-                     (unsigned) id_value,
-                     cJSON_IsString(code) ? code->valuestring : "unknown_error");
-            atomic_store(&connection->subscription_id, 0);
-            slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
+        bool has_id = command_id(id_item, &id_value);
+        if (has_id && id_value == atomic_load(&connection->subscription_id)) {
+            if (!cJSON_IsTrue(success)) {
+                const cJSON *error = cJSON_GetObjectItemCaseSensitive(root, "error");
+                const cJSON *code = cJSON_GetObjectItemCaseSensitive(error, "code");
+                ESP_LOGE(TAG, "Home Assistant refused entity subscription %u: %s",
+                         (unsigned) id_value,
+                         cJSON_IsString(code) ? code->valuestring : "unknown_error");
+                atomic_store(&connection->subscription_id, 0);
+                slate_state_provider_set_status(SLATE_HA_PROVIDER_ID,
+                                                SLATE_PROVIDER_ERROR);
+            }
+        } else if (has_id) {
+            manager_command_t result = {
+                .kind = CMD_ACTION_RESULT,
+                .generation = context->generation,
+            };
+            result.data.action_result.command_id = id_value;
+            esp_err_t fields = slate_ha_action_result_fields(
+                root, &result.data.action_result.success,
+                result.data.action_result.error,
+                sizeof(result.data.action_result.error));
+            if (fields != ESP_OK) {
+                result.data.action_result.success = false;
+                strlcpy(result.data.action_result.error, "invalid_result",
+                        sizeof(result.data.action_result.error));
+            }
+            if (xQueueSend(s_commands, &result, 0) != pdTRUE) {
+                ESP_LOGW(TAG, "manager queue full; action result %u will time out",
+                         (unsigned) id_value);
+            }
         }
     } else if (strcmp(type, "event") == 0) {
         const cJSON *id_item = cJSON_GetObjectItemCaseSensitive(root, "id");
@@ -1008,6 +1128,7 @@ static void manager_task(void *arg)
             break;
         case CMD_WIFI_DOWN:
             s_wifi_up = false;
+            clear_bus_actions("wifi_disconnected");
             if (slate_store_ha_token_is_set() &&
                 !atomic_load(&s_main.auth_rejected)) {
                 slate_state_provider_set_status(SLATE_HA_PROVIDER_ID,
@@ -1015,6 +1136,7 @@ static void manager_task(void *arg)
             }
             break;
         case CMD_RELOAD:
+            clear_bus_actions("credentials_reloaded");
             connection_destroy();
             explicit_bzero(s_main.token, sizeof(s_main.token));
             s_auth_blocked = false;
@@ -1045,6 +1167,7 @@ static void manager_task(void *arg)
                 break;
             }
             s_auth_blocked = true;
+            clear_bus_actions("authentication_rejected");
             connection_destroy();
             explicit_bzero(s_main.token, sizeof(s_main.token));
             /* ERROR is sticky until CMD_RELOAD supplies tested credentials. */
@@ -1055,6 +1178,7 @@ static void manager_task(void *arg)
                 break;
             }
             s_auth_blocked = true;
+            clear_bus_actions("protocol_error");
             connection_destroy();
             explicit_bzero(s_main.token, sizeof(s_main.token));
             slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
@@ -1067,6 +1191,17 @@ static void manager_task(void *arg)
             if (s_main.client != NULL && atomic_load(&s_main.authenticated) &&
                 connection_resubscribe() != ESP_OK) {
                 ESP_LOGW(TAG, "configuration-driven HA resubscription failed");
+            }
+            break;
+        case CMD_ACTION:
+            connection_send_action(&received.data.action);
+            break;
+        case CMD_ACTION_RESULT:
+            complete_bus_action(&received);
+            break;
+        case CMD_CLEAR_ACTIONS:
+            if (received.generation == s_main.generation) {
+                slate_ha_action_clear();
             }
             break;
         }
@@ -1284,6 +1419,10 @@ esp_err_t slate_ha_init(void)
     if (entities_err != ESP_OK) {
         return entities_err;
     }
+    esp_err_t actions_err = slate_ha_action_tracker_init();
+    if (actions_err != ESP_OK) {
+        return actions_err;
+    }
 
     s_commands = xQueueCreate(MANAGER_QUEUE_DEPTH, sizeof(manager_command_t));
     if (s_commands == NULL) {
@@ -1325,6 +1464,16 @@ esp_err_t slate_ha_init(void)
                                           : SLATE_PROVIDER_UNCONFIGURED);
     }
 
+    const slate_action_provider_t action_provider = {
+        .id = SLATE_HA_PROVIDER_ID,
+        .dispatch = provider_action_dispatch,
+    };
+    esp_err_t action_provider_err = slate_action_provider_register(&action_provider);
+    if (action_provider_err != ESP_OK) {
+        ESP_LOGE(TAG, "semantic action dispatch unavailable: %s",
+                 esp_err_to_name(action_provider_err));
+    }
+
     const httpd_uri_t configure = {
         .uri = SLATE_API_BASE_PATH "/ha",
         .method = HTTP_POST,
@@ -1342,7 +1491,10 @@ esp_err_t slate_ha_init(void)
 
     s_initialized = true;
     ESP_LOGI(TAG, "provider ready: POST " SLATE_API_BASE_PATH "/ha");
-    return provider_err != ESP_OK ? provider_err : route_err;
+    if (provider_err != ESP_OK) {
+        return provider_err;
+    }
+    return action_provider_err != ESP_OK ? action_provider_err : route_err;
 }
 
 esp_err_t slate_ha_start(void)
@@ -1470,6 +1622,8 @@ esp_err_t slate_ha_selftest(void)
 
     CHECK(slate_ha_entities_selftest() == ESP_OK,
           "compressed entity diff and normalized mapping fixtures");
+    CHECK(slate_ha_actions_selftest() == ESP_OK,
+          "service-call mapping and result correlation fixtures");
 
 #undef CHECK
     ESP_LOGI(TAG, "selftest: %u failure(s)", failures);
