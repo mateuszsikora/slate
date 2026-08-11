@@ -31,6 +31,7 @@
 #include "slate_config_api.h"
 #include "slate_direct.h"
 #include "slate_display.h"
+#include "slate_ha.h"
 #include "slate_ota.h"
 #include "slate_setup.h"
 #include "slate_state.h"
@@ -367,6 +368,16 @@ static void start_network(void)
         return;
     }
 
+    /* The adapter registers its API routes before the radio starts, then joins
+     * the Wi-Fi lifecycle here once the event loop and station exist. Reading
+     * the current station snapshot inside slate_ha_start() closes the small
+     * race between these adjacent initialisers. */
+    err = slate_ha_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Home Assistant network lifecycle unavailable: %s — continuing",
+                 esp_err_to_name(err));
+    }
+
     /*
      * The number #55 asks for. S-2 measured 104 167 B of internal DMA-capable
      * memory free with the station alone (§6.2), and the setup access point's
@@ -425,6 +436,19 @@ static void start_api(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "direct provider degraded: %s — continuing", esp_err_to_name(err));
     }
+
+    /* §5.5's first production adapter. It registers even while unconfigured,
+     * so an HA binding is a known provider with honest lifecycle status rather
+     * than §3.3's missing-provider compatibility placeholder. */
+    err = slate_ha_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Home Assistant provider degraded: %s — continuing",
+                 esp_err_to_name(err));
+    }
+
+#ifdef SLATE_HA_SELFTEST
+    slate_ha_selftest();
+#endif
 
 #ifdef SLATE_DIRECT_SELFTEST
     slate_direct_selftest();

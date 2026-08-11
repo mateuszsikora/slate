@@ -2,7 +2,7 @@ idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
     REQUIRES slate_action slate_api slate_config_api slate_coredump slate_direct slate_display
-             slate_ota slate_setup slate_state slate_store slate_ui slate_wifi slate_time slate_ws
+             slate_ha slate_ota slate_setup slate_state slate_store slate_ui slate_wifi slate_time slate_ws
              app_update esp_system esp_event
 )
 
@@ -65,7 +65,7 @@ idf_component_register(
 # `POST /wifi` and the setup page are what M1 exists to replace that with.
 #
 foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_WS_SELFTEST SLATE_STATE_SELFTEST
-             SLATE_DIRECT_SELFTEST SLATE_ACTION_SELFTEST SLATE_CONFIG_API_SELFTEST
+             SLATE_DIRECT_SELFTEST SLATE_ACTION_SELFTEST SLATE_CONFIG_API_SELFTEST SLATE_HA_SELFTEST
              SLATE_OTA_ROLLBACK_SELFTEST
              SLATE_UI_SELFTEST SLATE_UI_LEAK_BYTES SLATE_COREDUMP_SELFTEST
              SLATE_SETUP_AP_PASSWORD SLATE_TIMEZONE)

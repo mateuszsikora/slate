@@ -331,14 +331,15 @@ static cJSON *providers_json(void)
      * §5.1 names two provider ids for version 1 and makes both of them always
      * present in this list — `direct` because it is, and `ha` because it is
      * "present but `unconfigured` until it has credentials". So the shape is
-     * stated here and the values are read from the store: `direct`'s status is
+     * stated here and the values are read from the provider registry: `direct`'s status is
      * §5.4's real one, `degraded` with no attached action consumer and `online`
      * with one, rather than the constant that stood in before it had a provider
-     * to report. `ha` keeps its stand-in until M3 registers an adapter to answer
-     * for it, at which point the same lookup starts telling the truth about it
-     * without this function changing.
+     * to report. The HA adapter likewise owns its real connection lifecycle;
+     * an absent registration still falls back to `unconfigured`, preserving the
+     * stable response shape if that component could not initialise.
      */
     const slate_state_provider_info_t direct_info = provider_info("direct");
+    const slate_state_provider_info_t ha_info = provider_info("ha");
 
     cJSON *providers = cJSON_CreateArray();
     cJSON *direct = cJSON_CreateObject();
@@ -351,9 +352,8 @@ static cJSON *providers_json(void)
                                       direct_info.resource_count) != NULL &&
               cJSON_AddStringToObject(ha, "id", "ha") != NULL &&
               cJSON_AddStringToObject(
-                  ha, "status",
-                  slate_store_ha_token_is_set() ? "offline" : "unconfigured") != NULL &&
-              cJSON_AddNumberToObject(ha, "resource_count", 0) != NULL;
+                  ha, "status", slate_provider_status_str(ha_info.status)) != NULL &&
+              cJSON_AddNumberToObject(ha, "resource_count", ha_info.resource_count) != NULL;
 
     if (ok) {
         ok = cJSON_AddItemToArray(providers, direct);
