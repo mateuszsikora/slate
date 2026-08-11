@@ -1,9 +1,9 @@
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES slate_action slate_api slate_coredump slate_direct slate_display slate_ota slate_setup
-             slate_state slate_store slate_ui slate_wifi slate_time slate_ws app_update esp_system
-             esp_event
+    REQUIRES slate_action slate_api slate_config_api slate_coredump slate_direct slate_display
+             slate_ota slate_setup slate_state slate_store slate_ui slate_wifi slate_time slate_ws
+             app_update esp_system esp_event
 )
 
 #
@@ -19,15 +19,12 @@ idf_component_register(
 #                              a tree to reach it through. Off by default; it
 #                              goes away when #74 and #20 can drive the same
 #                              paths from outside the device.
-#   -DSLATE_DIRECT_SELFTEST=1  bind a fixture resource set in place of the
-#                              configuration nothing writes yet, check the
-#                              §5.4 invariants that have no external surface,
-#                              and hand an attaching action consumer one action
-#                              to answer — there is no tile to tap until #22.
-#                              It leaves the fixture bound on purpose, so
-#                              `tools/direct/` can drive the endpoint from
-#                              outside the device. Off by default; it goes away
-#                              with #19, #20 and #22.
+#   -DSLATE_DIRECT_SELFTEST=1  bind a fixture resource set, check the §5.4
+#                              invariants that have no external surface, and
+#                              hand an attaching action consumer one action to
+#                              answer. The public configuration API supersedes
+#                              its binding fixture for end-to-end verification;
+#                              the component-level checks remain off by default.
 #   -DSLATE_ACTION_SELFTEST=1  exercise capability validation, optimistic
 #                              overlays and every completion path against the
 #                              real state store and a fixture provider.

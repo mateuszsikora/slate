@@ -28,6 +28,7 @@
 #include "slate_api.h"
 #include "slate_action.h"
 #include "slate_coredump.h"
+#include "slate_config_api.h"
 #include "slate_direct.h"
 #include "slate_display.h"
 #include "slate_ota.h"
@@ -123,16 +124,14 @@ static int s_failures;
     } while (0)
 
 /*
- * The LittleFS half of this issue's "Done when" — a configuration that survives
- * an application update — cannot be exercised from outside the device until
- * `PUT /config` exists (#24). Until then this knob is the only writer:
+ * Low-level LittleFS and token verifier, independent of the configuration API:
  *
  *     idf.py -DSLATE_STORE_SELFTEST=1 build flash monitor
  *
  * It writes a configuration on the first boot that finds none, and reports what
  * it reads back on every boot afterwards. Reflash the application partition
- * between the two and the report is the proof. It is off by default and comes
- * out when #24 lands.
+ * between the two and the report is the proof. It stays off by default; #24's
+ * endpoint verification exercises the same store through its public boundary.
  *
  * Every case states a verdict rather than printing a value. A check that prints
  * `refused with ESP_OK` and calls it a day is not a check.
@@ -491,6 +490,15 @@ static void start_ui(void)
     esp_err_t err = slate_ui_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "UI runtime degraded: %s — keeping the current screen",
+                 esp_err_to_name(err));
+    }
+
+    /* The route composes the parser, runtime, store and WebSocket, so it is
+     * registered only after all four boundaries exist. GET remains useful on
+     * a degraded display, while PUT will report that activation failed. */
+    err = slate_config_api_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "configuration API degraded: %s — continuing",
                  esp_err_to_name(err));
     }
 }
