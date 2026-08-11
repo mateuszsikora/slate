@@ -24,6 +24,9 @@ typedef enum {
     SLATE_WS_MODE_EDIT,
 } slate_ws_mode_t;
 
+/** @brief Called after the shared editor mode changes; must not block. */
+typedef void (*slate_ws_mode_observer_fn)(void *ctx, slate_ws_mode_t mode);
+
 /**
  * @brief Start retaining logs before any Slate subsystem initialisation.
  *
@@ -39,6 +42,16 @@ esp_err_t slate_ws_init(void);
 
 /** @brief Current editor mode; safe from any task. */
 slate_ws_mode_t slate_ws_mode(void);
+
+/**
+ * @brief Install the one observer that owns mode-dependent application state.
+ *
+ * Passing NULL removes the observer. A second non-NULL observer is refused.
+ * The callback runs after the WebSocket state lock is released, on whichever
+ * task changed the mode, and must hand off any blocking work.
+ * Returns ESP_ERR_NOT_FOUND before the WebSocket task is available.
+ */
+esp_err_t slate_ws_mode_observer_set(slate_ws_mode_observer_fn observer, void *ctx);
 
 /* --- Provider action consumers (§4.2, §5.4) ------------------------------ */
 

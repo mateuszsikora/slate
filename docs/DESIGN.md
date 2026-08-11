@@ -225,6 +225,24 @@ returns `204 No Content`, while an invalid one returns `400 Bad Request`. There
 is no `200 {"valid": false}` response. Validation does not change the active or
 stored configuration.
 
+`GET /config` returns the raw active configuration document. While a transient
+preview is active, that is the in-memory preview; otherwise it is the persisted
+document. It returns `404 not_found` when neither exists.
+
+`PUT /config` returns `204 No Content` after a successful replacement. It first
+validates the complete document, then atomically replaces the LVGL tree and all
+provider subscriptions. A regular replacement is persisted only after that
+activation succeeds; a transient replacement requires edit mode and never
+writes flash. Leaving edit mode discards a RAM-only transient replacement
+and restores the persisted presentation and subscription set. When persistence
+fails after activation, the submitted document remains the active in-memory
+configuration and the previous persisted document is preserved for the next
+boot. Every activated replacement publishes a `reloaded` WebSocket event, even
+when its subsequent persistence fails. Transient requests outside edit mode
+return `409 edit_mode_required`; any query other than the exact
+`?transient=1` returns `400 invalid_query`; activation and persistence failures
+return `500 apply_failed` and `500 store_failed`, respectively.
+
 Document-wide errors and errors belonging to an identifiable tile are kept
 separate. `tile_errors` is keyed by `tile.id`, and each value is an array because
 one tile may violate more than one rule:

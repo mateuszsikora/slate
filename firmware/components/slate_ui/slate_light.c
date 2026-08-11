@@ -401,12 +401,21 @@ void slate_light_update(slate_light_view_t *view, const slate_resource_t *resour
                           resource->name[0] != '\0' ? resource->name : view->resource);
     }
 
-    bool brightness_cap = present && slate_capabilities_have(
-                                         &resource->capabilities,
-                                         SLATE_ACTION_SET_BRIGHTNESS);
-    bool temperature_cap = present && slate_capabilities_have(
-                                          &resource->capabilities,
-                                          SLATE_ACTION_SET_COLOR_TEMPERATURE);
+    /* Capabilities describe the resource, not the controls this tile geometry
+     * owns. A compact light deliberately has no sliders; a later snapshot may
+     * still advertise dimming or colour temperature, and must not turn those
+     * absent LVGL objects into call targets. */
+    bool brightness_control = view->brightness_slider != NULL &&
+                              view->brightness_value != NULL;
+    bool temperature_control = view->temperature_slider != NULL &&
+                               view->temperature_value != NULL;
+    bool brightness_cap = brightness_control && present &&
+                          slate_capabilities_have(&resource->capabilities,
+                                                  SLATE_ACTION_SET_BRIGHTNESS);
+    bool temperature_cap = temperature_control && present &&
+                           slate_capabilities_have(
+                               &resource->capabilities,
+                               SLATE_ACTION_SET_COLOR_TEMPERATURE);
     bool show_temperature = temperature_cap;
     if (!temperature_cap) {
         view->temperature_range_valid = false;
