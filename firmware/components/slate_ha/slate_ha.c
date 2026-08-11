@@ -8,6 +8,7 @@
 
 #include "slate_ha.h"
 
+#include <math.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -84,7 +85,10 @@ typedef struct {
 typedef struct {
     char *data;
     size_t used;
-    size_t length;
+    size_t capacity;
+    size_t frame_used;
+    size_t frame_length;
+    bool active;
 } payload_buffer_t;
 
 typedef struct main_connection main_connection_t;
@@ -293,48 +297,81 @@ static bool message_type(message_buffer_t *message, char *out, size_t out_len)
 static void payload_reset(payload_buffer_t *message)
 {
     free(message->data);
-    message->data = NULL;
-    message->used = 0;
-    message->length = 0;
+    *message = (payload_buffer_t) {0};
 }
 
-/** Reassemble a bounded HA payload directly in PSRAM. */
+static bool payload_reserve(payload_buffer_t *message, size_t required)
+{
+    if (required <= message->capacity) {
+        return true;
+    }
+    size_t capacity = message->capacity > 0 ? message->capacity : 1024;
+    while (capacity < required) {
+        capacity = capacity > MAIN_MESSAGE_MAX / 2 ? MAIN_MESSAGE_MAX : capacity * 2;
+        if (capacity < required && capacity == MAIN_MESSAGE_MAX) {
+            return false;
+        }
+    }
+
+    char *fresh = heap_caps_malloc_prefer(capacity + 1, 2,
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                           MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (fresh == NULL) {
+        return false;
+    }
+    if (message->used > 0) {
+        memcpy(fresh, message->data, message->used);
+    }
+    free(message->data);
+    message->data = fresh;
+    message->capacity = capacity;
+    return true;
+}
+
+/** Reassemble a bounded HA message across TCP chunks and WebSocket fragments. */
 static bool payload_append(payload_buffer_t *message,
                            const esp_websocket_event_data_t *event, bool *complete)
 {
     *complete = false;
-    if (event->op_code != 0x1 && !(event->op_code == 0x0 && event->payload_offset > 0)) {
-        payload_reset(message);
-        return false;
-    }
     if (event->payload_len <= 0 || (size_t) event->payload_len > MAIN_MESSAGE_MAX ||
-        event->payload_offset < 0 || event->data_len < 0 ||
-        (size_t) event->payload_offset != message->used ||
+        event->payload_offset < 0 || event->data_len <= 0 || event->data_ptr == NULL ||
         (size_t) event->payload_offset + (size_t) event->data_len >
             (size_t) event->payload_len) {
         payload_reset(message);
         return false;
     }
 
-    if (message->data == NULL) {
-        message->data = heap_caps_malloc((size_t) event->payload_len + 1,
-                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (message->data == NULL) {
-            message->data = heap_caps_malloc((size_t) event->payload_len + 1,
-                                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        }
-        if (message->data == NULL) {
+    if (!message->active) {
+        if (event->op_code != 0x1 || event->payload_offset != 0) {
+            payload_reset(message);
             return false;
         }
-        message->length = (size_t) event->payload_len;
-    } else if (message->length != (size_t) event->payload_len) {
+        message->active = true;
+        message->frame_length = (size_t) event->payload_len;
+    } else if (event->payload_offset == 0) {
+        if (message->frame_used != message->frame_length || event->op_code != 0x0) {
+            payload_reset(message);
+            return false;
+        }
+        message->frame_used = 0;
+        message->frame_length = (size_t) event->payload_len;
+    } else if ((size_t) event->payload_offset != message->frame_used ||
+               (size_t) event->payload_len != message->frame_length ||
+               (event->op_code != 0x1 && event->op_code != 0x0)) {
         payload_reset(message);
         return false;
     }
 
+    size_t chunk = (size_t) event->data_len;
+    if (message->used > MAIN_MESSAGE_MAX - chunk ||
+        !payload_reserve(message, message->used + chunk)) {
+        payload_reset(message);
+        return false;
+    }
     memcpy(message->data + message->used, event->data_ptr, (size_t) event->data_len);
-    message->used += (size_t) event->data_len;
-    if (event->fin && message->used == message->length) {
+    message->used += chunk;
+    message->frame_used += chunk;
+    if (event->fin && message->frame_used == message->frame_length) {
         message->data[message->used] = '\0';
         *complete = true;
     }
@@ -572,6 +609,20 @@ static uint32_t next_command_id(void)
     return s_main.next_command_id;
 }
 
+static bool command_id(const cJSON *item, uint32_t *out)
+{
+    if (!cJSON_IsNumber(item) || !isfinite(item->valuedouble) ||
+        item->valuedouble < 1 || item->valuedouble > UINT32_MAX) {
+        return false;
+    }
+    uint32_t value = (uint32_t) item->valuedouble;
+    if ((double) value != item->valuedouble) {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
 static esp_err_t send_json_frame(cJSON *root)
 {
     char *frame = cJSON_PrintUnformatted(root);
@@ -633,7 +684,12 @@ static esp_err_t connection_resubscribe(void)
         return ESP_OK;
     }
 
-    slate_ha_entities_prepare_subscription();
+    esp_err_t prepare_err = slate_ha_entities_prepare_subscription();
+    if (prepare_err != ESP_OK) {
+        cJSON_Delete(root);
+        slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
+        return prepare_err;
+    }
     atomic_store(&s_main.subscription_id, subscription);
     esp_err_t err = send_json_frame(root);
     cJSON_Delete(root);
@@ -649,19 +705,36 @@ static esp_err_t connection_resubscribe(void)
     return ESP_OK;
 }
 
+static bool subscription_is_current(size_t count, uint32_t subscription,
+                                    slate_provider_status_t status)
+{
+    return status == SLATE_PROVIDER_ONLINE &&
+           ((count == 0 && subscription == 0) ||
+            (count > 0 && subscription != 0));
+}
+
 static esp_err_t provider_subscribe(void *ctx, const char *const *resources, size_t count)
 {
     (void) ctx;
-    esp_err_t err = slate_ha_entities_bind(resources, count);
+    bool changed = false;
+    esp_err_t err = slate_ha_entities_bind(resources, count, &changed);
     if (err != ESP_OK) {
         slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
         return err;
+    }
+    uint32_t subscription = atomic_load(&s_main.subscription_id);
+    bool subscription_current = subscription_is_current(
+        count, subscription, slate_state_provider_status(SLATE_HA_PROVIDER_ID));
+    if (!changed &&
+        (!atomic_load(&s_main.authenticated) || subscription_current)) {
+        return ESP_OK;
     }
 
     bool expected = false;
     if (atomic_compare_exchange_strong(&s_resubscribe_queued, &expected, true) &&
         !command_send(CMD_RESUBSCRIBE, 0, NULL, 0)) {
         atomic_store(&s_resubscribe_queued, false);
+        slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
         return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;
@@ -738,29 +811,49 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
     cJSON *root = cJSON_ParseWithLength(context->message.data, context->message.used);
     payload_reset(&context->message);
+    if (!cJSON_IsObject(root)) {
+        ESP_LOGE(TAG, "could not parse Home Assistant JSON payload");
+        slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
+        cJSON_Delete(root);
+        return;
+    }
     const cJSON *type_item = cJSON_GetObjectItemCaseSensitive(root, "type");
     const char *type = cJSON_IsString(type_item) ? type_item->valuestring : NULL;
-    if (type != NULL && strcmp(type, "auth_required") == 0) {
+    if (type == NULL) {
+        ESP_LOGE(TAG, "Home Assistant JSON payload has no message type");
+        slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
+        cJSON_Delete(root);
+        return;
+    }
+    if (strcmp(type, "auth_required") == 0) {
         if (atomic_load(&connection->auth_rejected)) {
             ESP_LOGW(TAG, "refusing to resend a rejected Home Assistant token");
         } else if (!send_auth(event->client, connection->token)) {
             ESP_LOGW(TAG, "could not send Home Assistant authentication frame");
         }
-    } else if (type != NULL && strcmp(type, "auth_ok") == 0) {
+    } else if (strcmp(type, "auth_ok") == 0) {
         atomic_store(&connection->backoff_index, 0);
         esp_websocket_client_set_reconnect_timeout(event->client, (int) BACKOFF_MS[0]);
-        command_send(CMD_AUTH_OK, context->generation, NULL, 0);
-    } else if (type != NULL && strcmp(type, "auth_invalid") == 0) {
+        if (!command_send(CMD_AUTH_OK, context->generation, NULL, 0)) {
+            /* Authentication already succeeded on the wire.  Retaining that
+             * fact lets a later provider rebuild retry the subscription if
+             * the manager queue was temporarily full. */
+            atomic_store(&connection->authenticated, true);
+            slate_state_provider_set_status(SLATE_HA_PROVIDER_ID,
+                                            SLATE_PROVIDER_ERROR);
+        }
+    } else if (strcmp(type, "auth_invalid") == 0) {
         atomic_store(&connection->auth_rejected, true);
         slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
         ESP_LOGE(TAG, "Home Assistant rejected the stored token; waiting for new credentials");
         command_send(CMD_AUTH_INVALID, context->generation, NULL, 0);
-    } else if (type != NULL && strcmp(type, "result") == 0) {
+    } else if (strcmp(type, "result") == 0) {
         const cJSON *id_item = cJSON_GetObjectItemCaseSensitive(root, "id");
         const cJSON *success = cJSON_GetObjectItemCaseSensitive(root, "success");
-        uint32_t id_value = cJSON_IsNumber(id_item) ? (uint32_t) id_item->valuedouble : 0;
-        if (id_value != 0 && id_value == atomic_load(&connection->subscription_id) &&
-            cJSON_IsFalse(success)) {
+        uint32_t id_value = 0;
+        if (command_id(id_item, &id_value) &&
+            id_value == atomic_load(&connection->subscription_id) &&
+            !cJSON_IsTrue(success)) {
             const cJSON *error = cJSON_GetObjectItemCaseSensitive(root, "error");
             const cJSON *code = cJSON_GetObjectItemCaseSensitive(error, "code");
             ESP_LOGE(TAG, "Home Assistant refused entity subscription %u: %s",
@@ -769,15 +862,20 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             atomic_store(&connection->subscription_id, 0);
             slate_state_provider_set_status(SLATE_HA_PROVIDER_ID, SLATE_PROVIDER_ERROR);
         }
-    } else if (type != NULL && strcmp(type, "event") == 0) {
+    } else if (strcmp(type, "event") == 0) {
         const cJSON *id_item = cJSON_GetObjectItemCaseSensitive(root, "id");
-        uint32_t id_value = cJSON_IsNumber(id_item) ? (uint32_t) id_item->valuedouble : 0;
+        uint32_t id_value = 0;
         const cJSON *payload = cJSON_GetObjectItemCaseSensitive(root, "event");
-        if (id_value != 0 && id_value == atomic_load(&connection->subscription_id)) {
+        if (command_id(id_item, &id_value) &&
+            id_value == atomic_load(&connection->subscription_id)) {
             esp_err_t err = slate_ha_entities_process_event(payload);
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "discarding malformed HA entity diff: %s",
                          esp_err_to_name(err));
+                /* A compressed diff cannot be skipped without making the
+                 * adapter's complete snapshots suspect until reconnect. */
+                slate_state_provider_set_status(SLATE_HA_PROVIDER_ID,
+                                                SLATE_PROVIDER_ERROR);
             }
         }
     }
@@ -1306,6 +1404,60 @@ esp_err_t slate_ha_selftest(void)
     CHECK(!websocket_uri("http://ha:abc", uri, sizeof(uri)), "non-numeric port refused");
     CHECK(!websocket_uri("http://ha:0", uri, sizeof(uri)), "zero port refused");
     CHECK(!websocket_uri("http://user@ha", uri, sizeof(uri)), "userinfo refused");
+
+    payload_buffer_t assembled = {0};
+    bool complete = false;
+    esp_websocket_event_data_t first_chunk = {
+        .data_ptr = "abc",
+        .data_len = 3,
+        .op_code = 0x1,
+        .payload_len = 6,
+        .payload_offset = 0,
+        .fin = 1,
+    };
+    esp_websocket_event_data_t second_chunk = first_chunk;
+    second_chunk.data_ptr = "def";
+    second_chunk.payload_offset = 3;
+    CHECK(payload_append(&assembled, &first_chunk, &complete) && !complete &&
+              payload_append(&assembled, &second_chunk, &complete) && complete &&
+              strcmp(assembled.data, "abcdef") == 0,
+          "reassemble TCP chunks of one WebSocket frame");
+    payload_reset(&assembled);
+
+    esp_websocket_event_data_t first_fragment = first_chunk;
+    first_fragment.payload_len = 3;
+    first_fragment.fin = 0;
+    esp_websocket_event_data_t final_fragment = first_fragment;
+    final_fragment.data_ptr = "def";
+    final_fragment.op_code = 0x0;
+    final_fragment.fin = 1;
+    CHECK(payload_append(&assembled, &first_fragment, &complete) && !complete &&
+              payload_append(&assembled, &final_fragment, &complete) && complete &&
+              strcmp(assembled.data, "abcdef") == 0,
+          "reassemble WebSocket continuation frames");
+    payload_reset(&assembled);
+    CHECK(!payload_append(&assembled, &final_fragment, &complete),
+          "refuse continuation frame without a message");
+
+    uint32_t parsed_id = 0;
+    cJSON *valid_id = cJSON_CreateNumber(42);
+    cJSON *maximum_id = cJSON_CreateNumber(UINT32_MAX);
+    cJSON *fractional_id = cJSON_CreateNumber(42.5);
+    CHECK(valid_id != NULL && maximum_id != NULL && fractional_id != NULL &&
+              command_id(valid_id, &parsed_id) && parsed_id == 42 &&
+              command_id(maximum_id, &parsed_id) && parsed_id == UINT32_MAX &&
+              !command_id(fractional_id, &parsed_id),
+          "command ids are bounded positive integers");
+    cJSON_Delete(valid_id);
+    cJSON_Delete(maximum_id);
+    cJSON_Delete(fractional_id);
+
+    CHECK(subscription_is_current(0, 0, SLATE_PROVIDER_ONLINE) &&
+              subscription_is_current(2, 7, SLATE_PROVIDER_ONLINE) &&
+              !subscription_is_current(0, 7, SLATE_PROVIDER_ONLINE) &&
+              !subscription_is_current(2, 0, SLATE_PROVIDER_ONLINE) &&
+              !subscription_is_current(0, 0, SLATE_PROVIDER_ERROR),
+          "subscription retry checks desired ids and provider health");
 
     const uint32_t expected[] = {1000, 2000, 4000, 8000, 15000, 30000, 30000};
     size_t index = 0;

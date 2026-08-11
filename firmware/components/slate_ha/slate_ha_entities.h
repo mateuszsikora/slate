@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "cJSON.h"
@@ -9,14 +10,15 @@
 
 esp_err_t slate_ha_entities_init(void);
 
-/* Replace the exact entity-id set supplied by the active configuration. */
-esp_err_t slate_ha_entities_bind(const char *const *resources, size_t count);
+/* Replace the exact entity-id set; `changed` reports membership changes. */
+esp_err_t slate_ha_entities_bind(const char *const *resources, size_t count,
+                                 bool *changed);
 
 /* Append one atomic snapshot of the current ids and return its count. */
 esp_err_t slate_ha_entities_append_ids(cJSON *array, size_t *count);
 
 /* A new subscription starts with every requested entity absent until HA adds it. */
-void slate_ha_entities_prepare_subscription(void);
+esp_err_t slate_ha_entities_prepare_subscription(void);
 
 /* Expand one subscribe_entities event and publish complete neutral snapshots. */
 esp_err_t slate_ha_entities_process_event(const cJSON *event);

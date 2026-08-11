@@ -25,6 +25,8 @@ typedef struct {
     char resource[SLATE_RESOURCE_ID_MAX + 1];
     bool present;
     bool has_state;
+    bool raw_state_numeric;
+    double raw_state_number;
     char raw_state[HA_STATE_MAX + 1];
 
     bool has_friendly_name;
@@ -82,6 +84,8 @@ static ha_entity_t *find_entity(const char *resource)
     }
     return NULL;
 }
+
+static bool parse_sensor_number(const char *text, double *out);
 
 static bool number_value(const cJSON *item, double *out)
 {
@@ -230,6 +234,7 @@ static void apply_state_fields(ha_entity_t *entity, const cJSON *fields, bool re
     if (replace) {
         entity->present = true;
         entity->has_state = false;
+        entity->raw_state_numeric = false;
         entity->normalized_name[0] = '\0';
         clear_raw_attributes(entity);
     }
@@ -240,7 +245,10 @@ static void apply_state_fields(ha_entity_t *entity, const cJSON *fields, bool re
     const cJSON *state = cJSON_GetObjectItemCaseSensitive(fields, "s");
     if (state != NULL) {
         entity->has_state = cJSON_IsString(state);
+        entity->raw_state_numeric = false;
         if (entity->has_state) {
+            entity->raw_state_numeric =
+                parse_sensor_number(state->valuestring, &entity->raw_state_number);
             strlcpy(entity->raw_state, state->valuestring, sizeof(entity->raw_state));
         }
     }
@@ -398,7 +406,10 @@ static bool normalize_entity(ha_entity_t *entity, ha_entity_t *out,
         }
         if (current) {
             slate_sensor_state_t sensor = {0};
-            sensor.numeric = parse_sensor_number(entity->raw_state, &sensor.value);
+            sensor.numeric = entity->raw_state_numeric;
+            if (sensor.numeric) {
+                sensor.value = entity->raw_state_number;
+            }
             if (!sensor.numeric) {
                 strlcpy(sensor.text, entity->raw_state, sizeof(sensor.text));
                 if (sensor.text[0] == '\0') {
@@ -540,18 +551,41 @@ esp_err_t slate_ha_entities_init(void)
     return s_lock != NULL ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
-esp_err_t slate_ha_entities_bind(const char *const *resources, size_t count)
+esp_err_t slate_ha_entities_bind(const char *const *resources, size_t count,
+                                 bool *changed)
 {
     if (s_lock == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (changed == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *changed = false;
     if (count > SLATE_STATE_MAX_RESOURCES || (count > 0 && resources == NULL)) {
-        return count > SLATE_STATE_MAX_RESOURCES ? ESP_ERR_INVALID_SIZE : ESP_ERR_INVALID_ARG;
+        return count > SLATE_STATE_MAX_RESOURCES ? ESP_ERR_INVALID_SIZE
+                                                 : ESP_ERR_INVALID_ARG;
     }
     for (size_t i = 0; i < count; i++) {
         if (!resource_ok(resources[i])) {
             return ESP_ERR_INVALID_ARG;
         }
+        for (size_t j = 0; j < i; j++) {
+            if (strcmp(resources[i], resources[j]) == 0) {
+                return ESP_ERR_INVALID_ARG;
+            }
+        }
+    }
+
+    /* Membership is the contract. A layout-only rebuild may reorder the same
+     * ids and must not interrupt a healthy HA subscription. */
+    LOCK();
+    bool same = count == s_count;
+    for (size_t i = 0; same && i < count; i++) {
+        same = find_entity(resources[i]) != NULL;
+    }
+    UNLOCK();
+    if (same) {
+        return ESP_OK;
     }
 
     ha_entity_t *fresh = NULL;
@@ -580,6 +614,7 @@ esp_err_t slate_ha_entities_bind(const char *const *resources, size_t count)
     s_count = count;
     UNLOCK();
     free(old);
+    *changed = true;
     return ESP_OK;
 }
 
@@ -607,10 +642,10 @@ esp_err_t slate_ha_entities_append_ids(cJSON *array, size_t *count)
     return err;
 }
 
-void slate_ha_entities_prepare_subscription(void)
+esp_err_t slate_ha_entities_prepare_subscription(void)
 {
     if (s_lock == NULL) {
-        return;
+        return ESP_ERR_INVALID_STATE;
     }
 
     typedef struct {
@@ -630,7 +665,7 @@ void slate_ha_entities_prepare_subscription(void)
     if (count > 0 && prepared == NULL) {
         UNLOCK();
         ESP_LOGW(TAG, "no memory to mark a new subscription unavailable");
-        return;
+        return ESP_ERR_NO_MEM;
     }
     for (size_t i = 0; i < count; i++) {
         s_entities[i].present = false;
@@ -642,12 +677,17 @@ void slate_ha_entities_prepare_subscription(void)
     }
     UNLOCK();
 
+    esp_err_t first_error = ESP_OK;
     for (size_t i = 0; i < count; i++) {
         if (prepared[i].supported) {
-            publish_copy(&prepared[i].entity, prepared[i].kind, false);
+            esp_err_t err = publish_copy(&prepared[i].entity, prepared[i].kind, false);
+            if (err != ESP_OK && first_error == ESP_OK) {
+                first_error = err;
+            }
         }
     }
     free(prepared);
+    return first_error;
 }
 
 esp_err_t slate_ha_entities_process_event(const cJSON *event)
@@ -670,7 +710,19 @@ esp_err_t slate_ha_entities_selftest(void)
     } while (0)
 
     const char *ids[] = {"light.kitchen", "sensor.room_temperature"};
-    CHECK(slate_ha_entities_bind(ids, 2) == ESP_OK, "bind explicit entity ids");
+    bool binding_changed = false;
+    CHECK(slate_ha_entities_bind(ids, 2, &binding_changed) == ESP_OK && binding_changed,
+          "bind explicit entity ids");
+    const char *reordered[] = {"sensor.room_temperature", "light.kitchen"};
+    CHECK(slate_ha_entities_bind(reordered, 2, &binding_changed) == ESP_OK &&
+              !binding_changed,
+          "unchanged entity set avoids resubscription");
+    const char *duplicates[] = {"light.kitchen", "light.kitchen"};
+    CHECK(slate_ha_entities_bind(duplicates, 2, &binding_changed) == ESP_ERR_INVALID_ARG &&
+              !binding_changed,
+          "duplicate entity ids are refused");
+    CHECK(slate_ha_entities_prepare_subscription() == ESP_OK,
+          "prepare bound entities as unavailable");
 
     cJSON *initial = cJSON_Parse(
         "{\"a\":{\"light.kitchen\":{\"s\":\"on\",\"a\":{"
@@ -723,6 +775,28 @@ esp_err_t slate_ha_entities_selftest(void)
               light.normalized_light.brightness == 0 && light.normalized_name[0] == '\0',
           "partial light update keeps a complete snapshot");
 
+    cJSON *long_number = cJSON_Parse(
+        "{\"c\":{\"sensor.room_temperature\":{\"+\":{"
+        "\"s\":\"1234567890123456789012345678901234567890\"}}}}"
+    );
+    CHECK(long_number != NULL && process_event(long_number, false) == ESP_OK,
+          "accept long textual sensor state");
+    cJSON_Delete(long_number);
+    LOCK();
+    mapped_sensor = normalize_entity(find_entity(ids[1]), &sensor, &sensor_kind,
+                                     &sensor_available);
+    UNLOCK();
+    CHECK(mapped_sensor && sensor_available && sensor.normalized_sensor.numeric &&
+              sensor.normalized_sensor.value > 1e39,
+          "long numeric sensor state is parsed before text truncation");
+
+    cJSON *restore_sensor = cJSON_Parse(
+        "{\"c\":{\"sensor.room_temperature\":{\"+\":{\"s\":\"21.5\"}}}}"
+    );
+    CHECK(restore_sensor != NULL && process_event(restore_sensor, false) == ESP_OK,
+          "restore numeric sensor fixture");
+    cJSON_Delete(restore_sensor);
+
     cJSON *removed = cJSON_Parse("{\"r\":[\"sensor.room_temperature\"]}");
     CHECK(removed != NULL && process_event(removed, false) == ESP_OK,
           "expand entity removal");
@@ -735,7 +809,13 @@ esp_err_t slate_ha_entities_selftest(void)
               sensor.normalized_sensor.value == 21.5,
           "removed entity keeps its last value unavailable");
 
-    CHECK(slate_ha_entities_bind(NULL, 0) == ESP_OK, "empty set unsubscribes everything");
+    cJSON *bad_diff = cJSON_Parse("{\"c\":[]}");
+    CHECK(bad_diff != NULL && process_event(bad_diff, false) == ESP_ERR_INVALID_ARG,
+          "malformed compressed diff is refused");
+    cJSON_Delete(bad_diff);
+
+    CHECK(slate_ha_entities_bind(NULL, 0, &binding_changed) == ESP_OK && binding_changed,
+          "empty set unsubscribes everything");
 
 #undef CHECK
     ESP_LOGI(TAG, "selftest: %u failure(s)", failures);
