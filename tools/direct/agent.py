@@ -131,6 +131,7 @@ class Light:
         self.resource = resource
         self.on = True
         self.brightness = 62
+        self.color_temperature = 3200
 
     def apply(self, action: str, params: dict) -> bool:
         """Carry out a semantic action. False is a refusal this client owns."""
@@ -151,6 +152,15 @@ class Light:
                 return False
             self.brightness = int(value)
             self.on = self.brightness > 0
+        elif action == "set_color_temperature":
+            value = params.get("value")
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not 2200 <= value <= 6500
+            ):
+                return False
+            self.color_temperature = int(value)
         else:
             return False
         return True
@@ -161,11 +171,16 @@ class Light:
             "kind": "light",
             "name": "Living room",
             "available": True,
-            "state": {"power": "on" if self.on else "off", "brightness": self.brightness},
+            "state": {
+                "power": "on" if self.on else "off",
+                "brightness": self.brightness,
+                "color_temperature": self.color_temperature,
+            },
             "capabilities": {
                 "toggle": True,
                 "set_power": True,
                 "set_brightness": {"min": 0, "max": 100},
+                "set_color_temperature": {"min": 2200, "max": 6500},
             },
         }
 

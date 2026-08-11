@@ -20,6 +20,7 @@
 
 #include "slate_action.h"
 #include "slate_display.h"
+#include "slate_light.h"
 #include "slate_sensor.h"
 #include "slate_state.h"
 #include "slate_store.h"
@@ -51,6 +52,7 @@ typedef struct {
     lv_obj_t *tile;
     lv_obj_t *name;
     lv_obj_t *detail;
+    slate_light_view_t light;
     slate_sensor_view_t sensor;
 } binding_view_t;
 
@@ -237,6 +239,12 @@ static void update_view(binding_view_t *view, const slate_resource_t *resource,
 
     if (view->kind == SLATE_KIND_SENSOR && view->sensor.value != NULL) {
         update_sensor_view(view, resource, theme);
+        style_presentation(view, resource->presentation, feedback.phase, theme);
+        return;
+    }
+
+    if (view->kind == SLATE_KIND_LIGHT && view->light.icon != NULL) {
+        slate_light_update(&view->light, resource, &feedback, theme);
         style_presentation(view, resource->presentation, feedback.phase, theme);
         return;
     }
@@ -452,6 +460,29 @@ static bool build_sensor_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
     return slate_sensor_build(object, tile, theme, &view->sensor, &view->name);
 }
 
+static bool build_light_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
+                             lv_obj_t *object, size_t *view_index)
+{
+    const slate_config_binding_t *binding = &tile->bindings[0];
+    binding_view_t *view = &tree->views[(*view_index)++];
+
+    if (strlcpy(view->provider, binding->provider, sizeof(view->provider)) >=
+            sizeof(view->provider) ||
+        strlcpy(view->resource, binding->resource, sizeof(view->resource)) >=
+            sizeof(view->resource)) {
+        return false;
+    }
+    view->kind = SLATE_KIND_LIGHT;
+    view->label_override = tile->label != NULL;
+    view->tile = object;
+    if (!slate_light_build(object, tile, tree->theme, &view->light,
+                           view->provider, view->resource)) {
+        return false;
+    }
+    view->name = view->light.name;
+    return true;
+}
+
 static bool build_known_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
                              lv_obj_t *object, size_t *view_index)
 {
@@ -539,6 +570,11 @@ static ui_tree_t *build_config_tree(const slate_config_t *config)
 #endif
         if (tile->component == SLATE_COMPONENT_UNKNOWN) {
             if (!build_unknown_tile(tree, tile, object)) {
+                tree_destroy(tree);
+                return NULL;
+            }
+        } else if (tile->component == SLATE_COMPONENT_LIGHT) {
+            if (!build_light_tile(tree, tile, object, &view_index)) {
                 tree_destroy(tree);
                 return NULL;
             }
@@ -837,6 +873,12 @@ bool slate_ui_ready(void)
 typedef struct {
     size_t subscriptions;
     unsigned calls;
+    unsigned action_calls;
+    uint32_t action_id;
+    slate_action_t action;
+    slate_action_value_type_t value_type;
+    int32_t value;
+    char action_resource[SLATE_RESOURCE_ID_MAX + 1];
 } fixture_provider_t;
 
 typedef struct {
@@ -884,6 +926,21 @@ static esp_err_t fixture_subscribe(void *ctx, const char *const *resources, size
     fixture_provider_t *fixture = ctx;
     fixture->subscriptions = count;
     fixture->calls++;
+    return ESP_OK;
+}
+
+static esp_err_t fixture_dispatch(void *ctx, uint32_t id,
+                                  const slate_action_request_t *request)
+{
+    fixture_provider_t *fixture = ctx;
+    fixture->action_calls++;
+    fixture->action_id = id;
+    fixture->action = request->action;
+    fixture->value_type = request->value_type;
+    fixture->value = request->value_type == SLATE_ACTION_VALUE_NUMBER
+                         ? request->value.number : 0;
+    strlcpy(fixture->action_resource, request->resource,
+            sizeof(fixture->action_resource));
     return ESP_OK;
 }
 
@@ -1106,6 +1163,51 @@ static slate_config_t *sensor_icon_test_config(void)
     return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
 }
 
+static slate_config_t *light_test_config(void)
+{
+    static const char JSON[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"lights\",\"pages\":[{"
+        "\"id\":\"lights\",\"title\":\"Light component #22\",\"tiles\":["
+        "{\"id\":\"compact\",\"type\":\"light\",\"pos\":[0,0],\"size\":[1,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"living-room\"}},"
+        "{\"id\":\"wide\",\"type\":\"light\",\"pos\":[1,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"kitchen\"}},"
+        "{\"id\":\"readonly\",\"type\":\"light\",\"pos\":[3,0],\"size\":[1,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"readonly\"}},"
+        "{\"id\":\"large\",\"type\":\"light\",\"label\":\"Mood light\","
+        "\"icon\":\"floor-lamp\",\"pos\":[0,1],\"size\":[2,2],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"studio\"}},"
+        "{\"id\":\"toggle-only\",\"type\":\"light\",\"pos\":[2,1],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"switch-only\"}},"
+        "{\"id\":\"missing\",\"type\":\"light\",\"pos\":[2,2],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"missing-light\"}}]}]}";
+
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
+static slate_config_t *light_action_test_config(void)
+{
+    static const char JSON[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"actions\",\"pages\":[{"
+        "\"id\":\"actions\",\"title\":\"Light actions #22\",\"tiles\":["
+        "{\"id\":\"toggle\",\"type\":\"light\",\"pos\":[0,0],\"size\":[1,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"action-toggle\"}},"
+        "{\"id\":\"dimmer\",\"type\":\"light\",\"pos\":[1,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"action-dimmer\"}}]}]}";
+
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
 static void settle_frame(void)
 {
     /* The real RGB flush completes from VSYNC. Yielding the owner task lets the
@@ -1316,6 +1418,113 @@ static esp_err_t publish_sensor_test_states(void)
     return ESP_OK;
 }
 
+static esp_err_t publish_light_test_states(void)
+{
+    static const slate_snapshot_t LIGHTS[] = {
+        {
+            .resource = "living-room",
+            .kind = SLATE_KIND_LIGHT,
+            .name = "Living room",
+            .available = true,
+            .capabilities = {.actions = 1u << SLATE_ACTION_TOGGLE},
+            .state.light = {.on = true, .brightness = SLATE_STATE_ABSENT,
+                            .color_temperature = SLATE_STATE_ABSENT},
+        },
+        {
+            .resource = "kitchen",
+            .kind = SLATE_KIND_LIGHT,
+            .name = "Kitchen pendants with a long name",
+            .available = true,
+            .capabilities = {
+                .actions = (1u << SLATE_ACTION_TOGGLE) |
+                           (1u << SLATE_ACTION_SET_BRIGHTNESS),
+                .brightness_min = 5,
+                .brightness_max = 95,
+            },
+            .state.light = {.on = true, .brightness = 62,
+                            .color_temperature = SLATE_STATE_ABSENT},
+        },
+        {
+            .resource = "readonly",
+            .kind = SLATE_KIND_LIGHT,
+            .name = "Read-only light",
+            .available = true,
+            .state.light = {.on = false, .brightness = SLATE_STATE_ABSENT,
+                            .color_temperature = SLATE_STATE_ABSENT},
+        },
+        {
+            .resource = "studio",
+            .kind = SLATE_KIND_LIGHT,
+            .name = "Provider name must not replace the label",
+            .available = true,
+            .capabilities = {
+                .actions = (1u << SLATE_ACTION_TOGGLE) |
+                           (1u << SLATE_ACTION_SET_BRIGHTNESS) |
+                           (1u << SLATE_ACTION_SET_COLOR_TEMPERATURE),
+                .brightness_min = 0,
+                .brightness_max = 100,
+                .color_temperature_min = 2200,
+                .color_temperature_max = 6500,
+            },
+            .state.light = {.on = true, .brightness = 48, .color_temperature = 3200},
+        },
+        {
+            .resource = "switch-only",
+            .kind = SLATE_KIND_LIGHT,
+            .name = "Switch only",
+            .available = true,
+            .capabilities = {.actions = 1u << SLATE_ACTION_TOGGLE},
+            .state.light = {.on = false, .brightness = SLATE_STATE_ABSENT,
+                            .color_temperature = SLATE_STATE_ABSENT},
+        },
+    };
+
+    for (size_t i = 0; i < sizeof(LIGHTS) / sizeof(LIGHTS[0]); i++) {
+        esp_err_t err = slate_state_publish("direct", &LIGHTS[i]);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    slate_state_drain(discard_changed, NULL);
+    update_all();
+    return ESP_OK;
+}
+
+static esp_err_t publish_action_test_states(bool toggled, int16_t brightness)
+{
+    const slate_snapshot_t toggle = {
+        .resource = "action-toggle",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Action toggle",
+        .available = true,
+        .capabilities = {.actions = 1u << SLATE_ACTION_TOGGLE},
+        .state.light = {.on = toggled, .brightness = SLATE_STATE_ABSENT,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    const slate_snapshot_t dimmer = {
+        .resource = "action-dimmer",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Action dimmer",
+        .available = true,
+        .capabilities = {
+            .actions = 1u << SLATE_ACTION_SET_BRIGHTNESS,
+            .brightness_min = 0,
+            .brightness_max = 100,
+        },
+        .state.light = {.on = true, .brightness = brightness,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    esp_err_t err = slate_state_publish("ui-fixture", &toggle);
+    if (err == ESP_OK) {
+        err = slate_state_publish("ui-fixture", &dimmer);
+    }
+    if (err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    return err;
+}
+
 static bool sensor_view_text(const char *resource, const char *value, const char *unit)
 {
     binding_view_t *view = find_view("direct", resource);
@@ -1348,6 +1557,14 @@ static esp_err_t selftest_on_task(void)
              "fixture provider registered");
     UI_CHECK(slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_ONLINE) == ESP_OK,
              "fixture provider online");
+    const slate_action_provider_t action_registration = {
+        .id = "ui-fixture",
+        .dispatch = fixture_dispatch,
+        .ctx = &s_fixture,
+    };
+    esp_err_t action_register_err = slate_action_provider_register(&action_registration);
+    UI_CHECK(action_register_err == ESP_OK || action_register_err == ESP_ERR_INVALID_STATE,
+             "fixture action adapter registered");
 
     lv_obj_t *anchor = activate_selftest_anchor();
     if (anchor == NULL) {
@@ -1430,8 +1647,10 @@ static esp_err_t selftest_on_task(void)
              "direct and fixture normalized states published");
     binding_view_t *direct_view = find_view("direct", "living-room");
     binding_view_t *fixture_view = find_view("ui-fixture", "temperature");
-    UI_CHECK(direct_view != NULL && strcmp(lv_label_get_text(direct_view->name), "Living room") == 0 &&
-                 strstr(lv_label_get_text(direct_view->detail), "ok") != NULL,
+    UI_CHECK(direct_view != NULL && direct_view->light.icon != NULL &&
+                 strcmp(lv_label_get_text(direct_view->name), "Living room") == 0 &&
+                 strcmp(lv_label_get_text(direct_view->light.icon),
+                        SLATE_ICON_LIGHTBULB_ON) == 0,
              "the direct-provider tile observed its state");
     UI_CHECK(fixture_view != NULL &&
                  strcmp(lv_label_get_text(fixture_view->name), "Fixture temperature") == 0 &&
@@ -1554,6 +1773,201 @@ static esp_err_t selftest_on_task(void)
                  strcmp(lv_label_get_text(power->sensor.icon),
                         SLATE_ICON_LIGHTNING_BOLT) == 0,
              "all normalized measurements select their semantic icon");
+
+    slate_config_t *lights = light_test_config();
+    UI_CHECK(lights != NULL && rebuild_on_task(lights) == ESP_OK,
+             "light component test dashboard activated");
+    if (lights != NULL) {
+        slate_config_free(lights);
+    }
+    UI_CHECK(publish_light_test_states() == ESP_OK,
+             "all light variants received direct-provider state");
+
+    binding_view_t *compact = find_view("direct", "living-room");
+    binding_view_t *wide = find_view("direct", "kitchen");
+    binding_view_t *readonly = find_view("direct", "readonly");
+    binding_view_t *large = find_view("direct", "studio");
+    binding_view_t *toggle_only = find_view("direct", "switch-only");
+    binding_view_t *missing_light = find_view("direct", "missing-light");
+    UI_CHECK(compact != NULL && compact->light.compact && compact->light.state_dot != NULL &&
+                 compact->light.brightness_slider == NULL &&
+                 lv_obj_has_flag(compact->tile, LV_OBJ_FLAG_CLICKABLE) &&
+                 strcmp(lv_label_get_text(compact->light.icon),
+                        SLATE_ICON_LIGHTBULB_ON) == 0,
+             "1x1 light renders state and exposes semantic toggle");
+    UI_CHECK(wide != NULL && wide->light.brightness_slider != NULL &&
+                 wide->light.temperature_slider == NULL &&
+                 !lv_obj_has_flag(wide->light.brightness_slider, LV_OBJ_FLAG_HIDDEN) &&
+                 lv_slider_get_min_value(wide->light.brightness_slider) == 5 &&
+                 lv_slider_get_max_value(wide->light.brightness_slider) == 95 &&
+                 strcmp(lv_label_get_text(wide->light.brightness_value), "62%") == 0,
+             "2x1 light renders advertised brightness range");
+    UI_CHECK(large != NULL && large->light.state_dot != NULL &&
+                 large->light.brightness_slider != NULL &&
+                 large->light.temperature_slider != NULL &&
+                 lv_slider_get_min_value(large->light.temperature_slider) == 2200 &&
+                 lv_slider_get_max_value(large->light.temperature_slider) == 6500 &&
+                 strcmp(lv_label_get_text(large->name), "Mood light") == 0 &&
+                 strcmp(lv_label_get_text(large->light.icon), SLATE_ICON_FLOOR_LAMP) == 0,
+             "2x2 light renders large override and colour temperature");
+    UI_CHECK(readonly != NULL &&
+                 !lv_obj_has_flag(readonly->tile, LV_OBJ_FLAG_CLICKABLE),
+             "read-only light exposes no action target");
+    UI_CHECK(toggle_only != NULL && toggle_only->light.brightness_slider != NULL &&
+                 lv_obj_has_flag(toggle_only->light.brightness_slider, LV_OBJ_FLAG_HIDDEN),
+             "unadvertised brightness control stays hidden");
+    UI_CHECK(missing_light != NULL &&
+                 !lv_obj_has_flag(missing_light->light.identity, LV_OBJ_FLAG_HIDDEN) &&
+                 strcmp(lv_label_get_text(missing_light->light.identity),
+                        "direct:missing-light") == 0,
+             "missing light identifies its provider-qualified resource");
+
+    const slate_snapshot_t local_temperature = {
+        .resource = "studio",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Studio",
+        .available = true,
+        .capabilities = {
+            .actions = (1u << SLATE_ACTION_SET_BRIGHTNESS) |
+                       (1u << SLATE_ACTION_SET_COLOR_TEMPERATURE),
+            .brightness_min = 0,
+            .brightness_max = 100,
+        },
+        .state.light = {.on = true, .brightness = 50, .color_temperature = 3300},
+    };
+    esp_err_t local_temperature_err = slate_state_publish("direct", &local_temperature);
+    if (local_temperature_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(local_temperature_err == ESP_OK && large != NULL &&
+                 lv_slider_get_min_value(large->light.temperature_slider) == 1800 &&
+                 lv_slider_get_max_value(large->light.temperature_slider) == 4800,
+             "unstated colour range is bounded around current state");
+
+    slate_snapshot_t unknown_temperature = local_temperature;
+    unknown_temperature.state.light.color_temperature = SLATE_STATE_ABSENT;
+    esp_err_t unknown_temperature_err = slate_state_publish("direct", &unknown_temperature);
+    if (unknown_temperature_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(unknown_temperature_err == ESP_OK && large != NULL &&
+                 !lv_obj_has_flag(large->light.temperature_slider, LV_OBJ_FLAG_HIDDEN) &&
+                 lv_slider_get_min_value(large->light.temperature_slider) == 2000 &&
+                 lv_slider_get_max_value(large->light.temperature_slider) == 6500 &&
+                 strcmp(lv_label_get_text(large->light.temperature_value), "-") == 0,
+             "unstated colour range falls back to a useful neutral range");
+
+    const slate_snapshot_t unavailable_light = {
+        .resource = "kitchen",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Kitchen",
+        .available = false,
+        .capabilities = {
+            .actions = 1u << SLATE_ACTION_SET_BRIGHTNESS,
+            .brightness_min = 0,
+            .brightness_max = 100,
+        },
+        .state.light = {.on = true, .brightness = 62,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    esp_err_t unavailable_light_err = slate_state_publish("direct", &unavailable_light);
+    if (unavailable_light_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(unavailable_light_err == ESP_OK && wide != NULL &&
+                 strcmp(lv_label_get_text(wide->light.brightness_value), "-") == 0 &&
+                 lv_obj_has_state(wide->light.brightness_slider, LV_STATE_DISABLED) &&
+                 lv_obj_get_style_opa(wide->tile, LV_PART_MAIN) == LV_OPA_50,
+             "unavailable light keeps controls but renders a dimmed dash");
+
+    slate_config_t *light_actions = light_action_test_config();
+    UI_CHECK(light_actions != NULL && rebuild_on_task(light_actions) == ESP_OK,
+             "semantic light action dashboard activated");
+    if (light_actions != NULL) {
+        slate_config_free(light_actions);
+    }
+    UI_CHECK(publish_action_test_states(true, 62) == ESP_OK,
+             "action fixtures published normalized light state");
+
+    binding_view_t *action_toggle = find_view("ui-fixture", "action-toggle");
+    binding_view_t *action_dimmer = find_view("ui-fixture", "action-dimmer");
+    unsigned calls_before = s_fixture.action_calls;
+    lv_result_t toggle_result = action_toggle != NULL
+                                    ? lv_obj_send_event(action_toggle->tile,
+                                                        LV_EVENT_CLICKED, NULL)
+                                    : LV_RESULT_INVALID;
+    slate_action_feedback_t toggle_feedback = {0};
+    esp_err_t toggle_feedback_err = slate_action_feedback(
+        "ui-fixture", "action-toggle", &toggle_feedback);
+    UI_CHECK(toggle_result == LV_RESULT_OK &&
+                 s_fixture.action_calls == calls_before + 1 &&
+                 strcmp(s_fixture.action_resource, "action-toggle") == 0 &&
+                 s_fixture.action == SLATE_ACTION_TOGGLE &&
+                 s_fixture.value_type == SLATE_ACTION_VALUE_NONE &&
+                 toggle_feedback_err == ESP_OK &&
+                 toggle_feedback.phase == SLATE_ACTION_PENDING &&
+                 !toggle_feedback.optimistic.light.on,
+             "1x1 tap emits provider-neutral toggle with optimistic state");
+    UI_CHECK(publish_action_test_states(false, 62) == ESP_OK,
+             "matching state confirms optimistic toggle");
+    UI_CHECK(slate_action_feedback("ui-fixture", "action-toggle", &toggle_feedback) == ESP_OK &&
+                 toggle_feedback.phase == SLATE_ACTION_IDLE,
+             "matching toggle snapshot clears pending state");
+
+    if (action_dimmer != NULL) {
+        lv_slider_set_value(action_dimmer->light.brightness_slider, 37, LV_ANIM_OFF);
+    }
+    calls_before = s_fixture.action_calls;
+    lv_result_t brightness_result =
+        action_dimmer != NULL
+            ? lv_obj_send_event(action_dimmer->light.brightness_slider,
+                                LV_EVENT_RELEASED, NULL)
+            : LV_RESULT_INVALID;
+    slate_action_feedback_t brightness_feedback = {0};
+    esp_err_t brightness_feedback_err = slate_action_feedback(
+        "ui-fixture", "action-dimmer", &brightness_feedback);
+    update_all();
+    UI_CHECK(brightness_result == LV_RESULT_OK &&
+                 s_fixture.action_calls == calls_before + 1 &&
+                 strcmp(s_fixture.action_resource, "action-dimmer") == 0 &&
+                 s_fixture.action == SLATE_ACTION_SET_BRIGHTNESS &&
+                 s_fixture.value_type == SLATE_ACTION_VALUE_NUMBER &&
+                 s_fixture.value == 37 && brightness_feedback_err == ESP_OK &&
+                 brightness_feedback.phase == SLATE_ACTION_PENDING &&
+                 brightness_feedback.optimistic.light.brightness == 37 &&
+                 strcmp(lv_label_get_text(action_dimmer->light.brightness_value), "37%") == 0 &&
+                 lv_obj_has_state(action_dimmer->light.brightness_slider, LV_STATE_DISABLED),
+             "brightness release emits one semantic optimistic action");
+
+    slate_action_result("ui-fixture", s_fixture.action_id, false, "fixture_failure");
+    update_all();
+    UI_CHECK(action_dimmer != NULL &&
+                 strcmp(lv_label_get_text(action_dimmer->light.brightness_value), "62%") == 0 &&
+                 lv_obj_get_style_border_width(action_dimmer->tile, LV_PART_MAIN) == 2,
+             "failed brightness action reverts and renders error state");
+
+    if (action_dimmer != NULL) {
+        lv_slider_set_value(action_dimmer->light.brightness_slider, 55, LV_ANIM_OFF);
+        lv_obj_send_event(action_dimmer->light.brightness_slider, LV_EVENT_RELEASED, NULL);
+    }
+    UI_CHECK(publish_action_test_states(false, 55) == ESP_OK,
+             "matching brightness snapshot confirms action");
+    UI_CHECK(slate_action_feedback("ui-fixture", "action-dimmer", &brightness_feedback) == ESP_OK &&
+                 brightness_feedback.phase == SLATE_ACTION_IDLE && action_dimmer != NULL &&
+                 strcmp(lv_label_get_text(action_dimmer->light.brightness_value), "55%") == 0,
+             "confirmed brightness clears pending presentation");
+
+    lights = light_test_config();
+    UI_CHECK(lights != NULL && rebuild_on_task(lights) == ESP_OK,
+             "direct-provider light dashboard restored for inspection");
+    if (lights != NULL) {
+        slate_config_free(lights);
+    }
+    UI_CHECK(publish_light_test_states() == ESP_OK,
+             "direct-provider light dashboard left populated");
 
     ESP_LOGI(TAG, "selftest: %u check(s), %u failure(s)", checks, failures);
 #undef UI_CHECK
