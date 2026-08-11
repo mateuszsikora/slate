@@ -17,6 +17,11 @@ extern "C" {
 /** @brief Register GET/PUT /config and POST /config/validate. */
 esp_err_t slate_config_api_init(void);
 
+#ifdef SLATE_CONFIG_API_SELFTEST
+/** @brief Exercise request-mode parsing invariants without writing flash. */
+esp_err_t slate_config_api_selftest(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

@@ -130,6 +130,8 @@ static TaskHandle_t s_task;
 static ws_client_t s_clients[SLATE_WS_MAX_CLIENTS];
 static uint32_t s_next_generation;
 static slate_ws_mode_t s_mode;
+static slate_ws_mode_observer_fn s_mode_observer;
+static void *s_mode_observer_ctx;
 static ws_provider_t s_providers[SLATE_WS_MAX_PROVIDERS];
 static size_t s_provider_count;
 static ws_client_t *s_edit_owner;
@@ -392,6 +394,8 @@ static bool parse_message(uint8_t *payload, size_t len, cJSON **out)
 static void set_mode(slate_ws_mode_t mode, ws_client_t *owner, int64_t now)
 {
     bool changed;
+    slate_ws_mode_observer_fn observer;
+    void *observer_ctx;
     portENTER_CRITICAL(&s_state_lock);
     changed = s_mode != mode;
     s_mode = mode;
@@ -404,10 +408,15 @@ static void set_mode(slate_ws_mode_t mode, ws_client_t *owner, int64_t now)
         s_edit_owner_generation = 0;
         s_edit_last_ping_us = 0;
     }
+    observer = changed ? s_mode_observer : NULL;
+    observer_ctx = s_mode_observer_ctx;
     portEXIT_CRITICAL(&s_state_lock);
 
     if (changed) {
         ESP_LOGI(TAG, "mode changed to %s", mode == SLATE_WS_MODE_EDIT ? "edit" : "normal");
+    }
+    if (observer != NULL) {
+        observer(observer_ctx, mode);
     }
 }
 
@@ -1319,6 +1328,23 @@ slate_ws_mode_t slate_ws_mode(void)
     return mode;
 }
 
+esp_err_t slate_ws_mode_observer_set(slate_ws_mode_observer_fn observer, void *ctx)
+{
+    if (!s_task) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    portENTER_CRITICAL(&s_state_lock);
+    esp_err_t err = observer != NULL && s_mode_observer != NULL
+                        ? ESP_ERR_INVALID_STATE : ESP_OK;
+    if (err == ESP_OK) {
+        s_mode_observer = observer;
+        s_mode_observer_ctx = observer != NULL ? ctx : NULL;
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+    return err;
+}
+
 esp_err_t slate_ws_publish_reloaded(unsigned schema, size_t tiles)
 {
     if (!s_task) {
@@ -1338,6 +1364,16 @@ esp_err_t slate_ws_publish_reloaded(unsigned schema, size_t tiles)
 }
 
 #ifdef SLATE_WS_SELFTEST
+
+static volatile unsigned s_selftest_mode_changes;
+static volatile slate_ws_mode_t s_selftest_last_mode;
+
+static void selftest_mode_observer(void *ctx, slate_ws_mode_t mode)
+{
+    (void) ctx;
+    s_selftest_last_mode = mode;
+    s_selftest_mode_changes++;
+}
 
 static bool selftest_send_all(int fd, const void *data, size_t len)
 {
@@ -1521,6 +1557,11 @@ esp_err_t slate_ws_selftest(void)
         ESP_LOGI(TAG, "selftest: %-34s %s", name, passed_ ? "PASS" : "FAIL"); \
     } while (0)
 
+    s_selftest_mode_changes = 0;
+    s_selftest_last_mode = SLATE_WS_MODE_NORMAL;
+    SELFTEST_CHECK(slate_ws_mode_observer_set(selftest_mode_observer, NULL) == ESP_OK,
+                   "mode observer registered");
+
     /* Fill past capacity first: the real protocol check below then proves that
      * replay begins on a complete retained record rather than in raw bytes. */
     static const char FIRST[] = "ws-selftest-first\n";
@@ -1570,7 +1611,10 @@ esp_err_t slate_ws_selftest(void)
     bool edit_sent = authenticated &&
                      selftest_send_text(fd, "{\"type\":\"mode\",\"mode\":\"edit\"}");
     vTaskDelay(pdMS_TO_TICKS(100));
-    SELFTEST_CHECK(edit_sent && slate_ws_mode() == SLATE_WS_MODE_EDIT, "mode edit accepted");
+    SELFTEST_CHECK(edit_sent && slate_ws_mode() == SLATE_WS_MODE_EDIT &&
+                       s_selftest_mode_changes == 1 &&
+                       s_selftest_last_mode == SLATE_WS_MODE_EDIT,
+                   "mode edit notifies observer");
 
     int other_fd = selftest_connect();
     bool other_authenticated = other_fd >= 0 && selftest_authenticate(other_fd);
@@ -1610,7 +1654,10 @@ esp_err_t slate_ws_selftest(void)
     s_edit_last_ping_us = esp_timer_get_time() - SLATE_WS_EDIT_TIMEOUT_US;
     portEXIT_CRITICAL(&s_state_lock);
     expire_edit_mode(esp_timer_get_time());
-    SELFTEST_CHECK(slate_ws_mode() == SLATE_WS_MODE_NORMAL, "edit mode 60 s fallback");
+    SELFTEST_CHECK(slate_ws_mode() == SLATE_WS_MODE_NORMAL &&
+                       s_selftest_mode_changes == 2 &&
+                       s_selftest_last_mode == SLATE_WS_MODE_NORMAL,
+                   "edit timeout notifies observer");
 
     bool edit_again = selftest_send_text(fd, "{\"type\":\"mode\",\"mode\":\"edit\"}");
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -1623,8 +1670,10 @@ esp_err_t slate_ws_selftest(void)
     vTaskDelay(pdMS_TO_TICKS(100));
     expire_edit_mode(esp_timer_get_time());
     SELFTEST_CHECK(edit_again && edit_reacquired && reused_ping &&
-                       slate_ws_mode() == SLATE_WS_MODE_NORMAL,
-                   "reused fd cannot refresh edit owner");
+                       slate_ws_mode() == SLATE_WS_MODE_NORMAL &&
+                       s_selftest_mode_changes == 4 &&
+                       s_selftest_last_mode == SLATE_WS_MODE_NORMAL,
+                   "reused fd fallback notifies observer");
 
     if (fd >= 0) {
         close(fd);
@@ -1674,6 +1723,8 @@ esp_err_t slate_ws_selftest(void)
         close(fd);
     }
 
+    SELFTEST_CHECK(slate_ws_mode_observer_set(NULL, NULL) == ESP_OK,
+                   "mode observer released");
     ESP_LOGI(TAG, "selftest: %d failure(s)", failures);
     return failures == 0 ? ESP_OK : ESP_FAIL;
 #undef SELFTEST_CHECK

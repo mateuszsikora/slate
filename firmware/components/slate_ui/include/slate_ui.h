@@ -19,6 +19,12 @@
 extern "C" {
 #endif
 
+typedef struct {
+    bool configured;
+    unsigned schema;
+    size_t tiles;
+} slate_ui_config_info_t;
+
 /**
  * @brief Attach the runtime to the display/state/action boundaries and load
  *        the configuration persisted in LittleFS.
@@ -39,6 +45,18 @@ esp_err_t slate_ui_init(void);
  * tree destroyed. Any failure leaves the current tree and subscriptions live.
  */
 esp_err_t slate_ui_rebuild(const slate_config_t *config);
+
+/**
+ * @brief Replace the current presentation with the document stored in LittleFS.
+ *
+ * This is the inverse of a RAM-only configuration preview. A valid stored
+ * document is rebuilt through the same atomic boundary as slate_ui_rebuild().
+ * A missing, unreadable or invalid document restores the corresponding
+ * unconfigured/error presentation and clears provider subscriptions. @p out
+ * may be NULL; otherwise it describes a successfully activated dashboard and
+ * remains zeroed for an unconfigured/error presentation.
+ */
+esp_err_t slate_ui_restore_stored(slate_ui_config_info_t *out);
 
 /** @brief Whether the runtime has successfully attached to the display task. */
 bool slate_ui_ready(void);

@@ -28,6 +28,10 @@ idf_component_register(
 #   -DSLATE_ACTION_SELFTEST=1  exercise capability validation, optimistic
 #                              overlays and every completion path against the
 #                              real state store and a fixture provider.
+#   -DSLATE_CONFIG_API_SELFTEST=1
+#                              check that only the exact transient query can
+#                              select RAM-only replacement semantics. It does
+#                              not write flash.
 #   -DSLATE_UI_SELFTEST=1      exercise the real declarative runtime on the
 #                              panel, including 500 varied rebuild cycles.
 #   -DSLATE_UI_LEAK_BYTES=64   negative control for the UI heap verifier. It is
@@ -61,7 +65,8 @@ idf_component_register(
 # `POST /wifi` and the setup page are what M1 exists to replace that with.
 #
 foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_WS_SELFTEST SLATE_STATE_SELFTEST
-             SLATE_DIRECT_SELFTEST SLATE_ACTION_SELFTEST SLATE_OTA_ROLLBACK_SELFTEST
+             SLATE_DIRECT_SELFTEST SLATE_ACTION_SELFTEST SLATE_CONFIG_API_SELFTEST
+             SLATE_OTA_ROLLBACK_SELFTEST
              SLATE_UI_SELFTEST SLATE_UI_LEAK_BYTES SLATE_COREDUMP_SELFTEST
              SLATE_SETUP_AP_PASSWORD SLATE_TIMEZONE)
     if(DEFINED ${knob})

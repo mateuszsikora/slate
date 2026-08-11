@@ -805,18 +805,11 @@ static bool report_has_code(const slate_config_report_t *report, const char *cod
     return false;
 }
 
-esp_err_t slate_ui_init(void)
+static esp_err_t restore_stored(slate_ui_config_info_t *out)
 {
-    if (s_ready) {
-        return ESP_ERR_INVALID_STATE;
+    if (out != NULL) {
+        memset(out, 0, sizeof(*out));
     }
-    if (!slate_display_ready()) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    s_ready = true;
-    slate_state_set_wake(schedule_update, NULL);
-    slate_action_set_wake(schedule_update, NULL);
 
     char *json = NULL;
     size_t len = 0;
@@ -849,6 +842,8 @@ esp_err_t slate_ui_init(void)
     }
     slate_config_report_free(&report);
 
+    unsigned schema = (unsigned) config->schema;
+    size_t tiles = home_page(config)->tile_count;
     esp_err_t err = slate_ui_rebuild(config);
     slate_config_free(config);
     if (err != ESP_OK) {
@@ -857,7 +852,35 @@ esp_err_t slate_ui_init(void)
                             "The dashboard could not be built. The device API remains available.",
                             true);
     }
+    if (out != NULL) {
+        out->configured = true;
+        out->schema = schema;
+        out->tiles = tiles;
+    }
     return ESP_OK;
+}
+
+esp_err_t slate_ui_init(void)
+{
+    if (s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!slate_display_ready()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_ready = true;
+    slate_state_set_wake(schedule_update, NULL);
+    slate_action_set_wake(schedule_update, NULL);
+    return restore_stored(NULL);
+}
+
+esp_err_t slate_ui_restore_stored(slate_ui_config_info_t *out)
+{
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return restore_stored(out);
 }
 
 bool slate_ui_ready(void)
@@ -1868,6 +1891,31 @@ static esp_err_t selftest_on_task(void)
                  strcmp(lv_label_get_text(compact->light.icon),
                         SLATE_ICON_LIGHTBULB_ON) == 0,
              "1x1 light exposes toggle without a dead state-dot target");
+
+    const slate_snapshot_t compact_with_late_dimming = {
+        .resource = "living-room",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Living room",
+        .available = true,
+        .capabilities = {
+            .actions = (1u << SLATE_ACTION_TOGGLE) |
+                       (1u << SLATE_ACTION_SET_BRIGHTNESS),
+            .brightness_min = 0,
+            .brightness_max = 100,
+        },
+        .state.light = {.on = false, .brightness = 0,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    esp_err_t compact_late_err =
+        slate_state_publish("direct", &compact_with_late_dimming);
+    if (compact_late_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(compact_late_err == ESP_OK && compact != NULL &&
+                 compact->light.brightness_slider == NULL &&
+                 lv_obj_has_flag(compact->tile, LV_OBJ_FLAG_CLICKABLE),
+             "late dimming capability is safe on compact light");
     UI_CHECK(wide != NULL && wide->light.brightness_slider != NULL &&
                  wide->light.temperature_slider == NULL &&
                  !lv_obj_has_flag(wide->light.brightness_slider, LV_OBJ_FLAG_HIDDEN) &&

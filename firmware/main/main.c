@@ -501,6 +501,12 @@ static void start_ui(void)
         ESP_LOGE(TAG, "configuration API degraded: %s — continuing",
                  esp_err_to_name(err));
     }
+
+#ifdef SLATE_CONFIG_API_SELFTEST
+    if (err == ESP_OK) {
+        slate_config_api_selftest();
+    }
+#endif
 }
 
 void app_main(void)
