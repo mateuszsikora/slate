@@ -112,7 +112,16 @@ bool slate_sensor_build(lv_obj_t *tile, const slate_config_tile_t *config,
                           LV_FLEX_ALIGN_CENTER);
 
     if (config->width >= 2) {
-        view->icon = make_label(tile, SLATE_ICON_HELP_CIRCLE_OUTLINE,
+        if (config->icon != NULL) {
+            view->icon_override = slate_icon_find(config->icon);
+            if (view->icon_override == NULL) {
+                view->icon_override = SLATE_ICON_IMAGE_BROKEN_VARIANT;
+            }
+        }
+        view->icon = make_label(tile,
+                                view->icon_override != NULL
+                                    ? view->icon_override
+                                    : SLATE_ICON_HELP_CIRCLE_OUTLINE,
                                 theme->icons, theme->accent);
         if (view->icon == NULL) {
             return false;
@@ -172,7 +181,7 @@ void slate_sensor_update(const slate_sensor_view_t *view, const slate_resource_t
     bool state_present = has_state(resource);
     char value[SLATE_SENSOR_TEXT_MAX + 24];
 
-    if (state_present && resource->presentation != SLATE_PRESENT_UNAVAILABLE) {
+    if (resource->presentation == SLATE_PRESENT_OK) {
         format_value(sensor, value, sizeof(value));
     } else {
         strlcpy(value, "-", sizeof(value));
@@ -181,8 +190,11 @@ void slate_sensor_update(const slate_sensor_view_t *view, const slate_resource_t
     lv_obj_set_style_text_font(view->value, value_font(theme, value), LV_PART_MAIN);
     lv_label_set_text(view->unit, state_present ? sensor->unit : "");
     if (view->icon != NULL) {
-        lv_label_set_text(view->icon,
-                          measurement_icon(state_present ? sensor->measurement
-                                                         : SLATE_MEASUREMENT_NONE));
+        lv_label_set_text(
+            view->icon,
+            view->icon_override != NULL
+                ? view->icon_override
+                : measurement_icon(state_present ? sensor->measurement
+                                                  : SLATE_MEASUREMENT_NONE));
     }
 }

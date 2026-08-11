@@ -146,6 +146,12 @@ with open(header_path, "w", encoding="utf-8") as header:
         header.write(f"#define SLATE_ICON_{symbol} \"{utf8}\"\n")
         header.write(f"#define SLATE_ICON_CODE_{symbol} 0x{cp}\n")
 
+    header.write("\n#define SLATE_ICON_FOREACH(X) \\\n")
+    for index, (name, _) in enumerate(icons):
+        symbol = name.upper().replace("-", "_")
+        continuation = " \\" if index + 1 < len(icons) else ""
+        header.write(f'    X("{name}", SLATE_ICON_{symbol}){continuation}\n')
+
 print(" ".join(args))
 print(f"resolved {len(args)} icons", file=sys.stderr)
 PY

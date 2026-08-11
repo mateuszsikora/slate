@@ -215,7 +215,12 @@ static void update_sensor_view(binding_view_t *view, const slate_resource_t *res
         resource->presentation == SLATE_PRESENT_INCOMPATIBLE) {
         char identity[SLATE_PROVIDER_ID_MAX + SLATE_RESOURCE_ID_MAX + 2];
         snprintf(identity, sizeof(identity), "%s:%s", view->provider, view->resource);
-        lv_label_set_text(view->name, identity);
+        if (view->label_override) {
+            lv_label_set_text(view->sensor.value, identity);
+            lv_obj_set_style_text_font(view->sensor.value, theme->caption, LV_PART_MAIN);
+        } else {
+            lv_label_set_text(view->name, identity);
+        }
     } else if (!view->label_override) {
         lv_label_set_text(view->name,
                           resource->name[0] != '\0' ? resource->name : view->resource);
@@ -1062,9 +1067,35 @@ static slate_config_t *sensor_test_config(void)
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"humidity\"}},"
         "{\"id\":\"pressure\",\"type\":\"sensor\",\"pos\":[2,0],\"size\":[2,1],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"pressure\"}},"
-        "{\"id\":\"power\",\"type\":\"sensor\",\"pos\":[0,1],\"size\":[2,1],"
+        "{\"id\":\"power\",\"type\":\"sensor\",\"label\":\"Solar output\","
+        "\"pos\":[0,1],\"size\":[2,1],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"power\"}},"
-        "{\"id\":\"status\",\"type\":\"sensor\",\"pos\":[2,1],\"size\":[2,1],"
+        "{\"id\":\"status\",\"type\":\"sensor\",\"icon\":\"fire\","
+        "\"pos\":[2,1],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"status\"}}]}]}";
+
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
+static slate_config_t *sensor_icon_test_config(void)
+{
+    static const char JSON[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"icons\",\"pages\":[{"
+        "\"id\":\"icons\",\"tiles\":["
+        "{\"id\":\"temperature\",\"type\":\"sensor\",\"pos\":[0,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"temperature\"}},"
+        "{\"id\":\"humidity\",\"type\":\"sensor\",\"pos\":[2,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"humidity\"}},"
+        "{\"id\":\"pressure\",\"type\":\"sensor\",\"pos\":[0,1],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"pressure\"}},"
+        "{\"id\":\"power\",\"type\":\"sensor\",\"pos\":[2,1],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"power\"}},"
+        "{\"id\":\"status\",\"type\":\"sensor\",\"pos\":[0,2],\"size\":[2,1],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"status\"}}]}]}";
 
     slate_config_t *config = NULL;
@@ -1414,6 +1445,16 @@ static esp_err_t selftest_on_task(void)
     if (sensors != NULL) {
         slate_config_free(sensors);
     }
+
+    binding_view_t *power = find_view("direct", "power");
+    binding_view_t *status = find_view("direct", "status");
+    UI_CHECK(power != NULL && strcmp(lv_label_get_text(power->name), "Solar output") == 0 &&
+                 strcmp(lv_label_get_text(power->sensor.value), "direct:power") == 0,
+             "a configured label survives the initial missing placeholder");
+    UI_CHECK(status != NULL && status->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(status->sensor.icon), SLATE_ICON_FIRE) == 0,
+             "a configured icon overrides the measurement default");
+
     UI_CHECK(publish_sensor_test_states() == ESP_OK,
              "all normalized sensor measurements published");
     UI_CHECK(sensor_view_text("temperature", "-12.4", "°C"),
@@ -1430,7 +1471,8 @@ static esp_err_t selftest_on_task(void)
     binding_view_t *temperature = find_view("direct", "temperature");
     binding_view_t *humidity = find_view("direct", "humidity");
     binding_view_t *pressure = find_view("direct", "pressure");
-    binding_view_t *power = find_view("direct", "power");
+    power = find_view("direct", "power");
+    status = find_view("direct", "status");
     UI_CHECK(temperature != NULL && temperature->sensor.icon == NULL && humidity != NULL &&
                  humidity->sensor.icon == NULL,
              "1x1 sensors omit the leading icon");
@@ -1439,6 +1481,11 @@ static esp_err_t selftest_on_task(void)
                  power != NULL && power->sensor.icon != NULL &&
                  strcmp(lv_label_get_text(power->sensor.icon), SLATE_ICON_LIGHTNING_BOLT) == 0,
              "2x1 sensors select icons from normalized measurement");
+    UI_CHECK(power != NULL && strcmp(lv_label_get_text(power->name), "Solar output") == 0,
+             "a configured label is restored when its resource becomes available");
+    UI_CHECK(status != NULL && status->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(status->sensor.icon), SLATE_ICON_FIRE) == 0,
+             "an icon override remains selected after a state update");
     UI_CHECK(temperature != NULL && !lv_obj_has_flag(temperature->tile, LV_OBJ_FLAG_CLICKABLE) &&
                  pressure != NULL && !lv_obj_has_flag(pressure->tile, LV_OBJ_FLAG_CLICKABLE),
              "sensor variants expose no action target");
@@ -1460,6 +1507,53 @@ static esp_err_t selftest_on_task(void)
                  humidity != NULL &&
                  lv_obj_get_style_opa(humidity->tile, LV_PART_MAIN) == LV_OPA_50,
              "unavailable sensor keeps its unit and renders a dimmed dash");
+
+    esp_err_t offline_err =
+        slate_state_provider_set_status("direct", SLATE_PROVIDER_OFFLINE);
+    if (offline_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(offline_err == ESP_OK && sensor_view_text("temperature", "-", "°C") &&
+                 temperature != NULL &&
+                 lv_obj_get_style_opa(temperature->tile, LV_PART_MAIN) == LV_OPA_50,
+             "an offline provider renders its stale sensor as a dimmed dash");
+
+    esp_err_t online_err =
+        slate_state_provider_set_status("direct", SLATE_PROVIDER_ONLINE);
+    if (online_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(online_err == ESP_OK && sensor_view_text("temperature", "-12.4", "°C") &&
+                 temperature != NULL &&
+                 lv_obj_get_style_opa(temperature->tile, LV_PART_MAIN) == LV_OPA_COVER,
+             "a sensor restores its value when the provider returns online");
+
+    slate_config_t *icons = sensor_icon_test_config();
+    UI_CHECK(icons != NULL && rebuild_on_task(icons) == ESP_OK,
+             "measurement icon test dashboard activated");
+    if (icons != NULL) {
+        slate_config_free(icons);
+    }
+    UI_CHECK(publish_sensor_test_states() == ESP_OK,
+             "sensor measurements republished for icon verification");
+    temperature = find_view("direct", "temperature");
+    humidity = find_view("direct", "humidity");
+    pressure = find_view("direct", "pressure");
+    power = find_view("direct", "power");
+    UI_CHECK(temperature != NULL && temperature->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(temperature->sensor.icon),
+                        SLATE_ICON_THERMOMETER) == 0 &&
+                 humidity != NULL && humidity->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(humidity->sensor.icon),
+                        SLATE_ICON_WATER_PERCENT) == 0 &&
+                 pressure != NULL && pressure->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(pressure->sensor.icon), SLATE_ICON_GAUGE) == 0 &&
+                 power != NULL && power->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(power->sensor.icon),
+                        SLATE_ICON_LIGHTNING_BOLT) == 0,
+             "all normalized measurements select their semantic icon");
 
     ESP_LOGI(TAG, "selftest: %u check(s), %u failure(s)", checks, failures);
 #undef UI_CHECK

@@ -66,6 +66,9 @@ size_t slate_theme_count(void);
 /** @brief Theme capability at @p index, or NULL when out of range. */
 const slate_theme_t *slate_theme_at(size_t index);
 
+/** @brief Look up a glyph by its stable MDI name from tools/fonts/icons.txt. */
+const char *slate_icon_find(const char *name);
+
 /** @brief Theme-independent colours used to diagnose the physical panel. */
 const slate_diagnostic_palette_t *slate_diagnostic_palette(void);
 

@@ -14,6 +14,7 @@ typedef struct {
     lv_obj_t *icon;
     lv_obj_t *value;
     lv_obj_t *unit;
+    const char *icon_override;
 } slate_sensor_view_t;
 
 /** Build §7.3's themed 1x1 or 2x1 presentation into an existing tile shell. */

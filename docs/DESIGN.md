@@ -180,7 +180,7 @@ Twelve cells is also the performance answer, not only a layout choice: S-2 measu
 }
 ```
 
-Fields common to every tile: `id`, `type`, `pos`, `size`, plus optional `label` (overrides the normalized resource name) and `icon` (overrides the component default).
+Fields common to every tile: `id`, `type`, `pos`, `size`, plus optional `label` (overrides the normalized resource name) and `icon` (overrides the component default). Where a component variant renders an icon, the override is a stable Material Design Icons name from `tools/fonts/icons.txt`, such as `fire` or `thermometer-low`; a name unavailable in the running firmware renders the broken-image placeholder instead of an empty glyph.
 
 Most tiles carry one `binding`; a component such as the scene bar carries `bindings`. A binding is always the pair `provider` + `resource`. Resource ids are opaque outside their provider: `light.living_room` has meaning to the HA adapter, while `living-room` may name the same light in the direct provider. The pair is stored and compared as two strings; firmware never infers a provider from punctuation or from a component type.
 
