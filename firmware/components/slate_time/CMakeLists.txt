@@ -12,7 +12,7 @@ idf_component_register(
     SRCS "slate_time.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "."
-    REQUIRES slate_wifi esp_netif esp_event
+    REQUIRES slate_wifi esp_netif esp_event freertos
 )
 
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS

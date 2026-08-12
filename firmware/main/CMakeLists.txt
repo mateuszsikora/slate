@@ -1,9 +1,9 @@
 idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
-    REQUIRES slate_action slate_api slate_config_api slate_coredump slate_direct slate_display
-             slate_ha slate_ota slate_setup slate_state slate_store slate_ui slate_wifi slate_time slate_ws
-             app_update esp_system esp_event
+    REQUIRES slate_action slate_api slate_brightness slate_config_api slate_coredump slate_direct
+             slate_display slate_ha slate_ota slate_setup slate_state slate_store slate_ui slate_wifi
+             slate_time slate_ws app_update esp_system esp_event
 )
 
 #
@@ -39,6 +39,9 @@ idf_component_register(
 #   -DSLATE_UI_LEAK_BYTES=64   negative control for the UI heap verifier. It is
 #                              meaningful only together with UI_SELFTEST and
 #                              must make that run fail.
+#   -DSLATE_BRIGHTNESS_SELFTEST=1
+#                              verify schedule boundaries, unsynced/setup
+#                              behavior and dark-touch consumption at boot.
 #   -DSLATE_OTA_ROLLBACK_SELFTEST=1
 #                              panic before API/network startup, but only when
 #                              the running image is pending verification. OTA
@@ -60,17 +63,14 @@ idf_component_register(
 #                                      here: §12 keeps passphrases out of the
 #                                      repository.
 #
-#   -DSLATE_TIMEZONE='"Europe/Warsaw"'  the §3.3 setting, until #19 parses the
-#                                       configuration it really lives in.
-#
 # The station credentials used to arrive the same way. They do not any more —
 # `POST /wifi` and the setup page are what M1 exists to replace that with.
 #
 foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_WS_SELFTEST SLATE_STATE_SELFTEST
              SLATE_DIRECT_SELFTEST SLATE_ACTION_SELFTEST SLATE_CONFIG_API_SELFTEST SLATE_HA_SELFTEST
              SLATE_OTA_ROLLBACK_SELFTEST
-             SLATE_UI_SELFTEST SLATE_UI_LEAK_BYTES SLATE_COREDUMP_SELFTEST
-             SLATE_SETUP_AP_PASSWORD SLATE_TIMEZONE)
+             SLATE_UI_SELFTEST SLATE_UI_LEAK_BYTES SLATE_BRIGHTNESS_SELFTEST
+             SLATE_COREDUMP_SELFTEST SLATE_SETUP_AP_PASSWORD)
     if(DEFINED ${knob})
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${knob}=${${knob}})
     endif()

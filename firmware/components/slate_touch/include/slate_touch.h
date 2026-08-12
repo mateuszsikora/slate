@@ -25,6 +25,13 @@ extern "C" {
 #endif
 
 /**
+ * Called on the LVGL task at the first sample of a physical press. Returning
+ * true consumes that press through release, which lets a dark panel wake
+ * without also operating the tile under the finger.
+ */
+typedef bool (*slate_touch_press_observer_t)(void *ctx);
+
+/**
  * @brief Reset the GT911, attach it to the bus and register an LVGL pointer.
  *
  * Must be called on the LVGL task, after lv_init() and after a display exists —
@@ -42,6 +49,16 @@ esp_err_t slate_touch_init(i2c_master_bus_handle_t i2c_bus, slate_ch422g_handle_
 
 /** @brief Whether the controller answered and an LVGL input device exists. */
 bool slate_touch_ready(void);
+
+/**
+ * @brief Replace the process-wide press observer.
+ *
+ * Safe from any task. Passing NULL clears the observer. Registration is valid
+ * even when the controller is unavailable, so callers do not need a second
+ * initialization order for headless degradation.
+ */
+esp_err_t slate_touch_set_press_observer(slate_touch_press_observer_t observer,
+                                         void *ctx);
 
 #ifdef __cplusplus
 }

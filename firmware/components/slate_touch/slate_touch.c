@@ -64,6 +64,8 @@ static esp_lcd_touch_handle_t s_touch;
 static lv_indev_t *s_indev;
 static bool s_ready;
 static bool s_pressed;
+static bool s_press_consumed;
+static bool s_block_until_lift;
 static int32_t s_h_res;
 static int32_t s_v_res;
 static uint16_t s_last_x;
@@ -72,6 +74,9 @@ static uint32_t s_press_samples;
 static int64_t s_press_started_us;
 static uint32_t s_faults;
 static int64_t s_fault_logged_at_us;
+static portMUX_TYPE s_observer_lock = portMUX_INITIALIZER_UNLOCKED;
+static slate_touch_press_observer_t s_press_observer;
+static void *s_press_observer_ctx;
 
 /*
  * GT911 latches its I²C address from the state of the interrupt line at the
@@ -181,9 +186,12 @@ static void note_fault(const char *what, esp_err_t err)
  * slate_touch disagree about the finger: LVGL would deliver a release and then
  * a fresh press on the next good poll, while the sample counter went on
  * accumulating into the previous press and the eventual real release logged
- * nothing at all.
+ * nothing at all. A consumed wake press is the exception: a transient failed
+ * read may release it from LVGL's point of view, but only a real zero-point
+ * sample clears the block. Otherwise the same finger could become a fresh,
+ * visible press after the backlight came on and operate the tile underneath.
  */
-static void report_released(lv_indev_data_t *data)
+static void report_released(lv_indev_data_t *data, bool physical_release)
 {
     if (s_pressed) {
         const int64_t held_us = esp_timer_get_time() - s_press_started_us;
@@ -196,8 +204,23 @@ static void report_released(lv_indev_data_t *data)
                  s_press_samples,
                  held_us > 0 ? (double) s_press_samples * 1000000.0 / (double) held_us : 0.0);
         s_pressed = false;
+        s_press_consumed = false;
+    }
+    if (physical_release) {
+        s_block_until_lift = false;
     }
     data->state = LV_INDEV_STATE_RELEASED;
+}
+
+static bool observe_press(void)
+{
+    slate_touch_press_observer_t observer;
+    void *ctx;
+    portENTER_CRITICAL(&s_observer_lock);
+    observer = s_press_observer;
+    ctx = s_press_observer_ctx;
+    portEXIT_CRITICAL(&s_observer_lock);
+    return observer != NULL && observer(ctx);
 }
 
 static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
@@ -207,7 +230,7 @@ static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     esp_err_t err = esp_lcd_touch_read_data(s_touch);
     if (err != ESP_OK) {
         note_fault("controller read", err);
-        report_released(data);
+        report_released(data, false);
         return;
     }
 
@@ -216,12 +239,12 @@ static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
     err = esp_lcd_touch_get_data(s_touch, &point, &points, 1);
     if (err != ESP_OK) {
         note_fault("coordinate read", err);
-        report_released(data);
+        report_released(data, false);
         return;
     }
 
     if (points == 0) {
-        report_released(data);
+        report_released(data, true);
         return;
     }
 
@@ -239,9 +262,6 @@ static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         y = y >= s_v_res ? (uint16_t) (s_v_res - 1) : y;
     }
 
-    data->point.x = x;
-    data->point.y = y;
-    data->state = LV_INDEV_STATE_PRESSED;
     s_last_x = x;
     s_last_y = y;
 
@@ -249,10 +269,16 @@ static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         ESP_LOGI(TAG, "press at %d,%d (%u point%s, strength %u)", (int) x, (int) y,
                  (unsigned) points, points == 1 ? "" : "s", (unsigned) point.strength);
         s_pressed = true;
+        s_press_consumed = s_block_until_lift || observe_press();
+        s_block_until_lift = s_press_consumed;
         s_press_started_us = esp_timer_get_time();
         s_press_samples = 0;
     }
     s_press_samples++;
+
+    data->point.x = x;
+    data->point.y = y;
+    data->state = s_press_consumed ? LV_INDEV_STATE_RELEASED : LV_INDEV_STATE_PRESSED;
 }
 
 esp_err_t slate_touch_init(i2c_master_bus_handle_t i2c_bus, slate_ch422g_handle_t expander)
@@ -308,4 +334,17 @@ esp_err_t slate_touch_init(i2c_master_bus_handle_t i2c_bus, slate_ch422g_handle_
 bool slate_touch_ready(void)
 {
     return s_ready;
+}
+
+esp_err_t slate_touch_set_press_observer(slate_touch_press_observer_t observer,
+                                         void *ctx)
+{
+    if (observer == NULL && ctx != NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    portENTER_CRITICAL(&s_observer_lock);
+    s_press_observer = observer;
+    s_press_observer_ctx = ctx;
+    portEXIT_CRITICAL(&s_observer_lock);
+    return ESP_OK;
 }
