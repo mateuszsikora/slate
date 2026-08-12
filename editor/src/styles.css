@@ -46,6 +46,15 @@ button {
   font: inherit;
 }
 
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 /* --- Shell --------------------------------------------------------------- */
 
 .shell {
@@ -227,6 +236,11 @@ button {
   white-space: nowrap;
 }
 
+.button--discard {
+  padding: 7px 10px;
+  white-space: nowrap;
+}
+
 .indicator {
   display: inline-flex;
   align-items: center;
@@ -269,6 +283,11 @@ button {
   font-size: 0.85rem;
   cursor: pointer;
   padding: 0;
+}
+
+.link:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 /* --- Workspace ----------------------------------------------------------- */
@@ -545,6 +564,11 @@ button {
 .grid-tile--selected {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.grid-tile:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .grid-tile__type {

@@ -40,6 +40,7 @@ export function App() {
   const [status, setStatus] = useState<DeviceStatus | null>(null)
   const [heartbeat, setHeartbeat] = useState<StatusFrame | null>(null)
   const [draft, setDraft] = useState<Config | null>(null)
+  const [persistedConfig, setPersistedConfig] = useState<Config | null>(null)
   const [activePageId, setActivePageId] = useState<string | null>(null)
   const [dirty, setDirty] = useState(false)
   const [previewState, setPreviewState] = useState<
@@ -63,6 +64,7 @@ export function App() {
   const acceptDeviceConfig = useCallback((fetched: Config | null) => {
     previewSequence.current += 1
     setDraft(fetched)
+    setPersistedConfig(fetched)
     setDirty(false)
     dirtyRef.current = false
     setPreviewState('idle')
@@ -126,6 +128,11 @@ export function App() {
   )
 
   const unpair = useCallback(() => {
+    if (dirtyRef.current && !window.confirm('Discard unpublished changes and unpair this browser?')) {
+      return
+    }
+    previewSequence.current += 1
+    socketRef.current?.setMode('normal')
     socketRef.current?.stop()
     socketRef.current = null
     forgetToken()
@@ -133,8 +140,13 @@ export function App() {
     setStatus(null)
     setHeartbeat(null)
     setDraft(null)
+    setPersistedConfig(null)
     setDirty(false)
     dirtyRef.current = false
+    setPreviewState('idle')
+    setPreviewMessage(null)
+    setMode('normal')
+    modeRef.current = 'normal'
     setLogs([])
     setPhase('pairing')
   }, [])
@@ -188,6 +200,13 @@ export function App() {
            * the badge must not keep claiming edit mode through an outage. */
           setMode('normal')
           modeRef.current = 'normal'
+          /* setMode also updates DeviceSocket.desiredMode, preventing a later
+           * reconnect from silently restoring edit mode behind the UI. */
+          socketRef.current?.setMode('normal')
+          if (dirtyRef.current) {
+            setPreviewState('waiting')
+            setPreviewMessage('Connection lost; the draft remains in this browser.')
+          }
         }
       },
       onStatus: setHeartbeat,
@@ -274,7 +293,7 @@ export function App() {
    */
   useEffect(() => {
     const name = info?.name
-    if (name === undefined || movingTo !== null || !servedByDevice()) {
+    if (name === undefined || movingTo !== null || dirty || !servedByDevice()) {
       return
     }
     const offline = phase === 'unreachable' || (phase === 'ready' && connection === 'offline')
@@ -305,12 +324,15 @@ export function App() {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [phase, connection, info, token, movingTo])
+  }, [phase, connection, dirty, info, token, movingTo])
 
   /* --- Edit mode (§6.5) -------------------------------------------------- */
 
   const toggleMode = useCallback(() => {
     const next = mode === 'edit' ? 'normal' : 'edit'
+    if (next === 'normal') {
+      previewSequence.current += 1
+    }
     socketRef.current?.setMode(next)
     modeRef.current = next
     setMode(next)
@@ -325,7 +347,9 @@ export function App() {
     setDirty(true)
     dirtyRef.current = true
     setPreviewState(modeRef.current === 'edit' ? 'sending' : 'waiting')
-    setPreviewMessage(null)
+    setPreviewMessage(
+      modeRef.current === 'edit' ? null : 'Preview is paused. Enter preview mode to update the panel.',
+    )
   }, [])
 
   useEffect(() => {
@@ -335,6 +359,11 @@ export function App() {
     if (mode !== 'edit' || connection !== 'online' || token === null) {
       previewSequence.current += 1
       setPreviewState('waiting')
+      setPreviewMessage(
+        mode !== 'edit'
+          ? 'Preview is paused. Enter preview mode to update the panel.'
+          : 'The panel is offline; the draft remains in this browser.',
+      )
       return
     }
 
@@ -359,6 +388,18 @@ export function App() {
     }, 300)
     return () => window.clearTimeout(timer)
   }, [client, connection, dirty, draft, mode, token])
+
+  useEffect(() => {
+    if (!dirty) {
+      return
+    }
+    const protectDraft = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', protectDraft)
+    return () => window.removeEventListener('beforeunload', protectDraft)
+  }, [dirty])
 
   /* --- Configuration files (§10) --------------------------------------- */
 
@@ -399,6 +440,17 @@ export function App() {
       setPublishing(false)
     }
   }, [acceptDeviceConfig, client, draft, publishing, token])
+
+  const discardDraft = useCallback(() => {
+    if (!dirtyRef.current || !window.confirm('Discard all unpublished changes?')) {
+      return
+    }
+    previewSequence.current += 1
+    socketRef.current?.setMode('normal')
+    modeRef.current = 'normal'
+    setMode('normal')
+    acceptDeviceConfig(persistedConfig)
+  }, [acceptDeviceConfig, persistedConfig])
 
   const loadResources = useCallback(
     async (provider: string): Promise<Resource[]> => {
@@ -505,6 +557,7 @@ export function App() {
           if (draft !== null) changeDraft({ ...draft, theme })
         }}
         onPublish={() => void publishDraft()}
+        onDiscard={discardDraft}
         onToggleMode={toggleMode}
         onUnpair={unpair}
       />
@@ -515,6 +568,7 @@ export function App() {
           providers={providers}
           previewState={previewState}
           previewMessage={previewMessage}
+          dirty={dirty}
           deviceName={info?.name ?? 'slate'}
           onCreate={createDashboard}
           onChange={changeDraft}
@@ -542,10 +596,20 @@ function previewError(error: unknown): string {
     return 'Enter preview mode before sending live changes.'
   }
   if (error.code === 'invalid_config' && typeof error.body === 'object' && error.body !== null) {
-    const body = error.body as { config_errors?: { code?: string }[]; tile_errors?: object }
+    const body = error.body as {
+      config_errors?: { code?: string }[]
+      tile_errors?: Record<string, { code?: string }[]>
+    }
     const first = body.config_errors?.[0]?.code
     if (first !== undefined) return `The draft is not valid yet (${first}).`
-    if (body.tile_errors !== undefined) return 'One or more tiles still need a valid position or binding.'
+    const tileEntry = Object.entries(body.tile_errors ?? {})[0]
+    if (tileEntry !== undefined) {
+      const [tileId, errors] = tileEntry
+      const code = errors[0]?.code
+      return code === undefined
+        ? `Tile ${tileId} is not valid yet.`
+        : `Tile ${tileId} is not valid yet (${code}).`
+    }
   }
   return `The panel rejected the preview (${error.code}).`
 }

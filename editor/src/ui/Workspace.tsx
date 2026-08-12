@@ -20,6 +20,7 @@ interface Props {
   providers: Pick<ProviderStatus, 'id' | 'status'>[]
   previewState: 'idle' | 'waiting' | 'sending' | 'live' | 'error'
   previewMessage: string | null
+  dirty: boolean
   deviceName: string
   onCreate: () => void
   onChange: (config: Config) => void
@@ -34,6 +35,7 @@ export function Workspace({
   providers,
   previewState,
   previewMessage,
+  dirty,
   deviceName,
   onCreate,
   onChange,
@@ -161,11 +163,21 @@ export function Workspace({
           >
             {config.home_page === page.id ? 'Home page' : 'Make home'}
           </button>
-          <button type="button" className="link link--danger" onClick={deletePage}>
+          <button
+            type="button"
+            className="link link--danger"
+            onClick={deletePage}
+            disabled={config.pages.length <= 1}
+            title={config.pages.length <= 1 ? 'A dashboard must keep at least one page' : undefined}
+          >
             Delete page
           </button>
         </div>
-        <span className={`preview-state preview-state--${previewState}`}>
+        <span
+          className={`preview-state preview-state--${previewState}`}
+          role="status"
+          aria-live="polite"
+        >
           {previewLabel(previewState, previewMessage)}
         </span>
       </div>
@@ -206,6 +218,7 @@ export function Workspace({
         <ConfigTransfer
           config={config}
           deviceName={deviceName}
+          hasUnpublishedChanges={dirty}
           onValidate={onValidateConfig}
           onPublish={onPublishConfig}
         />
@@ -215,7 +228,7 @@ export function Workspace({
 }
 
 function previewLabel(state: Props['previewState'], message: string | null): string {
-  if (state === 'waiting') return 'Preview waiting for edit mode'
+  if (state === 'waiting') return message ?? 'Preview is waiting'
   if (state === 'sending') return 'Updating panel…'
   if (state === 'live') return 'Live on panel'
   if (state === 'error') return message ?? 'Preview rejected'

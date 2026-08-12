@@ -24,6 +24,7 @@ interface Failure {
 interface Props {
   config: Config | null
   deviceName: string
+  hasUnpublishedChanges: boolean
   onValidate: (document: string) => Promise<void>
   onPublish: (document: string, config: Config) => Promise<void>
 }
@@ -53,7 +54,13 @@ const VALIDATION_MESSAGES: Record<string, string> = {
   resource_required: 'The binding requires a resource.',
 }
 
-export function ConfigTransfer({ config, deviceName, onValidate, onPublish }: Props) {
+export function ConfigTransfer({
+  config,
+  deviceName,
+  hasUnpublishedChanges,
+  onValidate,
+  onPublish,
+}: Props) {
   const input = useRef<HTMLInputElement>(null)
   const [activity, setActivity] = useState<Activity>('idle')
   const [candidate, setCandidate] = useState<ImportedConfig | null>(null)
@@ -128,6 +135,12 @@ export function ConfigTransfer({ config, deviceName, onValidate, onPublish }: Pr
 
   const publish = async () => {
     if (candidate === null) {
+      return
+    }
+    if (
+      hasUnpublishedChanges &&
+      !window.confirm('Replace the unpublished visual-editor draft with this imported configuration?')
+    ) {
       return
     }
 

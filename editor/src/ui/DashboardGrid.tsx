@@ -1,4 +1,4 @@
-import { useRef, type PointerEvent } from 'react'
+import { useRef, type KeyboardEvent, type PointerEvent } from 'react'
 
 import type { Page, Tile } from '../lib/api'
 import { COMPONENTS, GRID_COLUMNS, GRID_ROWS, definitionFor, type TileSize } from '../lib/editor'
@@ -76,6 +76,42 @@ export function DashboardGrid({ page, selectedId, onSelect, onMove, onResize, on
     gesture.current = null
   }
 
+  const keyboardMove = (event: KeyboardEvent<HTMLElement>, tile: Tile) => {
+    if (event.target !== event.currentTarget) {
+      return
+    }
+    const deltas: Partial<Record<string, [number, number]>> = {
+      ArrowLeft: [-1, 0],
+      ArrowRight: [1, 0],
+      ArrowUp: [0, -1],
+      ArrowDown: [0, 1],
+    }
+    const delta = deltas[event.key]
+    if (delta !== undefined) {
+      event.preventDefault()
+      onMove(tile.id, [tile.pos[0] + delta[0], tile.pos[1] + delta[1]])
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      onSelect(tile.id)
+    }
+  }
+
+  const keyboardResize = (event: KeyboardEvent<HTMLButtonElement>, tile: Tile) => {
+    if (event.key !== 'Enter' && event.key !== ' ') {
+      return
+    }
+    event.preventDefault()
+    event.stopPropagation()
+    const sizes = definitionFor(tile.type)?.sizes
+    if (sizes === undefined || sizes.length === 0) {
+      return
+    }
+    const current = sizes.findIndex(
+      (size) => size[0] === tile.size[0] && size[1] === tile.size[1],
+    )
+    onResize(tile.id, sizes[(current + 1) % sizes.length] ?? sizes[0]!)
+  }
+
   return (
     <section className="canvas" aria-label={`Page ${page.title ?? page.id}`}>
       <div
@@ -116,6 +152,10 @@ export function DashboardGrid({ page, selectedId, onSelect, onMove, onResize, on
               }}
               onPointerDown={(event) => begin(event, tile, 'move')}
               onClick={() => onSelect(tile.id)}
+              onKeyDown={(event) => keyboardMove(event, tile)}
+              tabIndex={0}
+              role="group"
+              aria-label={`${tile.type} tile ${tile.label ?? tile.id}; position ${tile.pos[0] + 1}, ${tile.pos[1] + 1}; size ${tile.size[0]} by ${tile.size[1]}`}
             >
               <span className="grid-tile__type">{tile.type}</span>
               <strong>{tile.label ?? bindings[0]?.resource ?? 'Choose a resource'}</strong>
@@ -132,15 +172,18 @@ export function DashboardGrid({ page, selectedId, onSelect, onMove, onResize, on
                   type="button"
                   className="grid-tile__resize"
                   aria-label={`Resize ${tile.id}`}
-                  title="Drag to a supported size"
+                  title="Drag to a supported size, or press Enter to cycle sizes"
                   onPointerDown={(event) => begin(event, tile, 'resize')}
+                  onKeyDown={(event) => keyboardResize(event, tile)}
                 />
               ) : null}
             </article>
           )
         })}
       </div>
-      <p className="canvas__hint">Drag tiles to move them. The corner handle snaps to supported sizes.</p>
+      <p className="canvas__hint">
+        Drag tiles or use arrow keys to move them. The corner handle snaps to supported sizes.
+      </p>
     </section>
   )
 }

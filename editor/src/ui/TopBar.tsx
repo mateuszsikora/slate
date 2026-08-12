@@ -23,6 +23,7 @@ interface Props {
   onAddPage: () => void
   onThemeChange: (theme: string) => void
   onPublish: () => void
+  onDiscard: () => void
   onToggleMode: () => void
   onUnpair: () => void
 }
@@ -40,6 +41,7 @@ export function TopBar({
   onAddPage,
   onThemeChange,
   onPublish,
+  onDiscard,
   onToggleMode,
   onUnpair,
 }: Props) {
@@ -90,12 +92,27 @@ export function TopBar({
 
         <div className="topbar__providers" aria-label="Provider connections">
           {providers.map((provider) => (
-            <span key={provider.id} className={`provider-dot provider-dot--${provider.status}`}>
+            <span
+              key={provider.id}
+              className={`provider-dot provider-dot--${provider.status}`}
+              role="img"
+              aria-label={`${provider.id} provider: ${provider.status}`}
+              title={`${provider.id}: ${provider.status}`}
+            >
               <span aria-hidden="true" />
               {provider.id}
             </span>
           ))}
         </div>
+
+        <button
+          type="button"
+          className="button button--secondary button--discard"
+          onClick={onDiscard}
+          disabled={!dirty || publishing}
+        >
+          Discard
+        </button>
 
         <button
           type="button"

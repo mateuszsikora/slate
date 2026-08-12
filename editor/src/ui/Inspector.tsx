@@ -16,6 +16,7 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
   const [resources, setResources] = useState<Resource[]>([])
   const [catalogState, setCatalogState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
   const [catalogMessage, setCatalogMessage] = useState('')
+  const [catalogRetry, setCatalogRetry] = useState(0)
   const [query, setQuery] = useState('')
   const [area, setArea] = useState('')
 
@@ -26,6 +27,7 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
     return tile.bindings ?? [bindingFor(tile)]
   }, [tile])
   const selectedBinding = bindings[Math.min(activeBinding, Math.max(0, bindings.length - 1))]
+  const selectedBindingIndex = Math.min(activeBinding, Math.max(0, bindings.length - 1))
   const provider = selectedBinding?.provider ?? ''
 
   useEffect(() => {
@@ -33,6 +35,12 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
     setQuery('')
     setArea('')
   }, [tile?.id])
+
+  useEffect(() => {
+    if (bindings.length > 0 && activeBinding >= bindings.length) {
+      setActiveBinding(bindings.length - 1)
+    }
+  }, [activeBinding, bindings.length])
 
   useEffect(() => {
     if (provider === '') {
@@ -60,7 +68,7 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
     return () => {
       cancelled = true
     }
-  }, [provider, onLoadResources])
+  }, [catalogRetry, provider, onLoadResources])
 
   if (tile === null) {
     return (
@@ -180,9 +188,9 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
 
       {tile.bindings !== undefined ? (
         <div className="binding-tabs" aria-label="Scene bindings">
-          {tile.bindings.map((binding, index) => (
+          {tile.bindings.map((_, index) => (
             <button
-              key={`${index}-${binding.provider}-${binding.resource}`}
+              key={index}
               type="button"
               className={index === activeBinding ? 'selected' : ''}
               onClick={() => setActiveBinding(index)}
@@ -212,7 +220,7 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
             <select
               value={selectedBinding.provider}
               onChange={(event) => {
-                updateBinding(activeBinding, { provider: event.currentTarget.value, resource: '' })
+                updateBinding(selectedBindingIndex, { provider: event.currentTarget.value, resource: '' })
                 setQuery('')
                 setArea('')
               }}
@@ -232,7 +240,7 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
               value={selectedBinding.resource}
               placeholder="Choose below or type an ID"
               onChange={(event) =>
-                updateBinding(activeBinding, {
+                updateBinding(selectedBindingIndex, {
                   ...selectedBinding,
                   resource: event.currentTarget.value,
                 })
@@ -241,7 +249,14 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
           </label>
 
           {catalogState === 'loading' ? <p className="catalog-note">Loading resources…</p> : null}
-          {catalogState === 'error' ? <p className="catalog-note catalog-note--error">{catalogMessage}</p> : null}
+          {catalogState === 'error' ? (
+            <div className="catalog-note catalog-note--error">
+              {catalogMessage}{' '}
+              <button type="button" className="link" onClick={() => setCatalogRetry((value) => value + 1)}>
+                Retry
+              </button>
+            </div>
+          ) : null}
           {catalogState === 'ready' ? (
             <div className="catalog">
               <div className="catalog__filters">
@@ -270,14 +285,17 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
                       type="button"
                       className={resource.resource === selectedBinding.resource ? 'selected' : ''}
                       onClick={() =>
-                        updateBinding(activeBinding, {
+                        updateBinding(selectedBindingIndex, {
                           provider: resource.provider,
                           resource: resource.resource,
                         })
                       }
                     >
                       <strong>{resource.name ?? resource.resource}</strong>
-                      <span>{resource.area ?? 'No area'} · {resource.resource}</span>
+                      <span>
+                        {resource.area ?? 'No area'} · {resource.resource}
+                        {resource.available ? '' : ' · unavailable'}
+                      </span>
                     </button>
                   ))
                 )}
