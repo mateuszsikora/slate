@@ -242,7 +242,7 @@ static void update_bar(ui_tree_t *tree)
     if (slate_time_synced()) {
         time_t now = time(NULL);
         struct tm local;
-        if (localtime_r(&now, &local) != NULL) {
+        if (slate_time_localtime(now, &local)) {
             strftime(clock, sizeof(clock), "%H:%M", &local);
         }
     }
@@ -800,8 +800,13 @@ static esp_err_t rebuild_on_task(const slate_config_t *config)
         return err;
     }
 
-    if (config->settings.timezone != NULL) {
-        (void) slate_time_set_timezone(config->settings.timezone);
+    const char *timezone = config->settings.timezone != NULL
+                               ? config->settings.timezone
+                               : SLATE_TIME_DEFAULT_ZONE;
+    esp_err_t timezone_err = slate_time_set_timezone(timezone);
+    if (timezone_err != ESP_OK) {
+        ESP_LOGW(TAG, "timezone %s unavailable: %s — keeping the previous timezone",
+                 timezone, esp_err_to_name(timezone_err));
     }
     esp_err_t brightness_err = slate_brightness_configure(&config->settings);
     if (brightness_err != ESP_OK) {

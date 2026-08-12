@@ -358,6 +358,14 @@ static void start_network(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(SLATE_WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                         network_event, NULL, NULL));
 
+    /* The clock explicitly supports initialization before the station. Doing
+     * it here also installs the timezone/localtime lock before the API can
+     * accept a configuration replacement on a live interface. */
+    err = slate_time_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "clock degraded: %s — continuing", esp_err_to_name(err));
+    }
+
     /*
      * Not ESP_ERROR_CHECK, for the reason slate_store_init() is not: §9 has no
      * state in which a powered panel is unreachable, and a radio that would
@@ -397,12 +405,6 @@ static void start_network(void)
      */
     ESP_LOGI(TAG, "free internal DMA-capable memory with the station up: %u B",
              (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
-
-    err = slate_time_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "clock degraded: %s — continuing", esp_err_to_name(err));
-        return;
-    }
 }
 
 static void start_api(void)

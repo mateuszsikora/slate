@@ -181,6 +181,7 @@ jobs:
                  -DSLATE_CONFIG_API_SELFTEST=1 \
                  -DSLATE_HA_SELFTEST=1 \
                  -DSLATE_UI_SELFTEST=1 \
+                 -DSLATE_BRIGHTNESS_SELFTEST=1 \
                  -DSLATE_COREDUMP_SELFTEST=1 \
                  build
 

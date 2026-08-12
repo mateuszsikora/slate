@@ -1170,7 +1170,7 @@ esp_err_t slate_display_brightness_set(uint8_t percent)
 
     if (percent < 100 &&
         atomic_load_explicit(&s_setup_presentation_active, memory_order_acquire)) {
-        percent = 100;
+        return ESP_ERR_INVALID_STATE;
     }
 
     /* S-2 confirmed the installed path is a binary CH422G output. Keep the

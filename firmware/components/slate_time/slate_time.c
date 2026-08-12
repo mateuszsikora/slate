@@ -7,9 +7,13 @@
 #include "slate_time.h"
 
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "esp_event.h"
 #include "esp_log.h"
@@ -29,7 +33,23 @@ static const char *TAG = "time";
 #define FALLBACK_NTP_SERVER "pool.ntp.org"
 
 static char s_zone[SLATE_TIME_ZONE_MAX_LEN] = SLATE_TIME_DEFAULT_ZONE;
-static volatile bool s_synced;
+static atomic_bool s_synced = ATOMIC_VAR_INIT(false);
+static StaticSemaphore_t s_zone_lock_storage;
+static SemaphoreHandle_t s_zone_lock;
+
+static void zone_lock(void)
+{
+    if (s_zone_lock != NULL) {
+        xSemaphoreTake(s_zone_lock, portMAX_DELAY);
+    }
+}
+
+static void zone_unlock(void)
+{
+    if (s_zone_lock != NULL) {
+        xSemaphoreGive(s_zone_lock);
+    }
+}
 
 /* --- The generated zone table ------------------------------------------- */
 
@@ -83,17 +103,27 @@ esp_err_t slate_time_set_timezone(const char *iana)
 
     const char *posix = posix_for(iana);
     if (posix == NULL) {
-        ESP_LOGW(TAG, "unknown timezone \"%s\" — staying on %s", iana, s_zone);
+        ESP_LOGW(TAG, "unknown timezone \"%s\" — keeping the previous timezone", iana);
         return ESP_ERR_NOT_FOUND;
     }
 
-    /* setenv copies, and tzset() parses into newlib's own state, so nothing
-     * here has to outlive the call. */
-    setenv("TZ", posix, 1);
+    /* setenv copies, and tzset() parses into newlib's own state. Serialize the
+     * process-wide replacement with every localtime conversion once the clock
+     * component has initialized its static lock. */
+    zone_lock();
+    if (strcmp(iana, s_zone) == 0) {
+        zone_unlock();
+        return ESP_OK;
+    }
+    if (setenv("TZ", posix, 1) != 0) {
+        zone_unlock();
+        return ESP_ERR_NO_MEM;
+    }
     tzset();
 
     strlcpy(s_zone, iana, sizeof(s_zone));
-    ESP_LOGI(TAG, "timezone %s (%s)", s_zone, posix);
+    zone_unlock();
+    ESP_LOGI(TAG, "timezone %s (%s)", iana, posix);
     return ESP_OK;
 }
 
@@ -104,7 +134,18 @@ const char *slate_time_timezone(void)
 
 bool slate_time_synced(void)
 {
-    return s_synced;
+    return atomic_load_explicit(&s_synced, memory_order_acquire);
+}
+
+bool slate_time_localtime(time_t value, struct tm *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+    zone_lock();
+    bool converted = localtime_r(&value, out) != NULL;
+    zone_unlock();
+    return converted;
 }
 
 /* --- SNTP --------------------------------------------------------------- */
@@ -113,15 +154,23 @@ static void on_sync(struct timeval *tv)
 {
     (void) tv;
 
-    s_synced = true;
-
     char stamp[32];
+    char zone[SLATE_TIME_ZONE_MAX_LEN];
     time_t now = time(NULL);
     struct tm tm;
-    localtime_r(&now, &tm);
-    strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tm);
+    zone_lock();
+    bool converted = localtime_r(&now, &tm) != NULL;
+    strlcpy(zone, s_zone, sizeof(zone));
+    zone_unlock();
+    if (converted) {
+        strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tm);
+    } else {
+        strlcpy(stamp, "unknown", sizeof(stamp));
+    }
 
-    ESP_LOGI(TAG, "clock synced: %s %s", stamp, s_zone);
+    atomic_store_explicit(&s_synced, true, memory_order_release);
+
+    ESP_LOGI(TAG, "clock synced: %s %s", stamp, zone);
 }
 
 static void on_station_up(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -147,13 +196,26 @@ static void on_station_up(void *arg, esp_event_base_t base, int32_t id, void *da
 
 esp_err_t slate_time_init(void)
 {
+    if (s_zone_lock != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    s_zone_lock = xSemaphoreCreateMutexStatic(&s_zone_lock_storage);
+    if (s_zone_lock == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
     /* The UI runtime may have loaded §3.3's persisted timezone before the
      * station starts. Preserve that choice instead of resetting it to UTC
      * during network bring-up; UTC remains the initial value when no config
      * supplied one. */
     const char *posix = posix_for(s_zone);
-    setenv("TZ", posix != NULL ? posix : "UTC0", 1);
+    zone_lock();
+    if (setenv("TZ", posix != NULL ? posix : "UTC0", 1) != 0) {
+        zone_unlock();
+        return ESP_ERR_NO_MEM;
+    }
     tzset();
+    zone_unlock();
 
     /*
      * `server_from_dhcp` puts the router's NTP server in slot 0 and moves the

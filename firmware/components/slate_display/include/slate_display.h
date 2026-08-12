@@ -108,8 +108,9 @@ bool slate_display_ready(void);
  *
  * Turning the backlight off does not stop the panel, the renderer or touch;
  * §3.3's `screen_off_after` is a dark screen that still responds, not a
- * suspended one. An active setup presentation forces the request to `on`
- * because §9.4 requires its recovery address to remain readable.
+ * suspended one. An active setup presentation refuses `off` with
+ * ESP_ERR_INVALID_STATE because §9.4 requires its recovery address to remain
+ * readable.
  */
 esp_err_t slate_display_backlight_set(bool on);
 
@@ -122,7 +123,8 @@ bool slate_display_backlight_is_on(void);
  * The unmodified CH422G path quantizes zero to off and every non-zero value to
  * on. A future PWM implementation behind the same boundary can preserve the
  * requested level. While a setup card or recovery banner is active, values
- * below 100 are forced to 100 so §9.4's address remains readable.
+ * below 100 are refused with ESP_ERR_INVALID_STATE so §9.4's address remains
+ * readable.
  */
 esp_err_t slate_display_brightness_set(uint8_t percent);
 

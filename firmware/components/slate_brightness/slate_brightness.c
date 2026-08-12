@@ -26,6 +26,7 @@ static const char *TAG = "brightness";
 #define BRIGHTNESS_TASK_PRIORITY       3
 #define BRIGHTNESS_CHECK_PERIOD_MS  1000
 #define BRIGHTNESS_DEFAULT_LEVEL     100
+#define BRIGHTNESS_ERROR_LOG_PERIOD_US (60LL * 1000000LL)
 
 typedef enum {
     TARGET_DAY,
@@ -59,16 +60,23 @@ typedef struct {
 typedef struct {
     bool consume;
     bool wake;
+    bool record_activity;
+    bool clear_inactivity;
 } touch_decision_t;
 
 static SemaphoreHandle_t s_lock;
 static TaskHandle_t s_task;
 static atomic_bool s_ready = ATOMIC_VAR_INIT(false);
 static brightness_settings_t s_settings;
+static bool s_configured;
 static int64_t s_last_activity_us;
 static bool s_inactivity_blanked;
 static uint8_t s_last_target = UINT8_MAX;
 static target_reason_t s_last_reason = TARGET_DAY;
+static esp_err_t s_last_apply_error = ESP_OK;
+static uint8_t s_last_failed_target = UINT8_MAX;
+static target_reason_t s_last_failed_reason = TARGET_DAY;
+static int64_t s_last_error_log_us;
 
 static brightness_settings_t default_settings(void)
 {
@@ -77,6 +85,17 @@ static brightness_settings_t default_settings(void)
         .night = BRIGHTNESS_DEFAULT_LEVEL,
         .wake_on_touch = true,
     };
+}
+
+static bool settings_equal(const brightness_settings_t *left,
+                           const brightness_settings_t *right)
+{
+    return left->day == right->day && left->night == right->night &&
+           left->night_start == right->night_start &&
+           left->night_end == right->night_end &&
+           left->night_schedule == right->night_schedule &&
+           left->screen_off_after_us == right->screen_off_after_us &&
+           left->wake_on_touch == right->wake_on_touch;
 }
 
 static uint8_t level_value(int value, const char *name)
@@ -138,11 +157,15 @@ static policy_target_t policy_target(const brightness_settings_t *settings,
 }
 
 static touch_decision_t touch_decision(bool dark, bool inactivity_blanked,
-                                       bool wake_on_touch)
+                                       bool wake_on_touch, uint8_t resume_level)
 {
+    bool policy_keeps_dark = dark && resume_level == 0;
+    bool wake = dark && inactivity_blanked && wake_on_touch && resume_level > 0;
     return (touch_decision_t) {
         .consume = dark,
-        .wake = dark && inactivity_blanked && wake_on_touch,
+        .wake = wake,
+        .record_activity = !dark || policy_keeps_dark || wake,
+        .clear_inactivity = policy_keeps_dark || wake,
     };
 }
 
@@ -171,7 +194,7 @@ static policy_input_t current_input_locked(bool setup_active)
     if (input.synced) {
         time_t now = time(NULL);
         struct tm local;
-        if (localtime_r(&now, &local) != NULL) {
+        if (slate_time_localtime(now, &local)) {
             input.local_minute = local.tm_hour * 60 + local.tm_min;
         } else {
             input.synced = false;
@@ -194,12 +217,21 @@ static esp_err_t apply_locked(bool setup_active)
         err = slate_display_brightness_set(target.level);
     }
     if (err != ESP_OK) {
-        if (target.level != s_last_target || target.reason != s_last_reason) {
+        int64_t now = esp_timer_get_time();
+        bool changed = err != s_last_apply_error ||
+                       target.level != s_last_failed_target ||
+                       target.reason != s_last_failed_reason;
+        if (changed || now - s_last_error_log_us >= BRIGHTNESS_ERROR_LOG_PERIOD_US) {
             ESP_LOGE(TAG, "%s target %u%%: %s", reason_name(target.reason),
                      (unsigned) target.level, esp_err_to_name(err));
+            s_last_error_log_us = now;
         }
+        s_last_apply_error = err;
+        s_last_failed_target = target.level;
+        s_last_failed_reason = target.reason;
         return err;
     }
+    s_last_apply_error = ESP_OK;
 
     if (target.level != s_last_target || target.reason != s_last_reason) {
         uint8_t actual = slate_display_brightness_level();
@@ -243,15 +275,25 @@ static bool on_touch_press(void *ctx)
     }
 
     bool dark = slate_display_brightness_level() == 0;
-    touch_decision_t decision =
-        touch_decision(dark, s_inactivity_blanked, s_settings.wake_on_touch);
-    if (!dark) {
+    policy_input_t resume_input = current_input_locked(slate_display_setup_active());
+    resume_input.inactivity_blanked = false;
+    policy_target_t resume_target = policy_target(&s_settings, &resume_input);
+    touch_decision_t decision = touch_decision(dark, s_inactivity_blanked,
+                                               s_settings.wake_on_touch,
+                                               resume_target.level);
+    if (decision.record_activity) {
         s_last_activity_us = esp_timer_get_time();
-    } else if (decision.wake) {
-        s_last_activity_us = esp_timer_get_time();
+    }
+    if (decision.clear_inactivity) {
         s_inactivity_blanked = false;
-        (void) apply_locked(slate_display_setup_active());
-        ESP_LOGI(TAG, "backlight wake requested by touch");
+        esp_err_t err = apply_locked(slate_display_setup_active());
+        if (decision.wake) {
+            if (err == ESP_OK && slate_display_brightness_level() > 0) {
+                ESP_LOGI(TAG, "backlight woken by touch");
+            } else {
+                ESP_LOGW(TAG, "touch wake deferred; backlight remains off");
+            }
+        }
     }
     xSemaphoreGive(s_lock);
 
@@ -288,9 +330,13 @@ esp_err_t slate_brightness_init(void)
         return ESP_ERR_NO_MEM;
     }
     s_settings = default_settings();
+    s_configured = false;
     s_last_activity_us = esp_timer_get_time();
     s_inactivity_blanked = false;
     s_last_target = UINT8_MAX;
+    s_last_apply_error = ESP_OK;
+    s_last_failed_target = UINT8_MAX;
+    s_last_error_log_us = 0;
 
     if (xTaskCreate(brightness_task, "slate_bright", BRIGHTNESS_TASK_STACK, NULL,
                     BRIGHTNESS_TASK_PRIORITY, &s_task) != pdPASS) {
@@ -357,19 +403,22 @@ esp_err_t slate_brightness_configure(const slate_config_settings_t *settings)
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
+    bool changed = !s_configured || !settings_equal(&s_settings, &next);
     s_settings = next;
+    s_configured = true;
     s_last_activity_us = esp_timer_get_time();
     s_inactivity_blanked = false;
-    s_last_target = UINT8_MAX;
     esp_err_t err = apply_locked(slate_display_setup_active());
     xSemaphoreGive(s_lock);
 
-    ESP_LOGI(TAG, "configured day %u%%, night %u%%, schedule %s, screen off %llu min, "
-                  "wake on touch %s",
-             (unsigned) next.day, (unsigned) next.night,
-             next.night_schedule ? "enabled" : "disabled",
-             (unsigned long long) (next.screen_off_after_us / (60ULL * 1000000ULL)),
-             next.wake_on_touch ? "yes" : "no");
+    if (changed) {
+        ESP_LOGI(TAG, "configured day %u%%, night %u%%, schedule %s, screen off %llu min, "
+                      "wake on touch %s",
+                 (unsigned) next.day, (unsigned) next.night,
+                 next.night_schedule ? "enabled" : "disabled",
+                 (unsigned long long) (next.screen_off_after_us / (60ULL * 1000000ULL)),
+                 next.wake_on_touch ? "yes" : "no");
+    }
     if (s_task != NULL) {
         xTaskNotifyGive(s_task);
     }
@@ -439,17 +488,25 @@ esp_err_t slate_brightness_selftest(void)
     SELFTEST_CHECK(target.level == 0 && target.reason == TARGET_INACTIVITY,
                    "inactivity blanks outside setup");
 
-    touch_decision_t touch = touch_decision(true, true, true);
-    SELFTEST_CHECK(touch.consume && touch.wake,
+    touch_decision_t touch = touch_decision(true, true, true, 80);
+    SELFTEST_CHECK(touch.consume && touch.wake && touch.record_activity &&
+                       touch.clear_inactivity,
                    "first dark inactivity touch wakes and consumes");
-    touch = touch_decision(true, true, false);
-    SELFTEST_CHECK(touch.consume && !touch.wake,
+    touch = touch_decision(true, true, false, 80);
+    SELFTEST_CHECK(touch.consume && !touch.wake && !touch.record_activity &&
+                       !touch.clear_inactivity,
                    "wake-disabled dark touch is still consumed");
-    touch = touch_decision(true, false, true);
-    SELFTEST_CHECK(touch.consume && !touch.wake,
-                   "scheduled-off touch does not override schedule");
-    touch = touch_decision(false, false, true);
-    SELFTEST_CHECK(!touch.consume && !touch.wake,
+    touch = touch_decision(true, false, true, 0);
+    SELFTEST_CHECK(touch.consume && !touch.wake && touch.record_activity &&
+                       touch.clear_inactivity,
+                   "scheduled-off touch records activity without waking");
+    touch = touch_decision(true, true, true, 0);
+    SELFTEST_CHECK(touch.consume && !touch.wake && touch.record_activity &&
+                       touch.clear_inactivity,
+                   "schedule-off outranks overlapping inactivity");
+    touch = touch_decision(false, false, true, 80);
+    SELFTEST_CHECK(!touch.consume && !touch.wake && touch.record_activity &&
+                       !touch.clear_inactivity,
                    "visible touch reaches the dashboard");
 
     ESP_LOGI(TAG, "selftest: %u failure(s)", failures);

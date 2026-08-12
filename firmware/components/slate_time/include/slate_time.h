@@ -38,6 +38,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <time.h>
 
 #include "esp_err.h"
 
@@ -86,6 +87,14 @@ const char *slate_time_timezone(void);
  * comment for the two things that must not happen while it is.
  */
 bool slate_time_synced(void);
+
+/**
+ * @brief Convert an epoch value using the configured timezone.
+ *
+ * Serialized with timezone changes so the clock and brightness scheduler
+ * cannot observe newlib's process-wide TZ state while it is being replaced.
+ */
+bool slate_time_localtime(time_t value, struct tm *out);
 
 #ifdef __cplusplus
 }
