@@ -6,11 +6,15 @@
 
 #include "esp_log.h"
 
+#include "slate_component.h"
+
 static const char *TAG = "slate_cover";
 
 #define COVER_BUTTON_HEIGHT  48
 #define COVER_MOTION_OPA_LOW LV_OPA_30
 #define COVER_MOTION_PULSE_MS 500
+
+_Static_assert(COVER_BUTTON_HEIGHT >= 48, "cover controls need a 48 px touch target");
 
 static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t *font,
                             uint32_t color)
@@ -290,13 +294,6 @@ static bool has_value(const slate_resource_t *resource)
             resource->presentation == SLATE_PRESENT_UNAVAILABLE);
 }
 
-static bool missing_presentation(slate_presentation_t presentation)
-{
-    return presentation == SLATE_PRESENT_MISSING ||
-           presentation == SLATE_PRESENT_MISSING_PROVIDER ||
-           presentation == SLATE_PRESENT_INCOMPATIBLE;
-}
-
 static const char *position_icon(const slate_cover_view_t *view,
                                  const slate_cover_state_t *state)
 {
@@ -319,7 +316,7 @@ void slate_cover_update(slate_cover_view_t *view, const slate_resource_t *resour
                         const slate_action_feedback_t *feedback,
                         const slate_theme_t *theme)
 {
-    bool missing = missing_presentation(resource->presentation);
+    bool missing = slate_component_is_placeholder(resource->presentation);
     bool present = has_value(resource);
     bool healthy = resource->presentation == SLATE_PRESENT_OK;
     bool pending = feedback != NULL && feedback->phase == SLATE_ACTION_PENDING;
@@ -327,8 +324,8 @@ void slate_cover_update(slate_cover_view_t *view, const slate_resource_t *resour
                                                : &resource->state.cover;
     bool moving = healthy && state->motion != SLATE_COVER_IDLE;
 
-    char identity[SLATE_PROVIDER_ID_MAX + SLATE_RESOURCE_ID_MAX + 2];
-    snprintf(identity, sizeof(identity), "%s:%s", view->provider, view->resource);
+    char identity[SLATE_COMPONENT_PLACEHOLDER_MAX];
+    slate_component_placeholder_text(resource, identity, sizeof(identity));
     lv_label_set_text(view->identity, identity);
     set_visible(view->identity, missing);
     set_visible(view->icon, !missing);

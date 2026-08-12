@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "slate_component.h"
+
 static void style_plain(lv_obj_t *object)
 {
     lv_obj_remove_style_all(object);
@@ -45,15 +47,17 @@ static const char *measurement_icon(slate_measurement_t measurement)
 static unsigned decimal_places(slate_measurement_t measurement, double value)
 {
     /* The component owns display precision: tenths matter for temperature,
-     * while fractional humidity and pressure are noise at this tile size.
-     * Power keeps more resolution at small magnitudes without letting a large
-     * reading crowd out its unit. Providers only supply the neutral value. */
+     * humidity stays a whole percent, and pressure preserves hundredths so an
+     * upstream value such as 1013.25 is not silently changed. Power keeps more
+     * resolution at small magnitudes without letting a large reading crowd out
+     * its unit. Providers only supply the neutral value. */
     switch (measurement) {
     case SLATE_MEASUREMENT_TEMPERATURE:
         return 1;
     case SLATE_MEASUREMENT_HUMIDITY:
-    case SLATE_MEASUREMENT_PRESSURE:
         return 0;
+    case SLATE_MEASUREMENT_PRESSURE:
+        return 2;
     case SLATE_MEASUREMENT_POWER:
     case SLATE_MEASUREMENT_NONE:
         value = fabs(value);
@@ -81,7 +85,7 @@ static void format_value(const slate_sensor_state_t *sensor, char *out, size_t s
 static const lv_font_t *value_font(const slate_theme_t *theme, const char *value)
 {
     size_t length = strlen(value);
-    if (length <= 7) {
+    if (length <= 5) {
         return theme->hero;
     }
     return length <= 15 ? theme->body : theme->caption;
@@ -96,11 +100,10 @@ static bool has_state(const slate_resource_t *resource)
 }
 
 bool slate_sensor_build(lv_obj_t *tile, const slate_config_tile_t *config,
-                        const slate_theme_t *theme, slate_sensor_view_t *view,
-                        lv_obj_t **name_label)
+                        const slate_theme_t *theme, slate_sensor_view_t *view)
 {
     if (tile == NULL || config == NULL || theme == NULL || view == NULL ||
-        name_label == NULL || config->binding_count == 0) {
+        config->binding_count == 0) {
         return false;
     }
 
@@ -164,13 +167,23 @@ bool slate_sensor_build(lv_obj_t *tile, const slate_config_tile_t *config,
 
     const slate_config_binding_t *binding = &config->bindings[0];
     const char *name = config->label != NULL ? config->label : binding->resource;
-    *name_label = make_label(content, name, theme->caption, theme->text_lo);
-    if (*name_label == NULL) {
+    view->name = make_label(content, name, theme->caption, theme->text_lo);
+    if (view->name == NULL) {
         return false;
     }
-    lv_label_set_long_mode(*name_label, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(*name_label, lv_pct(100));
-    lv_obj_align(*name_label, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_label_set_long_mode(view->name, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(view->name, lv_pct(100));
+    lv_obj_align(view->name, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+    view->identity = make_label(tile, "", theme->caption, theme->warn);
+    if (view->identity == NULL) {
+        return false;
+    }
+    lv_label_set_long_mode(view->identity, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(view->identity, lv_pct(100));
+    lv_obj_set_style_text_align(view->identity, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_add_flag(view->identity, LV_OBJ_FLAG_IGNORE_LAYOUT | LV_OBJ_FLAG_HIDDEN);
+    lv_obj_center(view->identity);
     return true;
 }
 
@@ -178,8 +191,29 @@ void slate_sensor_update(const slate_sensor_view_t *view, const slate_resource_t
                          const slate_theme_t *theme)
 {
     const slate_sensor_state_t *sensor = &resource->state.sensor;
+    bool placeholder = slate_component_is_placeholder(resource->presentation);
     bool state_present = has_state(resource);
     char value[SLATE_SENSOR_TEXT_MAX + 24];
+
+    char identity[SLATE_COMPONENT_PLACEHOLDER_MAX];
+    slate_component_placeholder_text(resource, identity, sizeof(identity));
+    lv_label_set_text(view->identity, identity);
+    if (placeholder) {
+        lv_obj_remove_flag(view->identity, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(view->identity, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_obj_t *content[] = {view->icon, view->value, view->unit, view->name};
+    for (size_t i = 0; i < sizeof(content) / sizeof(content[0]); i++) {
+        if (content[i] == NULL) {
+            continue;
+        }
+        if (placeholder) {
+            lv_obj_add_flag(content[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(content[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
 
     if (resource->presentation == SLATE_PRESENT_OK) {
         format_value(sensor, value, sizeof(value));

@@ -6,6 +6,8 @@
 
 #include "esp_log.h"
 
+#include "slate_component.h"
+
 static const char *TAG = "slate_scene";
 
 static void style_plain(lv_obj_t *object)
@@ -142,28 +144,22 @@ bool slate_scene_build(lv_obj_t *tile, const slate_config_tile_t *config,
     return true;
 }
 
-static bool missing_presentation(slate_presentation_t presentation)
-{
-    return presentation == SLATE_PRESENT_MISSING ||
-           presentation == SLATE_PRESENT_MISSING_PROVIDER ||
-           presentation == SLATE_PRESENT_INCOMPATIBLE;
-}
-
 void slate_scene_update(slate_scene_view_t *view, const slate_resource_t *resource,
                         const slate_action_feedback_t *feedback,
                         const slate_theme_t *theme)
 {
-    bool missing = missing_presentation(resource->presentation);
+    bool missing = slate_component_is_placeholder(resource->presentation);
     bool no_current_state = resource->presentation == SLATE_PRESENT_UNAVAILABLE ||
                             resource->presentation == SLATE_PRESENT_STALE;
+    bool pending = feedback != NULL && feedback->phase == SLATE_ACTION_PENDING;
     bool success = feedback != NULL && feedback->phase == SLATE_ACTION_SUCCESS;
-    bool busy = feedback != NULL && (feedback->phase == SLATE_ACTION_PENDING || success);
+    bool busy = pending || success;
     bool interactive = resource->presentation == SLATE_PRESENT_OK && !busy &&
                        slate_capabilities_have(&resource->capabilities,
                                                SLATE_ACTION_ACTIVATE);
 
-    char identity[SLATE_PROVIDER_ID_MAX + SLATE_RESOURCE_ID_MAX + 2];
-    snprintf(identity, sizeof(identity), "%s:%s", view->provider, view->resource);
+    char identity[SLATE_COMPONENT_PLACEHOLDER_MAX];
+    slate_component_placeholder_text(resource, identity, sizeof(identity));
     lv_label_set_text(view->identity, identity);
     set_visible(view->identity, missing);
     set_visible(view->icon, !missing);

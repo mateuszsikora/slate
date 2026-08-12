@@ -9,6 +9,8 @@
 
 #include "esp_log.h"
 
+#include "slate_component.h"
+
 static const char *TAG = "slate_light";
 
 #define LIGHT_SLIDER_HEIGHT       12
@@ -18,6 +20,9 @@ static const char *TAG = "slate_light";
 #define LIGHT_TEMPERATURE_MAX_K   6500
 #define LIGHT_PENDING_OPA_LOW     LV_OPA_40
 #define LIGHT_PENDING_PULSE_MS    650
+
+_Static_assert(LIGHT_SLIDER_HEIGHT + 2 * LIGHT_SLIDER_TOUCH_EXPAND >= 48,
+               "light sliders need a 48 px touch target");
 
 static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t *font,
                             uint32_t color)
@@ -317,6 +322,7 @@ bool slate_light_build(lv_obj_t *tile, const slate_config_tile_t *config,
     if (!built) {
         return false;
     }
+    view->icon_font = lv_obj_get_style_text_font(view->icon, LV_PART_MAIN);
 
     view->identity = make_label(tile, "", theme->caption, theme->warn);
     if (view->identity == NULL) {
@@ -336,13 +342,6 @@ static bool has_value(const slate_resource_t *resource)
            (resource->presentation == SLATE_PRESENT_OK ||
             resource->presentation == SLATE_PRESENT_STALE ||
             resource->presentation == SLATE_PRESENT_UNAVAILABLE);
-}
-
-static bool missing_presentation(slate_presentation_t presentation)
-{
-    return presentation == SLATE_PRESENT_MISSING ||
-           presentation == SLATE_PRESENT_MISSING_PROVIDER ||
-           presentation == SLATE_PRESENT_INCOMPATIBLE;
 }
 
 static void temperature_range(slate_light_view_t *view,
@@ -380,7 +379,9 @@ void slate_light_update(slate_light_view_t *view, const slate_resource_t *resour
                         const slate_action_feedback_t *feedback,
                         const slate_theme_t *theme)
 {
-    bool missing = missing_presentation(resource->presentation);
+    bool missing = slate_component_is_placeholder(resource->presentation);
+    bool no_current_state = resource->presentation == SLATE_PRESENT_UNAVAILABLE ||
+                            resource->presentation == SLATE_PRESENT_STALE;
     bool present = has_value(resource);
     bool healthy = resource->presentation == SLATE_PRESENT_OK;
     bool pending = feedback != NULL && feedback->phase == SLATE_ACTION_PENDING;
@@ -388,13 +389,13 @@ void slate_light_update(slate_light_view_t *view, const slate_resource_t *resour
                                                : &resource->state.light;
     set_pending_animation(view, pending);
 
-    char identity[SLATE_PROVIDER_ID_MAX + SLATE_RESOURCE_ID_MAX + 2];
-    snprintf(identity, sizeof(identity), "%s:%s", view->provider, view->resource);
+    char identity[SLATE_COMPONENT_PLACEHOLDER_MAX];
+    slate_component_placeholder_text(resource, identity, sizeof(identity));
     lv_label_set_text(view->identity, identity);
     set_visible(view->identity, missing);
     set_visible(view->icon, !missing);
     set_visible(view->name, !missing);
-    set_visible(view->state_dot, !missing);
+    set_visible(view->state_dot, !missing && !no_current_state);
 
     if (!view->label_override && !missing) {
         lv_label_set_text(view->name,
@@ -443,10 +444,16 @@ void slate_light_update(slate_light_view_t *view, const slate_resource_t *resour
     set_enabled(view->temperature_slider, interactive && show_temperature);
 
     bool on = present && state->on;
-    lv_label_set_text(view->icon,
-                      view->icon_override != NULL
-                          ? view->icon_override
-                          : on ? SLATE_ICON_LIGHTBULB_ON : SLATE_ICON_LIGHTBULB_OUTLINE);
+    const char *icon = "-";
+    if (!no_current_state) {
+        icon = view->icon_override != NULL
+                   ? view->icon_override
+                   : on ? SLATE_ICON_LIGHTBULB_ON : SLATE_ICON_LIGHTBULB_OUTLINE;
+    }
+    lv_label_set_text(view->icon, icon);
+    lv_obj_set_style_text_font(view->icon,
+                               no_current_state ? theme->body : view->icon_font,
+                               LV_PART_MAIN);
     lv_obj_set_style_text_color(view->icon,
                                 lv_color_hex(on ? theme->accent : theme->text_lo),
                                 LV_PART_MAIN);
