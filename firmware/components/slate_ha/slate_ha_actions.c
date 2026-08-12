@@ -32,6 +32,7 @@ static action_correlation_t *s_correlations;
 typedef enum {
     HA_ACTION_DOMAIN_INVALID = 0,
     HA_ACTION_DOMAIN_LIGHT,
+    HA_ACTION_DOMAIN_COVER,
     HA_ACTION_DOMAIN_SCENE,
 } ha_action_domain_t;
 
@@ -47,11 +48,35 @@ static ha_action_domain_t action_domain(const char *resource)
         return HA_ACTION_DOMAIN_LIGHT;
     }
     static const char scene[] = "scene.";
+    static const char cover[] = "cover.";
+    if (strncmp(resource, cover, sizeof(cover) - 1) == 0 &&
+        resource[sizeof(cover) - 1] != '\0') {
+        return HA_ACTION_DOMAIN_COVER;
+    }
     if (strncmp(resource, scene, sizeof(scene) - 1) == 0 &&
         resource[sizeof(scene) - 1] != '\0') {
         return HA_ACTION_DOMAIN_SCENE;
     }
     return HA_ACTION_DOMAIN_INVALID;
+}
+
+static bool domain_accepts(ha_action_domain_t domain, slate_action_t action)
+{
+    switch (domain) {
+    case HA_ACTION_DOMAIN_LIGHT:
+        return action == SLATE_ACTION_TOGGLE || action == SLATE_ACTION_SET_POWER ||
+               action == SLATE_ACTION_SET_BRIGHTNESS ||
+               action == SLATE_ACTION_SET_COLOR_TEMPERATURE;
+    case HA_ACTION_DOMAIN_COVER:
+        return action == SLATE_ACTION_TOGGLE || action == SLATE_ACTION_OPEN ||
+               action == SLATE_ACTION_STOP || action == SLATE_ACTION_CLOSE ||
+               action == SLATE_ACTION_SET_POSITION;
+    case HA_ACTION_DOMAIN_SCENE:
+        return action == SLATE_ACTION_ACTIVATE;
+    case HA_ACTION_DOMAIN_INVALID:
+        return false;
+    }
+    return false;
 }
 
 esp_err_t slate_ha_action_request_copy(slate_ha_action_request_t *out, uint32_t bus_id,
@@ -90,19 +115,29 @@ esp_err_t slate_ha_action_request_copy(slate_ha_action_request_t *out, uint32_t 
             return ESP_ERR_INVALID_ARG;
         }
         break;
+    case SLATE_ACTION_SET_POSITION:
+        if (request->value_type != SLATE_ACTION_VALUE_NUMBER ||
+            request->value.number < 0 || request->value.number > 100) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        break;
     case SLATE_ACTION_ACTIVATE:
         if (domain != HA_ACTION_DOMAIN_SCENE ||
             request->value_type != SLATE_ACTION_VALUE_NONE) {
             return ESP_ERR_INVALID_ARG;
         }
         break;
+    case SLATE_ACTION_OPEN:
+    case SLATE_ACTION_STOP:
+    case SLATE_ACTION_CLOSE:
+        if (request->value_type != SLATE_ACTION_VALUE_NONE) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        break;
     default:
         return ESP_ERR_NOT_SUPPORTED;
     }
-    if (domain == HA_ACTION_DOMAIN_SCENE && request->action != SLATE_ACTION_ACTIVATE) {
-        return ESP_ERR_NOT_SUPPORTED;
-    }
-    if (domain == HA_ACTION_DOMAIN_LIGHT && request->action == SLATE_ACTION_ACTIVATE) {
+    if (!domain_accepts(domain, request->action)) {
         return ESP_ERR_NOT_SUPPORTED;
     }
 
@@ -133,7 +168,10 @@ esp_err_t slate_ha_action_frame(uint32_t command_id,
         return ESP_ERR_INVALID_ARG;
     }
 
-    const char *domain = action_resource_domain == HA_ACTION_DOMAIN_SCENE ? "scene" : "light";
+    const char *domain = action_resource_domain == HA_ACTION_DOMAIN_SCENE
+                             ? "scene"
+                             : action_resource_domain == HA_ACTION_DOMAIN_COVER
+                                   ? "cover" : "light";
     const char *service = NULL;
     const char *value_name = NULL;
     int32_t value = 0;
@@ -168,6 +206,15 @@ esp_err_t slate_ha_action_frame(uint32_t command_id,
         value_name = "color_temp_kelvin";
         value = request->value.number;
         break;
+    case SLATE_ACTION_SET_POSITION:
+        if (request->value_type != SLATE_ACTION_VALUE_NUMBER ||
+            request->value.number < 0 || request->value.number > 100) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        service = "set_cover_position";
+        value_name = "position";
+        value = request->value.number;
+        break;
     case SLATE_ACTION_ACTIVATE:
         if (action_resource_domain != HA_ACTION_DOMAIN_SCENE ||
             request->value_type != SLATE_ACTION_VALUE_NONE) {
@@ -175,11 +222,28 @@ esp_err_t slate_ha_action_frame(uint32_t command_id,
         }
         service = "turn_on";
         break;
+    case SLATE_ACTION_OPEN:
+        if (request->value_type != SLATE_ACTION_VALUE_NONE) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        service = "open_cover";
+        break;
+    case SLATE_ACTION_STOP:
+        if (request->value_type != SLATE_ACTION_VALUE_NONE) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        service = "stop_cover";
+        break;
+    case SLATE_ACTION_CLOSE:
+        if (request->value_type != SLATE_ACTION_VALUE_NONE) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        service = "close_cover";
+        break;
     default:
         return ESP_ERR_NOT_SUPPORTED;
     }
-    if (action_resource_domain == HA_ACTION_DOMAIN_SCENE &&
-        request->action != SLATE_ACTION_ACTIVATE) {
+    if (!domain_accepts(action_resource_domain, request->action)) {
         return ESP_ERR_NOT_SUPPORTED;
     }
 
@@ -439,6 +503,52 @@ esp_err_t slate_ha_actions_selftest(void)
     source.action = SLATE_ACTION_TOGGLE;
     CHECK(slate_ha_action_request_copy(&request, 47, &source) == ESP_ERR_NOT_SUPPORTED,
           "reject light action for scene resource");
+
+    source.resource = "cover.office_blind";
+    static const struct {
+        slate_action_t action;
+        const char *service;
+    } COVER_ACTIONS[] = {
+        {SLATE_ACTION_TOGGLE, "toggle"},
+        {SLATE_ACTION_OPEN, "open_cover"},
+        {SLATE_ACTION_STOP, "stop_cover"},
+        {SLATE_ACTION_CLOSE, "close_cover"},
+    };
+    bool cover_actions_ok = true;
+    for (size_t i = 0; i < sizeof(COVER_ACTIONS) / sizeof(COVER_ACTIONS[0]); i++) {
+        source.action = COVER_ACTIONS[i].action;
+        source.value_type = SLATE_ACTION_VALUE_NONE;
+        cover_actions_ok = cover_actions_ok &&
+                           slate_ha_action_request_copy(&request, 48 + i, &source) == ESP_OK &&
+                           slate_ha_action_frame(106 + i, &request, &frame) == ESP_OK &&
+                           string_field(frame, "domain", "cover") &&
+                           string_field(frame, "service", COVER_ACTIONS[i].service) &&
+                           string_field(cJSON_GetObjectItemCaseSensitive(frame, "target"),
+                                        "entity_id", source.resource) &&
+                           cJSON_GetObjectItemCaseSensitive(frame, "service_data") == NULL;
+        cJSON_Delete(frame);
+        frame = NULL;
+    }
+    CHECK(cover_actions_ok, "cover actions map to native cover services");
+
+    source.action = SLATE_ACTION_SET_POSITION;
+    source.value_type = SLATE_ACTION_VALUE_NUMBER;
+    source.value.number = 63;
+    CHECK(slate_ha_action_request_copy(&request, 52, &source) == ESP_OK &&
+              slate_ha_action_frame(110, &request, &frame) == ESP_OK &&
+              string_field(frame, "domain", "cover") &&
+              string_field(frame, "service", "set_cover_position") &&
+              number_field(cJSON_GetObjectItemCaseSensitive(frame, "service_data"),
+                           "position", 63),
+          "cover position maps to native position service");
+    cJSON_Delete(frame);
+    frame = NULL;
+
+    source.action = SLATE_ACTION_SET_BRIGHTNESS;
+    source.value_type = SLATE_ACTION_VALUE_NUMBER;
+    source.value.number = 50;
+    CHECK(slate_ha_action_request_copy(&request, 53, &source) == ESP_ERR_NOT_SUPPORTED,
+          "reject light action for cover resource");
 
     cJSON *accepted = cJSON_Parse("{\"success\":true,\"result\":null}");
     bool success = false;
