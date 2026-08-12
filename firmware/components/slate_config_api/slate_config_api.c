@@ -393,6 +393,44 @@ esp_err_t slate_config_api_init(void)
 
 #ifdef SLATE_CONFIG_API_SELFTEST
 
+static bool config_report_has(const slate_config_report_t *report,
+                              const char *code, const char *path)
+{
+    for (size_t i = 0; i < report->error_count; i++) {
+        if (strcmp(report->errors[i].code, code) == 0 &&
+            strcmp(report->errors[i].path, path) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static slate_config_parse_status_t parse_scene_fixture(const char *size,
+                                                       const char *bindings,
+                                                       slate_config_report_t *report)
+{
+    static const char PREFIX[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\","
+        "\"pages\":[{\"id\":\"home\",\"tiles\":[{\"id\":\"scene\","
+        "\"type\":\"scene\",\"pos\":[0,0],\"size\":";
+    static const char MIDDLE[] = ",\"bindings\":";
+    static const char SUFFIX[] = "}]}]}";
+    size_t len = strlen(PREFIX) + strlen(size) + strlen(MIDDLE) +
+                 strlen(bindings) + strlen(SUFFIX);
+    char *json = malloc(len + 1);
+    if (json == NULL) {
+        memset(report, 0, sizeof(*report));
+        report->status = SLATE_CONFIG_PARSE_OUT_OF_MEMORY;
+        return report->status;
+    }
+    snprintf(json, len + 1, "%s%s%s%s%s", PREFIX, size, MIDDLE, bindings, SUFFIX);
+    slate_config_t *config = NULL;
+    slate_config_parse_status_t status = slate_config_parse(json, len, &config, report);
+    slate_config_free(config);
+    free(json);
+    return status;
+}
+
 esp_err_t slate_config_api_selftest(void)
 {
     int failures = 0;
@@ -418,6 +456,64 @@ esp_err_t slate_config_api_selftest(void)
                                      strlen("transient=0&transient=1")) ==
                          CONFIG_PUT_INVALID_QUERY,
                      "duplicate transient field refused");
+
+    static const char ONE[] =
+        "[{\"provider\":\"direct\",\"resource\":\"scene-one\"}]";
+    static const char TWO[] =
+        "[{\"provider\":\"direct\",\"resource\":\"scene-one\"},"
+        "{\"provider\":\"direct\",\"resource\":\"scene-two\"}]";
+    static const char FIVE[] =
+        "[{\"provider\":\"direct\",\"resource\":\"scene-one\"},"
+        "{\"provider\":\"direct\",\"resource\":\"scene-two\"},"
+        "{\"provider\":\"direct\",\"resource\":\"scene-three\"},"
+        "{\"provider\":\"direct\",\"resource\":\"scene-four\"},"
+        "{\"provider\":\"direct\",\"resource\":\"scene-five\"}]";
+    static const char SIX[] =
+        "[{\"provider\":\"direct\",\"resource\":\"scene-one\"},"
+        "{\"provider\":\"direct\",\"resource\":\"scene-two\"},"
+        "{\"provider\":\"direct\",\"resource\":\"scene-three\"},"
+        "{\"provider\":\"direct\",\"resource\":\"scene-four\"},"
+        "{\"provider\":\"direct\",\"resource\":\"scene-five\"},"
+        "{\"provider\":\"direct\",\"resource\":\"scene-six\"}]";
+    slate_config_report_t report;
+    CONFIG_API_CHECK(parse_scene_fixture("[1,1]", ONE, &report) ==
+                         SLATE_CONFIG_PARSE_OK,
+                     "1x1 scene accepts one binding");
+    slate_config_report_free(&report);
+    CONFIG_API_CHECK(parse_scene_fixture("[4,1]", TWO, &report) ==
+                         SLATE_CONFIG_PARSE_OK,
+                     "4x1 scene accepts two bindings");
+    slate_config_report_free(&report);
+    CONFIG_API_CHECK(parse_scene_fixture("[4,1]", FIVE, &report) ==
+                         SLATE_CONFIG_PARSE_OK,
+                     "4x1 scene accepts five bindings");
+    slate_config_report_free(&report);
+    CONFIG_API_CHECK(parse_scene_fixture("[1,1]", TWO, &report) ==
+                         SLATE_CONFIG_PARSE_INVALID_CONFIG &&
+                         config_report_has(&report, "binding_required",
+                                           "/pages/0/tiles/0/bindings"),
+                     "1x1 scene refuses multiple bindings");
+    slate_config_report_free(&report);
+    CONFIG_API_CHECK(parse_scene_fixture("[4,1]", ONE, &report) ==
+                         SLATE_CONFIG_PARSE_INVALID_CONFIG &&
+                         config_report_has(&report, "binding_required",
+                                           "/pages/0/tiles/0/bindings"),
+                     "4x1 scene refuses one binding");
+    slate_config_report_free(&report);
+    CONFIG_API_CHECK(parse_scene_fixture("[4,1]", SIX, &report) ==
+                         SLATE_CONFIG_PARSE_INVALID_CONFIG &&
+                         config_report_has(&report, "binding_required",
+                                           "/pages/0/tiles/0/bindings"),
+                     "4x1 scene refuses six bindings");
+    slate_config_report_free(&report);
+    CONFIG_API_CHECK(parse_scene_fixture("[2,1]", "[]", &report) ==
+                         SLATE_CONFIG_PARSE_INVALID_CONFIG &&
+                         config_report_has(&report, "invalid_size",
+                                           "/pages/0/tiles/0/size") &&
+                         config_report_has(&report, "binding_required",
+                                           "/pages/0/tiles/0/bindings"),
+                     "scene reports size and binding errors together");
+    slate_config_report_free(&report);
 
     ESP_LOGI(TAG, "selftest: %d failure(s)", failures);
     return failures == 0 ? ESP_OK : ESP_FAIL;

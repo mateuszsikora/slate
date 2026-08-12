@@ -57,15 +57,18 @@ typedef struct {
 typedef enum {
     SLATE_ACTION_IDLE = 0,
     SLATE_ACTION_PENDING,
+    SLATE_ACTION_SUCCESS,
     SLATE_ACTION_ERROR,
 } slate_action_phase_t;
 
 /**
  * @brief The action-owned overlay a component applies to confirmed state.
  *
- * `optimistic` is meaningful only while phase is PENDING. ERROR deliberately
- * carries no alternative state: the component immediately falls back to the
- * confirmed `slate_resource_t` and shows its brief failure treatment.
+ * `optimistic` is meaningful only while phase is PENDING. SUCCESS is the brief
+ * acknowledgement available to stateless actions such as scene activation;
+ * stateful actions still require a matching provider snapshot. ERROR carries
+ * no alternative state: the component immediately falls back to the confirmed
+ * `slate_resource_t` and shows its brief failure treatment.
  */
 typedef struct {
     slate_action_phase_t phase;
@@ -92,8 +95,9 @@ esp_err_t slate_action_dispatch(const slate_action_request_t *request, uint32_t 
 /**
  * @brief Deliver an adapter acknowledgement or explicit failure.
  *
- * Success acknowledges delivery but does not confirm state. A matching provider
- * snapshot does that. Failure reverts immediately. Unknown, duplicate and late
+ * Success acknowledges delivery. Stateful actions still require a matching
+ * provider snapshot; a stateless scene activation enters the brief SUCCESS
+ * phase directly. Failure reverts immediately. Unknown, duplicate and late
  * results are ignored.
  */
 void slate_action_result(const char *provider, uint32_t id, bool success, const char *error);

@@ -29,20 +29,41 @@ typedef struct {
 
 static action_correlation_t *s_correlations;
 
-static bool light_resource(const char *resource)
+typedef enum {
+    HA_ACTION_DOMAIN_INVALID = 0,
+    HA_ACTION_DOMAIN_LIGHT,
+    HA_ACTION_DOMAIN_SCENE,
+} ha_action_domain_t;
+
+static ha_action_domain_t action_domain(const char *resource)
 {
-    static const char prefix[] = "light.";
-    return resource != NULL && strncmp(resource, prefix, sizeof(prefix) - 1) == 0 &&
-           resource[sizeof(prefix) - 1] != '\0' &&
-           strnlen(resource, SLATE_RESOURCE_ID_MAX + 1) <= SLATE_RESOURCE_ID_MAX;
+    if (resource == NULL || strnlen(resource, SLATE_RESOURCE_ID_MAX + 1) >
+                                SLATE_RESOURCE_ID_MAX) {
+        return HA_ACTION_DOMAIN_INVALID;
+    }
+    static const char light[] = "light.";
+    if (strncmp(resource, light, sizeof(light) - 1) == 0 &&
+        resource[sizeof(light) - 1] != '\0') {
+        return HA_ACTION_DOMAIN_LIGHT;
+    }
+    static const char scene[] = "scene.";
+    if (strncmp(resource, scene, sizeof(scene) - 1) == 0 &&
+        resource[sizeof(scene) - 1] != '\0') {
+        return HA_ACTION_DOMAIN_SCENE;
+    }
+    return HA_ACTION_DOMAIN_INVALID;
 }
 
 esp_err_t slate_ha_action_request_copy(slate_ha_action_request_t *out, uint32_t bus_id,
                                        const slate_action_request_t *request)
 {
     if (out == NULL || bus_id == 0 || request == NULL ||
-        request->provider == NULL || strcmp(request->provider, SLATE_HA_PROVIDER_ID) != 0 ||
-        !light_resource(request->resource)) {
+        request->provider == NULL || strcmp(request->provider, SLATE_HA_PROVIDER_ID) != 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ha_action_domain_t domain = action_domain(request->resource);
+    if (domain == HA_ACTION_DOMAIN_INVALID) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -69,7 +90,19 @@ esp_err_t slate_ha_action_request_copy(slate_ha_action_request_t *out, uint32_t 
             return ESP_ERR_INVALID_ARG;
         }
         break;
+    case SLATE_ACTION_ACTIVATE:
+        if (domain != HA_ACTION_DOMAIN_SCENE ||
+            request->value_type != SLATE_ACTION_VALUE_NONE) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        break;
     default:
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (domain == HA_ACTION_DOMAIN_SCENE && request->action != SLATE_ACTION_ACTIVATE) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (domain == HA_ACTION_DOMAIN_LIGHT && request->action == SLATE_ACTION_ACTIVATE) {
         return ESP_ERR_NOT_SUPPORTED;
     }
 
@@ -90,12 +123,17 @@ esp_err_t slate_ha_action_frame(uint32_t command_id,
                                 const slate_ha_action_request_t *request,
                                 cJSON **out)
 {
-    if (command_id == 0 || request == NULL || out == NULL ||
-        !light_resource(request->resource)) {
+    if (command_id == 0 || request == NULL || out == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     *out = NULL;
 
+    ha_action_domain_t action_resource_domain = action_domain(request->resource);
+    if (action_resource_domain == HA_ACTION_DOMAIN_INVALID) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const char *domain = action_resource_domain == HA_ACTION_DOMAIN_SCENE ? "scene" : "light";
     const char *service = NULL;
     const char *value_name = NULL;
     int32_t value = 0;
@@ -130,7 +168,18 @@ esp_err_t slate_ha_action_frame(uint32_t command_id,
         value_name = "color_temp_kelvin";
         value = request->value.number;
         break;
+    case SLATE_ACTION_ACTIVATE:
+        if (action_resource_domain != HA_ACTION_DOMAIN_SCENE ||
+            request->value_type != SLATE_ACTION_VALUE_NONE) {
+            return ESP_ERR_INVALID_ARG;
+        }
+        service = "turn_on";
+        break;
     default:
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (action_resource_domain == HA_ACTION_DOMAIN_SCENE &&
+        request->action != SLATE_ACTION_ACTIVATE) {
         return ESP_ERR_NOT_SUPPORTED;
     }
 
@@ -139,7 +188,7 @@ esp_err_t slate_ha_action_frame(uint32_t command_id,
     bool ok = target != NULL &&
               cJSON_AddNumberToObject(root, "id", command_id) != NULL &&
               cJSON_AddStringToObject(root, "type", "call_service") != NULL &&
-              cJSON_AddStringToObject(root, "domain", "light") != NULL &&
+              cJSON_AddStringToObject(root, "domain", domain) != NULL &&
               cJSON_AddStringToObject(root, "service", service) != NULL &&
               cJSON_AddStringToObject(target, "entity_id", request->resource) != NULL;
 
@@ -322,7 +371,7 @@ esp_err_t slate_ha_actions_selftest(void)
     invalid = source;
     invalid.resource = "switch.slate_selftest";
     CHECK(slate_ha_action_request_copy(&request, 45, &invalid) == ESP_ERR_INVALID_ARG,
-          "reject non-light resource");
+          "reject unsupported resource domain");
     invalid = source;
     invalid.action = SLATE_ACTION_OPEN;
     CHECK(slate_ha_action_request_copy(&request, 45, &invalid) == ESP_ERR_NOT_SUPPORTED,
@@ -374,6 +423,22 @@ esp_err_t slate_ha_actions_selftest(void)
     source.value.number = 0;
     CHECK(slate_ha_action_request_copy(&request, 45, &source) == ESP_ERR_INVALID_ARG,
           "reject non-positive colour temperature");
+
+    source.resource = "scene.relax";
+    source.action = SLATE_ACTION_ACTIVATE;
+    source.value_type = SLATE_ACTION_VALUE_NONE;
+    CHECK(slate_ha_action_request_copy(&request, 46, &source) == ESP_OK &&
+              slate_ha_action_frame(105, &request, &frame) == ESP_OK &&
+              string_field(frame, "domain", "scene") &&
+              string_field(frame, "service", "turn_on") &&
+              string_field(cJSON_GetObjectItemCaseSensitive(frame, "target"),
+                           "entity_id", source.resource) &&
+              cJSON_GetObjectItemCaseSensitive(frame, "service_data") == NULL,
+          "scene activation maps to scene.turn_on");
+    cJSON_Delete(frame);
+    source.action = SLATE_ACTION_TOGGLE;
+    CHECK(slate_ha_action_request_copy(&request, 47, &source) == ESP_ERR_NOT_SUPPORTED,
+          "reject light action for scene resource");
 
     cJSON *accepted = cJSON_Parse("{\"success\":true,\"result\":null}");
     bool success = false;

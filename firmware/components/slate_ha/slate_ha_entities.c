@@ -424,6 +424,16 @@ static bool normalize_entity(ha_entity_t *entity, ha_entity_t *out,
             entity->normalized_capabilities = (slate_capabilities_t) {0};
         }
         *available = current;
+    } else if (domain_is(entity->resource, "scene")) {
+        *kind = SLATE_KIND_SCENE;
+        bool current = entity->present && entity->has_state &&
+                       strcmp(entity->raw_state, "unavailable") != 0;
+        if (current) {
+            entity->normalized_capabilities = (slate_capabilities_t) {
+                .actions = 1u << SLATE_ACTION_ACTIVATE,
+            };
+        }
+        *available = current;
     } else {
         return false;
     }
@@ -444,7 +454,7 @@ static esp_err_t publish_copy(const ha_entity_t *entity, slate_kind_t kind, bool
     };
     if (kind == SLATE_KIND_LIGHT) {
         snapshot.state.light = entity->normalized_light;
-    } else {
+    } else if (kind == SLATE_KIND_SENSOR) {
         snapshot.state.sensor = entity->normalized_sensor;
     }
 
@@ -709,12 +719,20 @@ esp_err_t slate_ha_entities_selftest(void)
         }                                                                         \
     } while (0)
 
-    const char *ids[] = {"light.kitchen", "sensor.room_temperature"};
+    const char *ids[] = {
+        "light.kitchen",
+        "sensor.room_temperature",
+        "scene.relax",
+    };
     bool binding_changed = false;
-    CHECK(slate_ha_entities_bind(ids, 2, &binding_changed) == ESP_OK && binding_changed,
+    CHECK(slate_ha_entities_bind(ids, 3, &binding_changed) == ESP_OK && binding_changed,
           "bind explicit entity ids");
-    const char *reordered[] = {"sensor.room_temperature", "light.kitchen"};
-    CHECK(slate_ha_entities_bind(reordered, 2, &binding_changed) == ESP_OK &&
+    const char *reordered[] = {
+        "scene.relax",
+        "sensor.room_temperature",
+        "light.kitchen",
+    };
+    CHECK(slate_ha_entities_bind(reordered, 3, &binding_changed) == ESP_OK &&
               !binding_changed,
           "unchanged entity set avoids resubscription");
     const char *duplicates[] = {"light.kitchen", "light.kitchen"};
@@ -730,7 +748,9 @@ esp_err_t slate_ha_entities_selftest(void)
         "\"supported_color_modes\":[\"brightness\"]}},"
         "\"sensor.room_temperature\":{\"s\":\"21.5\",\"a\":{"
         "\"friendly_name\":\"Room temperature\","
-        "\"unit_of_measurement\":\"°C\",\"device_class\":\"temperature\"}}}}"
+        "\"unit_of_measurement\":\"°C\",\"device_class\":\"temperature\"}},"
+        "\"scene.relax\":{\"s\":\"2026-08-12T12:00:00.000000+00:00\",\"a\":{"
+        "\"friendly_name\":\"Relax\"}}}}"
     );
     CHECK(initial != NULL && process_event(initial, false) == ESP_OK,
           "expand initial additions");
@@ -738,15 +758,20 @@ esp_err_t slate_ha_entities_selftest(void)
 
     ha_entity_t light;
     ha_entity_t sensor;
+    ha_entity_t scene;
     slate_kind_t light_kind;
     slate_kind_t sensor_kind;
+    slate_kind_t scene_kind;
     bool light_available = false;
     bool sensor_available = false;
+    bool scene_available = false;
     LOCK();
     bool mapped_light = normalize_entity(find_entity(ids[0]), &light, &light_kind,
                                           &light_available);
     bool mapped_sensor = normalize_entity(find_entity(ids[1]), &sensor, &sensor_kind,
                                            &sensor_available);
+    bool mapped_scene = normalize_entity(find_entity(ids[2]), &scene, &scene_kind,
+                                          &scene_available);
     UNLOCK();
     CHECK(mapped_light && light_kind == SLATE_KIND_LIGHT && light_available &&
               light.normalized_light.on && light.normalized_light.brightness == 50 &&
@@ -758,6 +783,11 @@ esp_err_t slate_ha_entities_selftest(void)
               sensor.normalized_sensor.measurement == SLATE_MEASUREMENT_TEMPERATURE &&
               strcmp(sensor.normalized_sensor.unit, "°C") == 0,
           "map numeric sensor metadata");
+    CHECK(mapped_scene && scene_kind == SLATE_KIND_SCENE && scene_available &&
+              strcmp(scene.normalized_name, "Relax") == 0 &&
+              slate_capabilities_have(&scene.normalized_capabilities,
+                                      SLATE_ACTION_ACTIVATE),
+          "map stateless scene and activation capability");
 
     cJSON *change = cJSON_Parse(
         "{\"c\":{\"light.kitchen\":{\"+\":{\"s\":\"off\","

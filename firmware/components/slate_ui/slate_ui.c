@@ -21,6 +21,7 @@
 #include "slate_action.h"
 #include "slate_display.h"
 #include "slate_light.h"
+#include "slate_scene.h"
 #include "slate_sensor.h"
 #include "slate_state.h"
 #include "slate_store.h"
@@ -53,6 +54,7 @@ typedef struct {
     lv_obj_t *name;
     lv_obj_t *detail;
     slate_light_view_t light;
+    slate_scene_view_t scene;
     slate_sensor_view_t sensor;
 } binding_view_t;
 
@@ -245,6 +247,12 @@ static void update_view(binding_view_t *view, const slate_resource_t *resource,
 
     if (view->kind == SLATE_KIND_LIGHT && view->light.icon != NULL) {
         slate_light_update(&view->light, resource, &feedback, theme);
+        style_presentation(view, resource->presentation, feedback.phase, theme);
+        return;
+    }
+
+    if (view->kind == SLATE_KIND_SCENE && view->scene.icon != NULL) {
+        slate_scene_update(&view->scene, resource, &feedback, theme);
         style_presentation(view, resource->presentation, feedback.phase, theme);
         return;
     }
@@ -483,6 +491,30 @@ static bool build_light_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
     return true;
 }
 
+static bool build_scene_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
+                             lv_obj_t *object, size_t *view_index)
+{
+    for (size_t i = 0; i < tile->binding_count; i++) {
+        const slate_config_binding_t *binding = &tile->bindings[i];
+        binding_view_t *view = &tree->views[(*view_index)++];
+        if (strlcpy(view->provider, binding->provider, sizeof(view->provider)) >=
+                sizeof(view->provider) ||
+            strlcpy(view->resource, binding->resource, sizeof(view->resource)) >=
+                sizeof(view->resource)) {
+            return false;
+        }
+        view->kind = SLATE_KIND_SCENE;
+        view->label_override = tile->label != NULL && tile->binding_count == 1;
+        if (!slate_scene_build(object, tile, tree->theme, &view->scene, i,
+                               view->provider, view->resource)) {
+            return false;
+        }
+        view->tile = view->scene.button;
+        view->name = view->scene.name;
+    }
+    return true;
+}
+
 static bool build_known_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
                              lv_obj_t *object, size_t *view_index)
 {
@@ -507,9 +539,8 @@ static bool build_known_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
     lv_obj_set_width(detail, lv_pct(100));
     lv_obj_align(detail, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
-    /* Every binding enters the state store. Until #26 owns the scene bar, its
-     * generic shell has one shared presentation label; updates to any scene
-     * binding still wake and redraw that same semantic tile. */
+    /* Every binding enters the state store. Generic multi-binding components
+     * share this shell until they gain their own semantic presentation. */
     for (size_t i = 0; i < tile->binding_count; i++) {
         binding_view_t *view = &tree->views[(*view_index)++];
         if (strlcpy(view->provider, tile->bindings[i].provider, sizeof(view->provider)) >=
@@ -580,6 +611,11 @@ static ui_tree_t *build_config_tree(const slate_config_t *config)
             }
         } else if (tile->component == SLATE_COMPONENT_SENSOR) {
             if (!build_sensor_tile(tree, tile, object, &view_index)) {
+                tree_destroy(tree);
+                return NULL;
+            }
+        } else if (tile->component == SLATE_COMPONENT_SCENE) {
+            if (!build_scene_tile(tree, tile, object, &view_index)) {
                 tree_destroy(tree);
                 return NULL;
             }
@@ -1074,7 +1110,8 @@ static char *test_config_json(int cycle)
         "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"pressure\"}},"
         "{\"id\":\"u\",\"type\":\"future\",\"pos\":[3,1],\"size\":[1,1]},"
         "{\"id\":\"sc\",\"type\":\"scene\",\"pos\":[0,2],\"size\":[4,1],"
-        "\"bindings\":[{\"provider\":\"direct\",\"resource\":\"relax\"}]}",
+        "\"bindings\":[{\"provider\":\"direct\",\"resource\":\"relax\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"away\"}]}",
 
         "{\"id\":\"a\",\"type\":\"light\",\"pos\":[0,0],\"size\":[1,1],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"living-room\"}},"
@@ -1243,6 +1280,31 @@ static slate_config_t *light_action_test_config(void)
         "{\"id\":\"temperature\",\"type\":\"light\",\"pos\":[0,1],\"size\":[2,2],"
         "\"binding\":{\"provider\":\"ui-fixture\","
         "\"resource\":\"action-temperature\"}}]}]}";
+
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
+static slate_config_t *scene_test_config(void)
+{
+    static const char JSON[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"scenes\",\"pages\":[{"
+        "\"id\":\"scenes\",\"title\":\"Scene component #26\",\"tiles\":["
+        "{\"id\":\"bar\",\"type\":\"scene\",\"pos\":[0,0],\"size\":[4,1],"
+        "\"bindings\":["
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-movie\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-relax\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-dinner\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-away\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-missing\"}]},"
+        "{\"id\":\"compact\",\"type\":\"scene\",\"label\":\"Good night\","
+        "\"icon\":\"sleep\",\"pos\":[0,1],\"size\":[1,1],"
+        "\"bindings\":[{\"provider\":\"ui-fixture\","
+        "\"resource\":\"scene-goodnight\"}]}]}]}";
 
     slate_config_t *config = NULL;
     slate_config_report_t report;
@@ -1617,6 +1679,35 @@ static esp_err_t publish_action_test_states(bool toggled, int16_t brightness,
         update_all();
     }
     return err;
+}
+
+static esp_err_t publish_scene_test_states(void)
+{
+    static const slate_snapshot_t SCENES[] = {
+        {.resource = "scene-movie", .kind = SLATE_KIND_SCENE, .name = "Movie",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-relax", .kind = SLATE_KIND_SCENE, .name = "Relax",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-dinner", .kind = SLATE_KIND_SCENE, .name = "Dinner",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-away", .kind = SLATE_KIND_SCENE, .name = "Away",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-missing", .kind = SLATE_KIND_SCENE, .name = "Work",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-goodnight", .kind = SLATE_KIND_SCENE,
+         .name = "Provider name ignored", .available = true,
+         .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+    };
+
+    for (size_t i = 0; i < sizeof(SCENES) / sizeof(SCENES[0]); i++) {
+        esp_err_t err = slate_state_publish("ui-fixture", &SCENES[i]);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    slate_state_drain(discard_changed, NULL);
+    update_all();
+    return ESP_OK;
 }
 
 static bool sensor_view_text(const char *resource, const char *value, const char *unit)
@@ -2173,6 +2264,113 @@ static esp_err_t selftest_on_task(void)
                  strcmp(lv_label_get_text(action_temperature->light.temperature_value),
                         "4100 K") == 0,
              "confirmed colour temperature clears pending presentation");
+
+    slate_config_t *scenes = scene_test_config();
+    UI_CHECK(scenes != NULL && rebuild_on_task(scenes) == ESP_OK,
+             "scene component test dashboard activated");
+    UI_CHECK(publish_scene_test_states() == ESP_OK,
+             "scene bar received stateless normalized resources");
+
+    static const char *SCENE_RESOURCES[] = {
+        "scene-movie", "scene-relax", "scene-dinner", "scene-away", "scene-missing",
+    };
+    bool bar_layout_ok = true;
+    bool all_activated = true;
+    bool all_confirmed = true;
+    lv_obj_update_layout(s_tree->screen);
+    for (size_t i = 0; i < sizeof(SCENE_RESOURCES) / sizeof(SCENE_RESOURCES[0]); i++) {
+        binding_view_t *scene_view = find_view("ui-fixture", SCENE_RESOURCES[i]);
+        bar_layout_ok = bar_layout_ok && scene_view != NULL &&
+                        scene_view->scene.button != NULL &&
+                        lv_obj_get_width(scene_view->scene.button) >= 48 &&
+                        lv_obj_get_height(scene_view->scene.button) >= 48 &&
+                        lv_obj_has_flag(scene_view->scene.button, LV_OBJ_FLAG_CLICKABLE);
+        unsigned scene_calls = s_fixture.action_calls;
+        lv_result_t scene_result = scene_view != NULL
+                                       ? lv_obj_send_event(scene_view->scene.button,
+                                                           LV_EVENT_CLICKED, NULL)
+                                       : LV_RESULT_INVALID;
+        slate_action_feedback_t scene_feedback = {0};
+        esp_err_t scene_feedback_err = slate_action_feedback(
+            "ui-fixture", SCENE_RESOURCES[i], &scene_feedback);
+        all_activated = all_activated && scene_result == LV_RESULT_OK &&
+                        s_fixture.action_calls == scene_calls + 1 &&
+                        strcmp(s_fixture.action_resource, SCENE_RESOURCES[i]) == 0 &&
+                        s_fixture.action == SLATE_ACTION_ACTIVATE &&
+                        s_fixture.value_type == SLATE_ACTION_VALUE_NONE &&
+                        scene_feedback_err == ESP_OK &&
+                        scene_feedback.phase == SLATE_ACTION_PENDING;
+
+        slate_action_result("ui-fixture", s_fixture.action_id, true, NULL);
+        update_all();
+        scene_feedback_err = slate_action_feedback(
+            "ui-fixture", SCENE_RESOURCES[i], &scene_feedback);
+        all_confirmed = all_confirmed && scene_feedback_err == ESP_OK &&
+                        scene_feedback.phase == SLATE_ACTION_SUCCESS &&
+                        scene_view != NULL &&
+                        lv_color_eq(lv_obj_get_style_bg_color(scene_view->scene.button,
+                                                              LV_PART_MAIN),
+                                    lv_color_hex(s_tree->theme->accent));
+    }
+    UI_CHECK(bar_layout_ok, "4x1 bar gives every scene an independent touch target");
+    UI_CHECK(all_activated, "every scene button emits its own activate action");
+    UI_CHECK(all_confirmed, "accepted scene actions flash only their own button");
+
+    binding_view_t *compact_scene = find_view("ui-fixture", "scene-goodnight");
+    binding_view_t *missing_scene = find_view("ui-fixture", "scene-missing");
+    UI_CHECK(compact_scene != NULL && compact_scene->scene.compact &&
+                 strcmp(lv_label_get_text(compact_scene->scene.name), "Good night") == 0 &&
+                 strcmp(lv_label_get_text(compact_scene->scene.icon), SLATE_ICON_SLEEP) == 0,
+             "1x1 scene renders label and icon overrides");
+    bool rebound_without_snapshots = scenes != NULL &&
+                                       slate_state_bind(NULL, 0) == ESP_OK &&
+                                       rebuild_on_task(scenes) == ESP_OK;
+    missing_scene = find_view("ui-fixture", "scene-missing");
+    UI_CHECK(rebound_without_snapshots && missing_scene != NULL &&
+                 !lv_obj_has_flag(missing_scene->scene.identity, LV_OBJ_FLAG_HIDDEN) &&
+                 strcmp(lv_label_get_text(missing_scene->scene.identity),
+                        "ui-fixture:scene-missing") == 0 &&
+                 !lv_obj_has_flag(missing_scene->scene.button, LV_OBJ_FLAG_CLICKABLE),
+             "missing scene identifies its provider-qualified resource");
+
+    const slate_snapshot_t unavailable_scene = {
+        .resource = "scene-missing",
+        .kind = SLATE_KIND_SCENE,
+        .name = "Unavailable scene",
+        .available = false,
+        .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE,
+    };
+    esp_err_t unavailable_scene_err =
+        slate_state_publish("ui-fixture", &unavailable_scene);
+    if (unavailable_scene_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(unavailable_scene_err == ESP_OK && missing_scene != NULL &&
+                 lv_obj_has_flag(missing_scene->scene.identity, LV_OBJ_FLAG_HIDDEN) &&
+                 strcmp(lv_label_get_text(missing_scene->scene.icon), "-") == 0 &&
+                 lv_obj_get_style_opa(missing_scene->scene.button, LV_PART_MAIN) ==
+                     LV_OPA_50 &&
+                 !lv_obj_has_flag(missing_scene->scene.button, LV_OBJ_FLAG_CLICKABLE),
+             "unavailable scene renders a dimmed dash and stays disabled");
+    esp_err_t scene_offline_err =
+        slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_OFFLINE);
+    if (scene_offline_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(scene_offline_err == ESP_OK && missing_scene != NULL &&
+                 strcmp(lv_label_get_text(missing_scene->scene.icon), "-") == 0 &&
+                 lv_obj_get_style_opa(missing_scene->scene.button, LV_PART_MAIN) ==
+                     LV_OPA_50 &&
+                 !lv_obj_has_flag(missing_scene->scene.button, LV_OBJ_FLAG_CLICKABLE),
+             "offline scene renders a dimmed dash and stays disabled");
+    slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_ONLINE);
+    slate_state_drain(discard_changed, NULL);
+    update_all();
+    if (scenes != NULL) {
+        slate_config_free(scenes);
+    }
 
     lights = light_test_config();
     UI_CHECK(lights != NULL && rebuild_on_task(lights) == ESP_OK,
