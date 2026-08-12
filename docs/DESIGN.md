@@ -212,7 +212,7 @@ Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: B
 | POST   | `/ha`              | configure the HA provider; connection is tested before saving |
 | GET    | `/ha/discover`     | discover local HA instances over mDNS; manual URL entry remains available |
 | GET    | `/wifi/scan`       | nearby networks: `ssid`, `rssi`, `channel`, `auth`. Cached — see section 9.2 |
-| POST   | `/wifi`            | set station credentials and, optionally, the IPv4 addressing; persist, then apply. Answers before the result is known (section 9.3) |
+| POST   | `/wifi`            | set station credentials and, optionally, IPv4 addressing and the setup-access-point password; persist, then apply. Answers before the result is known (section 9.3) |
 | DELETE | `/wifi`            | forget the credentials and raise the setup access point |
 | GET    | `/status`          | network and provider states, RSSI, uptime, free heap, reset reason, reboot counter, resource count |
 | POST   | `/mode`            | `{"mode": "normal"\|"edit"}` |
@@ -256,6 +256,13 @@ with `unexpected_body`. Identify can also return `503 display_unavailable`.
 A successful factory reset erases NVS and LittleFS, issues a new device token,
 answers, and then reboots; an incomplete best-effort reset returns
 `500 reset_failed` and still reboots into the only supported post-reset state.
+A concurrent reset request returns `409 reset_in_progress`.
+
+`POST /wifi` accepts an optional `setup_password` alongside the station
+credentials. Omitting it preserves the recovery network's current security;
+an empty string makes that network open, and a non-empty value must contain
+8–63 characters. The setup page keeps this setting behind an advanced
+disclosure because an open recovery network is the residential default (§9.2).
 
 Document-wide errors and errors belonging to an identifiable tile are kept
 separate. `tile_errors` is keyed by `tile.id`, and each value is an array because

@@ -78,6 +78,7 @@ static const char *TAG = "slate_display";
 #define SLATE_DISPLAY_HEAP_METRICS_PERIOD_US (15LL * 1000000)
 #define SLATE_IDENTIFY_PHASE_MS               180
 #define SLATE_IDENTIFY_PHASES                 6
+#define SLATE_SETUP_QR_PAYLOAD_MAX            224
 
 static const int SLATE_DATA_GPIOS[16] = {
     14, /* B3 */ 38, /* B4 */ 18, /* B5 */ 17, /* B6 */ 10, /* B7 */
@@ -114,6 +115,57 @@ static lv_timer_t *s_identify_timer;
 static unsigned s_identify_phase;
 static atomic_bool s_setup_presentation_active = ATOMIC_VAR_INIT(false);
 static atomic_bool s_setup_hide_pending = ATOMIC_VAR_INIT(false);
+
+static void identify_cleanup(void);
+
+/* --- Compact strings used by the setup QR ------------------------------ */
+
+static bool qr_append(char *out, size_t capacity, size_t *used, char value)
+{
+    if (*used + 1 >= capacity) {
+        return false;
+    }
+    out[(*used)++] = value;
+    out[*used] = '\0';
+    return true;
+}
+
+static bool qr_append_text(char *out, size_t capacity, size_t *used, const char *text,
+                           bool escape)
+{
+    while (*text != '\0') {
+        /* ZXing's Wi-Fi payload grammar treats these as syntax. Escaping the
+         * full set accepted by common iOS/Android scanners also handles an AP
+         * name chosen from a MAC today and a user-chosen name in the future. */
+        if (escape && strchr("\\;,\":", *text) != NULL &&
+            !qr_append(out, capacity, used, '\\')) {
+            return false;
+        }
+        if (!qr_append(out, capacity, used, *text++)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool setup_qr_payload(const slate_display_setup_t *setup, char *out, size_t capacity)
+{
+    size_t used = 0;
+    const bool secured = setup->passphrase[0] != '\0';
+
+    out[0] = '\0';
+    if (!qr_append_text(out, capacity, &used, secured ? "WIFI:T:WPA;S:" : "WIFI:T:nopass;S:",
+                        false) ||
+        !qr_append_text(out, capacity, &used, setup->network, true)) {
+        return false;
+    }
+    if (secured &&
+        (!qr_append_text(out, capacity, &used, ";P:", false) ||
+         !qr_append_text(out, capacity, &used, setup->passphrase, true))) {
+        return false;
+    }
+    return qr_append_text(out, capacity, &used, ";;", false);
+}
 
 /* The flush gate. `s_flush_pending` is armed on the LVGL task once a
  * framebuffer has been submitted and disarmed by whichever of the VSYNC ISR and
@@ -859,6 +911,33 @@ static lv_obj_t *setup_label(lv_obj_t *parent, const char *text, uint32_t color,
     return label;
 }
 
+static lv_obj_t *setup_qr(lv_obj_t *parent, const slate_display_setup_t *setup,
+                          int32_t size)
+{
+    char payload[SLATE_SETUP_QR_PAYLOAD_MAX] = {0};
+    if (!setup_qr_payload(setup, payload, sizeof(payload))) {
+        ESP_LOGE(TAG, "setup Wi-Fi QR payload does not fit");
+        return NULL;
+    }
+
+    lv_obj_t *qr = lv_qrcode_create(parent);
+    if (qr != NULL) {
+        lv_qrcode_set_size(qr, size);
+        /* QR contrast is a machine interface, not a theme surface. Several
+         * phone cameras reject inverted symbols even when their ratio is good. */
+        lv_qrcode_set_dark_color(qr, lv_color_hex(0x000000));
+        lv_qrcode_set_light_color(qr, lv_color_hex(0xFFFFFF));
+        lv_qrcode_set_quiet_zone(qr, true);
+        if (lv_qrcode_update(qr, payload, strlen(payload)) != LV_RESULT_OK) {
+            lv_obj_delete(qr);
+            qr = NULL;
+            ESP_LOGE(TAG, "encoding setup Wi-Fi QR");
+        }
+    }
+    explicit_bzero(payload, sizeof(payload));
+    return qr;
+}
+
 static void setup_overlay_deleted(lv_event_t *event)
 {
     if (lv_event_get_target(event) == s_setup_overlay) {
@@ -888,7 +967,7 @@ static void show_setup_overlay(void *ctx)
 
     lv_obj_t *screen = lv_screen_active();
     const int32_t width = setup->banner ? SLATE_LCD_H_RES - 2 * theme->pad : SLATE_LCD_H_RES;
-    const int32_t height = setup->banner ? 132 : SLATE_LCD_V_RES;
+    const int32_t height = setup->banner ? 164 : SLATE_LCD_V_RES;
     const int32_t x = setup->banner ? theme->pad : 0;
     const int32_t y = setup->banner ? theme->pad : 0;
 
@@ -917,7 +996,7 @@ static void show_setup_overlay(void *ctx)
     if (!setup->banner) {
         card = lv_obj_create(overlay);
         lv_obj_remove_style_all(card);
-        lv_obj_set_size(card, 650, 330);
+        lv_obj_set_size(card, 748, 404);
         lv_obj_center(card);
         lv_obj_set_style_bg_color(card, lv_color_hex(theme->surface), LV_PART_MAIN);
         lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
@@ -928,36 +1007,125 @@ static void show_setup_overlay(void *ctx)
         lv_obj_remove_flag(card, LV_OBJ_FLAG_CLICKABLE);
     }
 
-    const int32_t text_width = setup->banner ? width - 40 : 590;
-    lv_obj_t *title = setup_label(card, setup->banner ? "NETWORK OFFLINE" : "SET UP NETWORK",
-                                  theme->warn, theme->body, text_width);
-    lv_obj_align(title, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30, setup->banner ? 16 : 28);
-
-    char connection[96];
-    snprintf(connection, sizeof(connection), "Join %s  |  Open http://%s", setup->network,
-             setup->address);
-    lv_obj_t *join = setup_label(card, connection, theme->text_hi, theme->body, text_width);
-    lv_obj_align(join, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30, setup->banner ? 43 : 76);
-
-    if (setup->passphrase[0] != '\0') {
-        char password[96];
-        snprintf(password, sizeof(password), "WiFi password: %s", setup->passphrase);
-        lv_obj_t *pass = setup_label(card, password, theme->text_hi, theme->body, text_width);
-        lv_obj_align(pass, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30,
-                     setup->banner ? 68 : 116);
-        explicit_bzero(password, sizeof(password));
+    const int32_t qr_size = setup->banner ? 116 : 248;
+    lv_obj_t *qr = setup_qr(card, setup, qr_size);
+    if (qr != NULL) {
+        lv_obj_align(qr, setup->banner ? LV_ALIGN_RIGHT_MID : LV_ALIGN_LEFT_MID,
+                     setup->banner ? -18 : 24, 0);
     }
 
-    const int32_t message_y = setup->banner ? (setup->passphrase[0] ? 93 : 72)
-                                             : (setup->passphrase[0] ? 170 : 140);
-    lv_obj_t *message = setup_label(card, setup->message, theme->text_lo, theme->caption,
-                                    text_width);
-    lv_obj_align(message, LV_ALIGN_TOP_LEFT, setup->banner ? 20 : 30, message_y);
+    if (setup->banner) {
+        const int32_t text_width = qr != NULL ? width - qr_size - 64 : width - 40;
+        lv_obj_t *title = setup_label(card, "NETWORK OFFLINE", theme->warn, theme->body,
+                                      text_width);
+        lv_obj_align(title, LV_ALIGN_TOP_LEFT, 20, 14);
+
+        char connection[96];
+        snprintf(connection, sizeof(connection), "Scan to join %s", setup->network);
+        lv_obj_t *join = setup_label(card, connection, theme->text_hi, theme->body, text_width);
+        lv_obj_align(join, LV_ALIGN_TOP_LEFT, 20, 43);
+
+        char security[96];
+        if (setup->passphrase[0] == '\0') {
+            strlcpy(security, "No Wi-Fi password", sizeof(security));
+        } else {
+            snprintf(security, sizeof(security), "Password: %s", setup->passphrase);
+        }
+        lv_obj_t *password = setup_label(card, security, theme->text_hi, theme->caption,
+                                         text_width);
+        lv_obj_align(password, LV_ALIGN_TOP_LEFT, 20, 72);
+
+        char fallback[64];
+        snprintf(fallback, sizeof(fallback), "Or open http://%s", setup->address);
+        lv_obj_t *address = setup_label(card, fallback, theme->text_hi, theme->caption,
+                                        text_width);
+        lv_obj_align(address, LV_ALIGN_TOP_LEFT, 20, 96);
+
+        lv_obj_t *message = setup_label(card, setup->message, theme->text_lo, theme->caption,
+                                        text_width);
+        lv_obj_align(message, LV_ALIGN_TOP_LEFT, 20, 120);
+        explicit_bzero(connection, sizeof(connection));
+        explicit_bzero(security, sizeof(security));
+        explicit_bzero(fallback, sizeof(fallback));
+    } else {
+        const int32_t text_x = qr != NULL ? 306 : 34;
+        const int32_t text_width = qr != NULL ? 408 : 680;
+        lv_obj_t *title = setup_label(card, "CONNECT THIS PANEL", theme->warn, theme->body,
+                                      text_width);
+        lv_obj_align(title, LV_ALIGN_TOP_LEFT, text_x, 26);
+
+        char join[96];
+        snprintf(join, sizeof(join), "1   Scan to join %s", setup->network);
+        lv_obj_t *join_label = setup_label(card, join, theme->text_hi, theme->body, text_width);
+        lv_label_set_long_mode(join_label, LV_LABEL_LONG_DOT);
+        lv_obj_align(join_label, LV_ALIGN_TOP_LEFT, text_x, 74);
+
+        char security[96];
+        if (setup->passphrase[0] == '\0') {
+            strlcpy(security, "No Wi-Fi password is required.", sizeof(security));
+        } else {
+            snprintf(security, sizeof(security), "Password   %s", setup->passphrase);
+        }
+        lv_obj_t *security_label = setup_label(card, security, theme->text_lo, theme->caption,
+                                                text_width);
+        lv_obj_align(security_label, LV_ALIGN_TOP_LEFT, text_x, 108);
+
+        char open[64];
+        snprintf(open, sizeof(open), "2   Open http://%s", setup->address);
+        lv_obj_t *open_label = setup_label(card, open, theme->text_hi, theme->body, text_width);
+        lv_obj_align(open_label, LV_ALIGN_TOP_LEFT, text_x, 154);
+
+        lv_obj_t *fallback = setup_label(
+            card, "If your phone closes its setup window, type that address in a browser.",
+            theme->text_lo, theme->caption, text_width);
+        lv_obj_align(fallback, LV_ALIGN_TOP_LEFT, text_x, 188);
+
+        lv_obj_t *message = setup_label(card, setup->message, theme->warn, theme->caption,
+                                        text_width);
+        lv_obj_align(message, LV_ALIGN_TOP_LEFT, text_x, 248);
+
+        lv_obj_t *recovery = setup_label(
+            card, "Recovery: hold anywhere on the screen for 10 seconds to erase all settings.",
+            theme->text_lo, theme->caption, text_width);
+        lv_obj_align(recovery, LV_ALIGN_TOP_LEFT, text_x, 318);
+        explicit_bzero(join, sizeof(join));
+        explicit_bzero(security, sizeof(security));
+        explicit_bzero(open, sizeof(open));
+    }
 
     lv_obj_move_foreground(overlay);
-    explicit_bzero(connection, sizeof(connection));
     explicit_bzero(setup, sizeof(*setup));
     free(setup);
+}
+
+static void show_factory_reset(void *ctx)
+{
+    (void) ctx;
+    const slate_theme_t *theme = slate_theme_default();
+    hide_setup_overlay(NULL);
+    identify_cleanup();
+
+    lv_obj_t *overlay = lv_obj_create(lv_screen_active());
+    lv_obj_remove_style_all(overlay);
+    lv_obj_set_size(overlay, SLATE_LCD_H_RES, SLATE_LCD_V_RES);
+    lv_obj_set_style_bg_color(overlay, lv_color_hex(theme->bg), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(overlay, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_add_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
+    atomic_store_explicit(&s_setup_presentation_active, true, memory_order_release);
+
+    lv_obj_t *title = setup_label(overlay, "FACTORY RESET", theme->warn, theme->hero, 700);
+    lv_obj_align(title, LV_ALIGN_CENTER, 0, -58);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+
+    lv_obj_t *body = setup_label(
+        overlay, "Erasing the dashboard, credentials and device token.\n"
+                 "The panel will restart in network setup mode.",
+        theme->text_hi, theme->body, 700);
+    lv_obj_align(body, LV_ALIGN_CENTER, 0, 44);
+    lv_obj_set_style_text_align(body, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_move_foreground(overlay);
+    backlight_on();
 }
 
 /* --- §4.1 panel identification ---------------------------------------- */
@@ -1208,6 +1376,11 @@ esp_err_t slate_display_setup_hide(void)
 esp_err_t slate_display_identify(void)
 {
     return slate_display_post(identify_start, NULL, 100);
+}
+
+esp_err_t slate_display_factory_reset_show(void)
+{
+    return slate_display_post(show_factory_reset, NULL, 100);
 }
 
 bool slate_display_ready(void)

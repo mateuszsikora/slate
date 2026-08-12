@@ -324,9 +324,9 @@ static void network_event(void *arg, esp_event_base_t base, int32_t id, void *da
  *
  * The station credentials no longer arrive this way — `POST /wifi` is what does
  * that from #55 onwards, which is the whole point of the milestone. This one
- * knob remains because §9.2 puts the value in NVS and nothing in M1's scope
- * writes it: the setup page grows that field in #35, and until it does a knob is
- * the difference between a path that is exercised and a path that is asserted.
+ * knob remains as a development/provisioning override. #35 adds the ordinary
+ * writer to the setup page; a build-time value is still useful for exercising
+ * a secured access point from its very first boot.
  *
  * Written only when it differs from what is stored, so a boot without the knob
  * does not undo it. Pass an empty string to go back to an open access point.

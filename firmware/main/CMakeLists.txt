@@ -56,9 +56,9 @@ idf_component_register(
 #                              from there. Erasing the partition re-arms it.
 #
 #   -DSLATE_SETUP_AP_PASSWORD='"..."'  §9.2's optional WPA2 passphrase for the
-#                                      setup access point, which lives in NVS and
-#                                      has no writer until #35 puts the field on
-#                                      the page. Quoted twice on purpose — the
+#                                      setup access point, as a first-boot
+#                                      provisioning override for #35's page.
+#                                      Quoted twice on purpose — the
 #                                      shell eats one layer and the compiler needs
 #                                      a string literal. Never given a default
 #                                      here: §12 keeps passphrases out of the

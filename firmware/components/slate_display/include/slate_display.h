@@ -105,6 +105,15 @@ esp_err_t slate_display_setup_hide(void);
  */
 esp_err_t slate_display_identify(void);
 
+/**
+ * @brief Replace the active presentation with factory-reset progress.
+ *
+ * Used by both authenticated browser reset and the ten-second panel gesture.
+ * The call is asynchronous and keeps the backlight on; the reset path reboots
+ * even if the display queue is unavailable.
+ */
+esp_err_t slate_display_factory_reset_show(void);
+
 /** @brief Whether panel and LVGL initialisation completed successfully. */
 bool slate_display_ready(void);
 

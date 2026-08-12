@@ -27,7 +27,9 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#101114">
+<meta name="apple-mobile-web-app-capable" content="yes">
 <title>Slate setup</title>
 <style>
 :root {
@@ -37,7 +39,10 @@
 }
 * { box-sizing: border-box; }
 body {
-  margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--text-hi);
+  margin: 0;
+  padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+    max(48px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  background: var(--bg); color: var(--text-hi);
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   -webkit-text-size-adjust: 100%;
 }
@@ -75,6 +80,8 @@ input, select {
   font: inherit;
 }
 input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.check { display: flex; align-items: flex-start; gap: 10px; margin: 14px 0 0; }
+.check input { width: 20px; min-height: 20px; padding: 0; flex: 0 0 20px; }
 details { margin-top: 20px; border-top: 1px solid var(--surface-alt); padding-top: 12px; }
 summary { color: var(--text-lo); font-size: .9rem; cursor: pointer; min-height: 32px; }
 button.action {
@@ -86,8 +93,21 @@ button.link {
   background: none; border: 0; color: var(--accent); font: inherit; cursor: pointer;
   padding: 10px 0; min-height: 44px;
 }
-.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  flex-wrap: wrap;
+}
 .hint { color: var(--text-lo); font-size: .85rem; }
+.steps {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;
+  margin: 0 0 20px; color: var(--text-lo); font-size: .85rem;
+}
+.step {
+  min-width: 0; padding: 9px 10px; border-radius: 10px; background: var(--surface);
+  overflow-wrap: anywhere;
+}
+.step b { display: block; color: var(--text-hi); font-size: .75rem; text-transform: uppercase; }
+.loading { min-height: 76px; display: grid; place-items: center; color: var(--text-lo); }
 .done { border-left-color: var(--accent); }
 .done b { color: var(--accent); }
 [hidden] { display: none !important; }
@@ -96,15 +116,22 @@ button.link {
 <body>
 <main>
   <h1 id="name">Slate</h1>
-  <p class="sub">Choose the network this panel should join.</p>
+  <p class="sub">Connect this panel to your home network.</p>
+
+  <div class="steps" aria-label="Setup steps">
+    <div class="step"><b>1 · Join</b>Connect to the panel</div>
+    <div class="step"><b>2 · Choose</b>Pick your Wi-Fi</div>
+    <div class="step"><b>3 · Finish</b>Look at the panel</div>
+  </div>
 
   <div id="last" class="note" hidden></div>
 
   <section id="pick">
     <h2>Networks</h2>
     <div class="card">
+      <p id="loading" class="loading" role="status">Looking for nearby networks…</p>
       <ul id="list"></ul>
-      <p id="empty" class="hint" hidden></p>
+      <p id="empty" class="hint" role="status" hidden></p>
       <div class="row">
         <button class="link" id="manual" type="button">Enter a name manually</button>
         <button class="link" id="rescan" type="button">Scan again</button>
@@ -147,7 +174,23 @@ button.link {
           </div>
         </details>
 
-        <p class="hint" id="formError" style="color:var(--warn)" hidden></p>
+        <details>
+          <summary>Recovery network security</summary>
+          <p class="hint">
+            Slate's setup network is open by default. For a shared building, set a password
+            for future setup sessions; the panel will show it beside the QR code.
+          </p>
+          <label for="setupPassword">New setup password</label>
+          <input id="setupPassword" type="password" minlength="8" maxlength="63"
+                 autocapitalize="none" autocomplete="new-password" spellcheck="false">
+          <p class="hint">Use 8–63 characters, or leave this blank to keep the current setting.</p>
+          <label class="check" for="openSetup">
+            <input id="openSetup" type="checkbox">
+            <span>Make the setup network open next time</span>
+          </label>
+        </details>
+
+        <p class="hint" id="formError" style="color:var(--warn)" role="alert" hidden></p>
         <p style="margin:20px 0 0"><button class="action" id="submit" type="submit">Join network</button></p>
       </div>
     </form>
@@ -220,6 +263,8 @@ var REFUSALS = {
   password_required: "Enter the password for that network.",
   ssid_too_long: "That name is longer than a network name can be.",
   password_too_long: "That password is longer than WPA2 allows.",
+  setup_password_too_short: "A setup network password needs at least 8 characters.",
+  setup_password_too_long: "That setup network password is longer than WPA2 allows.",
   bad_ipv4: "The addressing in that request is not valid.",
   bad_ipv4_mode: "The addressing in that request is not valid.",
   bad_address: "That address is not a host address on its own subnet.",
@@ -327,6 +372,7 @@ function addressing() {
 }
 
 function renderNetworks(data) {
+  el("loading").hidden = true;
   var list = el("list");
   list.innerHTML = "";
   (data.networks || []).forEach(function (net) {
@@ -389,6 +435,7 @@ function rescan() {
   var button = el("rescan");
   button.disabled = true;
   text(button, "Scanning, a few seconds…");
+  text(el("age"), "The panel may pause this page while its radio scans.");
   get("/wifi/scan?rescan=1").then(renderNetworks).catch(function () {
     text(el("empty"), "The panel did not answer the scan. Enter a name manually.");
     el("empty").hidden = false;
@@ -411,6 +458,11 @@ function submit(event) {
     body.password = el("password").value;
   } else if (ssid !== configuredSsid) {
     return fail("password_required");
+  }
+  if (el("openSetup").checked) {
+    body.setup_password = "";
+  } else if (el("setupPassword").value) {
+    body.setup_password = el("setupPassword").value;
   }
 
   el("submit").disabled = true;
@@ -448,6 +500,10 @@ el("manual").onclick = manual;
 el("rescan").onclick = rescan;
 el("form").onsubmit = submit;
 el("mode").onchange = function () { addressingTouched = true; modeChanged(); };
+el("openSetup").onchange = function () {
+  el("setupPassword").disabled = el("openSetup").checked;
+  if (el("openSetup").checked) { el("setupPassword").value = ""; }
+};
 el("ssid").oninput = function () { chooseAddressingFor(el("ssid").value.trim()); };
 el("again").onclick = function () {
   el("sent").hidden = true;
@@ -468,6 +524,7 @@ get("/info").then(function (info) {
 }).catch(function () {});
 
 get("/wifi/scan").then(renderNetworks).catch(function () {
+  el("loading").hidden = true;
   text(el("empty"), "The panel did not answer the scan. Enter a name manually.");
   el("empty").hidden = false;
 });
