@@ -188,6 +188,21 @@ export class DeviceClient {
     return this.request<void>('PUT', '/config?transient=1', { body: document })
   }
 
+  /** Device-wide mode control for scripts and clients that do not own a WebSocket. */
+  setMode(mode: 'normal' | 'edit'): Promise<void> {
+    return this.request<void>('POST', '/mode', { body: JSON.stringify({ mode }) })
+  }
+
+  /** Flash the panel so several devices can be told apart. */
+  identify(): Promise<void> {
+    return this.request<void>('POST', '/identify')
+  }
+
+  /** Wipe NVS and LittleFS. A successful response is followed by a reboot. */
+  factoryReset(): Promise<void> {
+    return this.request<void>('POST', '/factory_reset')
+  }
+
   resources(provider: string): Promise<Resource[]> {
     return this.request<{ resources: Resource[] }>(
       'GET',

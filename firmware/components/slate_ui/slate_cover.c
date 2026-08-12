@@ -94,6 +94,9 @@ static void set_motion_animation(slate_cover_view_t *view, bool moving)
 
 static void dispatch_action(slate_cover_view_t *view, slate_action_t action)
 {
+    if (!slate_component_actions_enabled()) {
+        return;
+    }
     const slate_action_request_t request = {
         .provider = view->provider,
         .resource = view->resource,

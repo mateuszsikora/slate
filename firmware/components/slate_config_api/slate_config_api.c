@@ -246,6 +246,7 @@ static void restore_on_mode_task(void *ctx)
 static void mode_changed(void *ctx, slate_ws_mode_t mode)
 {
     (void) ctx;
+    slate_ui_mode_set(mode == SLATE_WS_MODE_EDIT);
     if (mode == SLATE_WS_MODE_NORMAL && s_mode_task != NULL) {
         xTaskNotifyGive(s_mode_task);
     }
@@ -360,6 +361,7 @@ esp_err_t slate_config_api_init(void)
         s_lock = NULL;
         return observer_err;
     }
+    slate_ui_mode_set(slate_ws_mode() == SLATE_WS_MODE_EDIT);
 
     const httpd_uri_t get_config = {
         .uri = SLATE_API_BASE_PATH "/config",

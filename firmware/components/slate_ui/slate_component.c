@@ -3,6 +3,19 @@
 #include "slate_component.h"
 
 #include <stdio.h>
+#include <stdatomic.h>
+
+static atomic_bool s_actions_enabled = ATOMIC_VAR_INIT(true);
+
+void slate_component_actions_set_enabled(bool enabled)
+{
+    atomic_store_explicit(&s_actions_enabled, enabled, memory_order_release);
+}
+
+bool slate_component_actions_enabled(void)
+{
+    return atomic_load_explicit(&s_actions_enabled, memory_order_acquire);
+}
 
 bool slate_component_is_placeholder(slate_presentation_t presentation)
 {

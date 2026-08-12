@@ -8,7 +8,7 @@ idf_component_register(
          "slate_scene.c" "slate_sensor.c"
     INCLUDE_DIRS "include"
     REQUIRES slate_action slate_brightness slate_config slate_display slate_state slate_store
-             slate_theme slate_time lvgl__lvgl
+             slate_theme slate_time slate_wifi lvgl__lvgl
 )
 
 if(DEFINED SLATE_UI_LEAK_BYTES AND NOT DEFINED SLATE_UI_SELFTEST)

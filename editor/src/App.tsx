@@ -342,6 +342,38 @@ export function App() {
     }
   }, [mode])
 
+  const identifyPanel = useCallback(async () => {
+    if (token === null) {
+      throw new Error('not paired')
+    }
+    await client(token).identify()
+  }, [client, token])
+
+  const factoryReset = useCallback(async () => {
+    if (token === null) {
+      throw new Error('not paired')
+    }
+    await client(token).factoryReset()
+
+    previewSequence.current += 1
+    socketRef.current?.stop()
+    socketRef.current = null
+    forgetToken()
+    setToken(null)
+    setInfo(null)
+    setStatus(null)
+    setHeartbeat(null)
+    setDraft(null)
+    setPersistedConfig(null)
+    setDirty(false)
+    dirtyRef.current = false
+    setMode('normal')
+    modeRef.current = 'normal'
+    setLogs([])
+    setPairingError('Factory reset complete. Wait for the panel to restart, then scan its new pairing QR.')
+    setPhase('pairing')
+  }, [client, token])
+
   const changeDraft = useCallback((next: Config) => {
     setDraft(next)
     setDirty(true)
@@ -577,7 +609,13 @@ export function App() {
           onPublishConfig={publishImportedConfig}
         />
         <aside className="sidebar">
-          <DevicePanel info={info} status={status} heartbeat={heartbeat} />
+          <DevicePanel
+            info={info}
+            status={status}
+            heartbeat={heartbeat}
+            onIdentify={identifyPanel}
+            onFactoryReset={factoryReset}
+          />
           <LogPanel lines={logs} connection={connection} />
         </aside>
       </div>

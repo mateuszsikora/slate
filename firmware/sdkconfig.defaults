@@ -139,6 +139,11 @@ CONFIG_LV_DEF_REFR_PERIOD=10
 # widgets exist.
 CONFIG_LV_FONT_MONTSERRAT_14=y
 
+# §4.3's pairing code is rendered by LVGL on the panel, so it uses the
+# library's canvas-backed QR widget instead of introducing a second image
+# renderer or storing a generated bitmap in flash.
+CONFIG_LV_USE_QRCODE=y
+
 # The firmware consumes LVGL as a runtime, not as an example gallery. These do
 # not survive the linker when unused, but disabling them keeps clean builds from
 # compiling hundreds of irrelevant translation units.

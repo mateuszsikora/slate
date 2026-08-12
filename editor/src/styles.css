@@ -1030,6 +1030,21 @@ summary:focus-visible,
   font-size: 0.84rem;
 }
 
+.device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.device-actions .button {
+  flex: 1 1 130px;
+  padding: 8px 10px;
+  font-size: 0.8rem;
+}
+
 /* --- Log ----------------------------------------------------------------- */
 
 .log {

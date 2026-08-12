@@ -9,6 +9,12 @@
 
 #define SLATE_COMPONENT_PLACEHOLDER_MAX 128
 
+/** @brief Globally suppress semantic touch actions while §6.5 edit mode is active. */
+void slate_component_actions_set_enabled(bool enabled);
+
+/** @brief Whether a component event may reach the provider-neutral action bus. */
+bool slate_component_actions_enabled(void);
+
 /** Whether the resource replaces normal component content with an identity. */
 bool slate_component_is_placeholder(slate_presentation_t presentation);
 

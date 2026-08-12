@@ -61,6 +61,23 @@ esp_err_t slate_ui_restore_stored(slate_ui_config_info_t *out);
 /** @brief Whether the runtime has successfully attached to the display task. */
 bool slate_ui_ready(void);
 
+/**
+ * @brief Apply §6.5's edit-mode presentation and touch policy.
+ *
+ * Safe from any task. The system bar redraw is queued onto the LVGL owner and
+ * semantic component actions are suppressed immediately.
+ */
+void slate_ui_mode_set(bool edit);
+
+/**
+ * @brief Refresh an error/pairing presentation after the station gets an IP.
+ *
+ * Dashboards do not rebuild for a lease renewal. An unconfigured or invalid
+ * dashboard does, because §4.3's QR and plain-text recovery address have just
+ * become available.
+ */
+void slate_ui_network_connected(void);
+
 #ifdef SLATE_UI_SELFTEST
 /** @brief Run issue #20's deterministic runtime verifier on the LVGL task. */
 esp_err_t slate_ui_selftest(void);

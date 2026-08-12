@@ -96,6 +96,15 @@ esp_err_t slate_display_setup_show(const slate_display_setup_t *setup);
  */
 esp_err_t slate_display_setup_hide(void);
 
+/**
+ * @brief Flash a short accent overlay without replacing the active screen.
+ *
+ * The asynchronous primitive behind authenticated `POST /identify`. Repeated
+ * calls restart the sequence, so identifying one panel cannot leave a timer or
+ * overlay behind.
+ */
+esp_err_t slate_display_identify(void);
+
 /** @brief Whether panel and LVGL initialisation completed successfully. */
 bool slate_display_ready(void);
 
