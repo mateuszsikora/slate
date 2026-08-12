@@ -16,10 +16,13 @@
 #include "cJSON.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "slate_action.h"
 #include "slate_api.h"
 #include "slate_state.h"
+#include "slate_wifi.h"
 #include "slate_ws.h"
 
 #ifdef SLATE_DIRECT_SELFTEST
@@ -41,6 +44,20 @@ static const char *TAG = "direct";
  * be allocated would make the endpoint fail in a new way under memory pressure.
  */
 #define BODY_MAX 768
+
+/*
+ * The API starts before the radio (§9), so the provider initially has no Wi-Fi
+ * lifecycle to observe and retains §5.4's ordinary publish-only status. Once
+ * slate_direct_start() runs, this becomes the station's actual state and every
+ * later consumer attach/detach is constrained by it: a WebSocket callback
+ * racing the station-down event cannot accidentally make stale values fresh.
+ */
+static bool s_network_up = true;
+static bool s_consumer_attached;
+static SemaphoreHandle_t s_status_lock;
+static StaticSemaphore_t s_status_lock_storage;
+static bool s_initialized;
+static bool s_started;
 
 #ifdef SLATE_DIRECT_SELFTEST
 static void selftest_consumer_attached(void);
@@ -390,20 +407,64 @@ static esp_err_t state_handler(httpd_req_t *req)
  * wrong with it: "a read-only direct sensor remains fresh even when no action
  * consumer is attached."
  */
+/* Caller holds s_status_lock. */
+static void update_provider_status_locked(void)
+{
+    slate_state_provider_set_status(
+        SLATE_DIRECT_PROVIDER_ID,
+        !s_network_up ? SLATE_PROVIDER_OFFLINE
+                      : s_consumer_attached ? SLATE_PROVIDER_ONLINE
+                                            : SLATE_PROVIDER_DEGRADED);
+}
+
 static void consumer_changed(void *ctx, bool attached)
 {
     (void) ctx;
-    slate_state_provider_set_status(SLATE_DIRECT_PROVIDER_ID, attached
-                                                                  ? SLATE_PROVIDER_ONLINE
-                                                                  : SLATE_PROVIDER_DEGRADED);
+    xSemaphoreTake(s_status_lock, portMAX_DELAY);
+    s_consumer_attached = attached;
+    update_provider_status_locked();
     if (!attached) {
         slate_action_provider_unavailable(SLATE_DIRECT_PROVIDER_ID, "consumer_disconnected");
     }
+    xSemaphoreGive(s_status_lock);
 #ifdef SLATE_DIRECT_SELFTEST
     if (attached) {
         selftest_consumer_attached();
     }
 #endif
+}
+
+static void network_changed(bool connected)
+{
+    xSemaphoreTake(s_status_lock, portMAX_DELAY);
+    s_network_up = connected;
+    if (!connected) {
+        /* A consumer belongs to the station connection that carried its
+         * WebSocket. Do not let that stale attachment make a fast reconnect
+         * look online before the replacement session attaches. */
+        s_consumer_attached = false;
+    }
+    update_provider_status_locked();
+    if (!connected) {
+        /* The WebSocket close normally reaches consumer_changed() as well, but
+         * the station event is the first authoritative loss and pending state
+         * must revert even if the transport takes longer to notice it. */
+        slate_action_provider_unavailable(SLATE_DIRECT_PROVIDER_ID, "network_offline");
+    }
+    xSemaphoreGive(s_status_lock);
+}
+
+static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void) arg;
+    (void) base;
+    (void) data;
+
+    if (id == SLATE_WIFI_EVENT_CONNECTED) {
+        network_changed(true);
+    } else if (id == SLATE_WIFI_EVENT_DISCONNECTED) {
+        network_changed(false);
+    }
 }
 
 static void action_result(void *ctx, uint32_t id, bool success, const char *error)
@@ -445,6 +506,9 @@ esp_err_t slate_direct_dispatch(uint32_t id, const slate_direct_action_t *action
         (unsigned) action->value_type > SLATE_ACTION_VALUE_NUMBER) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (s_status_lock == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     /* Built with cJSON rather than printed, because the resource id is opaque
      * (§3.3) and a quote inside one would otherwise produce a frame that parses
@@ -472,7 +536,11 @@ esp_err_t slate_direct_dispatch(uint32_t id, const slate_direct_action_t *action
     /* The length is the transport's to judge, and only its to judge: a second
      * ceiling here would be a constant to keep in step with one in another
      * component, which is the kind of pair that drifts quietly. */
-    esp_err_t err = slate_ws_provider_send(SLATE_DIRECT_PROVIDER_ID, text, strlen(text));
+    xSemaphoreTake(s_status_lock, portMAX_DELAY);
+    esp_err_t err = s_network_up && s_consumer_attached
+                        ? slate_ws_provider_send(SLATE_DIRECT_PROVIDER_ID, text, strlen(text))
+                        : ESP_ERR_INVALID_STATE;
+    xSemaphoreGive(s_status_lock);
     cJSON_free(text);
 
     if (err != ESP_OK) {
@@ -489,6 +557,15 @@ esp_err_t slate_direct_dispatch(uint32_t id, const slate_direct_action_t *action
 
 esp_err_t slate_direct_init(void)
 {
+    if (s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_status_lock == NULL) {
+        s_status_lock = xSemaphoreCreateMutexStatic(&s_status_lock_storage);
+        if (s_status_lock == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
     /*
      * §5.1: the direct provider "is always present". Registering with the store
      * first, and separately from everything below, is what makes that true of a
@@ -508,6 +585,7 @@ esp_err_t slate_direct_init(void)
     if (err != ESP_OK) {
         return err;
     }
+    s_initialized = true;
     slate_state_provider_set_status(SLATE_DIRECT_PROVIDER_ID, SLATE_PROVIDER_DEGRADED);
 
     const slate_action_provider_t action_provider = {
@@ -546,6 +624,31 @@ esp_err_t slate_direct_init(void)
         return action_err;
     }
     return err != ESP_OK ? err : route_err;
+}
+
+esp_err_t slate_direct_start(void)
+{
+    if (!s_initialized || s_started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = esp_event_handler_instance_register(
+        SLATE_WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    /* Serialize the initial snapshot with the event callback. If the station
+     * changes after this read, its callback waits and applies the newer state;
+     * if it changed before the lock, the snapshot already contains it. */
+    xSemaphoreTake(s_status_lock, portMAX_DELAY);
+    slate_wifi_status_t wifi;
+    slate_wifi_status(&wifi);
+    s_network_up = wifi.connected;
+    update_provider_status_locked();
+    s_started = true;
+    xSemaphoreGive(s_status_lock);
+    return ESP_OK;
 }
 
 #ifdef SLATE_DIRECT_SELFTEST
@@ -646,6 +749,24 @@ esp_err_t slate_direct_selftest(void)
           "registered and degraded with no consumer");
 
     CHECK(selftest_bind_fixture() == ESP_OK, "fixture bound in place of a configuration");
+
+    slate_resource_t lamp_state;
+    consumer_changed(NULL, true);
+    CHECK(slate_state_provider_status(SLATE_DIRECT_PROVIDER_ID) == SLATE_PROVIDER_ONLINE,
+          "consumer attachment makes provider online");
+    wifi_event(NULL, SLATE_WIFI_EVENT, SLATE_WIFI_EVENT_DISCONNECTED, NULL);
+    CHECK(slate_state_provider_status(SLATE_DIRECT_PROVIDER_ID) == SLATE_PROVIDER_OFFLINE,
+          "station loss makes the provider offline");
+    CHECK(slate_state_get(SLATE_DIRECT_PROVIDER_ID, "living-room", &lamp_state) == ESP_OK &&
+              lamp_state.presentation == SLATE_PRESENT_STALE,
+          "station loss makes direct state stale");
+
+    wifi_event(NULL, SLATE_WIFI_EVENT, SLATE_WIFI_EVENT_CONNECTED, NULL);
+    CHECK(slate_state_provider_status(SLATE_DIRECT_PROVIDER_ID) == SLATE_PROVIDER_DEGRADED,
+          "station recovery rejects the stale consumer");
+    CHECK(slate_state_get(SLATE_DIRECT_PROVIDER_ID, "living-room", &lamp_state) == ESP_OK &&
+              lamp_state.presentation == SLATE_PRESENT_OK,
+          "station recovery makes direct state fresh");
 
     /* §5.4's immediate failure, which is a return value and not a callback: a
      * caller must never have to decide whether an answer is still coming. */

@@ -21,9 +21,11 @@
  *                 §5.4 names are decided for every provider rather than for
  *                 this route.
  *   status        §5.4's `degraded` with no attached consumer, `online` with
- *                 one. §5.2 makes that distinction load-bearing: `degraded`
- *                 does not stale anything, so a publish-only script keeps a
- *                 fresh dashboard with no WebSocket client at all.
+ *                 one, and `offline` while the station is down. §5.2 makes
+ *                 those distinctions load-bearing: `degraded` does not stale
+ *                 anything, so a publish-only script keeps a fresh dashboard
+ *                 with no WebSocket client at all; `offline` does, so a Wi-Fi
+ *                 outage cannot leave a direct tile looking current.
  *   dispatch      the `action` frame, and the `action_result` that answers it.
  *
  *   NOT the bus   §5.3's optimistic update, its pending marker and its 3 s
@@ -75,6 +77,17 @@ typedef struct {
  * handler slots.
  */
 esp_err_t slate_direct_init(void);
+
+/**
+ * @brief Attach the provider to the Wi-Fi lifecycle.
+ *
+ * Call after slate_wifi_init(), once the default event loop and station exist.
+ * A station loss marks direct resources stale and fails pending actions; a
+ * recovery restores `online` when an action consumer is still attached, or
+ * `degraded` when the provider is publish-only. Neither transition rebuilds
+ * the UI tree.
+ */
+esp_err_t slate_direct_start(void);
 
 /**
  * @brief Send one action to the attached consumer (§5.4).
