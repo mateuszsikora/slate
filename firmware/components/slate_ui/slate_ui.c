@@ -1955,12 +1955,21 @@ static esp_err_t selftest_on_task(void)
                  midnight->icons == minimal_light->icons &&
                  midnight->icons_large == minimal_light->icons_large,
              "theme switch preserves geometry and typography");
-    UI_CHECK(midnight != NULL && minimal_light != NULL &&
-                 minimal_light->bg != midnight->bg &&
-                 minimal_light->surface != midnight->surface &&
-                 minimal_light->text_hi != midnight->text_hi &&
-                 minimal_light->on_accent != minimal_light->text_hi,
-             "Minimal Light supplies a complete colour palette");
+    UI_CHECK(midnight != NULL && midnight->bg == 0x101114 &&
+                 midnight->surface == 0x1A1C21 &&
+                 midnight->surface_alt == 0x22252B &&
+                 midnight->text_hi == 0xF2F5F9 && midnight->text_lo == 0x8A94A6 &&
+                 midnight->accent == 0x6C8CFF && midnight->on_accent == 0x101114 &&
+                 midnight->warn == 0xF5A524 && minimal_light != NULL &&
+                 minimal_light->bg == 0xF4F6F8 &&
+                 minimal_light->surface == 0xFFFFFF &&
+                 minimal_light->surface_alt == 0xE5EAF0 &&
+                 minimal_light->text_hi == 0x172033 &&
+                 minimal_light->text_lo == 0x526176 &&
+                 minimal_light->accent == 0x315FC6 &&
+                 minimal_light->on_accent == 0xFFFFFF &&
+                 minimal_light->warn == 0xA13C00,
+             "both themes supply exact complete colour palettes");
 
     memset(&s_fixture, 0, sizeof(s_fixture));
     const slate_state_provider_t registration = {
@@ -2140,12 +2149,12 @@ static esp_err_t selftest_on_task(void)
     slate_config_t *sensors = sensor_test_config();
     UI_CHECK(sensors != NULL && rebuild_on_task(sensors) == ESP_OK,
              "sensor component test dashboard activated");
-    binding_view_t *light_theme_view = find_view("direct", "temperature");
+    binding_view_t *temperature_view = find_view("direct", "temperature");
     UI_CHECK(s_tree != NULL && s_tree->theme == minimal_light &&
                  lv_color_eq(lv_obj_get_style_bg_color(s_tree->screen, LV_PART_MAIN),
                              lv_color_hex(minimal_light->bg)) &&
-                 light_theme_view != NULL &&
-                 lv_color_eq(lv_obj_get_style_bg_color(light_theme_view->tile, LV_PART_MAIN),
+                 temperature_view != NULL &&
+                 lv_color_eq(lv_obj_get_style_bg_color(temperature_view->tile, LV_PART_MAIN),
                              lv_color_hex(minimal_light->surface)) &&
                  verify_layout(sensors),
              "Minimal Light changes palette without moving the grid");
@@ -2875,11 +2884,18 @@ static esp_err_t selftest_on_task(void)
                         scene_view != NULL &&
                         lv_color_eq(lv_obj_get_style_bg_color(scene_view->scene.button,
                                                               LV_PART_MAIN),
-                                    lv_color_hex(s_tree->theme->accent));
+                                    lv_color_hex(s_tree->theme->accent)) &&
+                        lv_color_eq(lv_obj_get_style_text_color(scene_view->scene.icon,
+                                                                LV_PART_MAIN),
+                                    lv_color_hex(s_tree->theme->on_accent)) &&
+                        lv_color_eq(lv_obj_get_style_text_color(scene_view->scene.name,
+                                                                LV_PART_MAIN),
+                                    lv_color_hex(s_tree->theme->on_accent));
     }
     UI_CHECK(bar_layout_ok, "4x1 bar gives every scene an independent touch target");
     UI_CHECK(all_activated, "every scene button emits its own activate action");
-    UI_CHECK(all_confirmed, "accepted scene actions flash only their own button");
+    UI_CHECK(all_confirmed,
+             "accepted scenes flash only their button with a legible foreground");
 
     binding_view_t *compact_scene = find_view("ui-fixture", "scene-goodnight");
     binding_view_t *missing_scene = find_view("ui-fixture", "scene-missing");

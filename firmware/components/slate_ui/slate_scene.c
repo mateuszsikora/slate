@@ -190,4 +190,7 @@ void slate_scene_update(slate_scene_view_t *view, const slate_resource_t *resour
     lv_obj_set_style_text_color(view->icon,
                                 lv_color_hex(success ? theme->on_accent : theme->accent),
                                 LV_PART_MAIN);
+    lv_obj_set_style_text_color(view->name,
+                                lv_color_hex(success ? theme->on_accent : theme->text_hi),
+                                LV_PART_MAIN);
 }
