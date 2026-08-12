@@ -7,7 +7,7 @@
  * browser, or a phone that scanned the code and could not open the link.
  */
 
-import { useState } from 'react'
+import { useState, type FormEvent } from 'react'
 
 import type { DeviceInfo } from '../lib/api'
 import { parseToken } from '../lib/token'
@@ -15,7 +15,10 @@ import { parseToken } from '../lib/token'
 interface Props {
   info: DeviceInfo | null
   error: string | null
-  onSubmit: (token: string) => Promise<boolean>
+  /* Resolves when the panel has answered, whatever it answered: this view only
+   * needs to know when to stop saying "Checking", and the outcome arrives back
+   * as `error` or as a different view entirely. */
+  onSubmit: (token: string) => Promise<unknown>
 }
 
 export function Pairing({ info, error, onSubmit }: Props) {
@@ -23,7 +26,11 @@ export function Pairing({ info, error, onSubmit }: Props) {
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
 
-  const submit = (event: React.FormEvent) => {
+  /* Whichever came last: a token this view could not parse, or one the panel
+   * refused. */
+  const failure = localError ?? error
+
+  const submit = (event: FormEvent) => {
     event.preventDefault()
     const token = parseToken(value)
     if (token === null) {
@@ -76,7 +83,7 @@ export function Pairing({ info, error, onSubmit }: Props) {
           </button>
         </form>
 
-        {localError ?? error ? <p className="error">{localError ?? error}</p> : null}
+        {failure === null ? null : <p className="error">{failure}</p>}
       </div>
     </main>
   )

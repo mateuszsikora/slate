@@ -101,11 +101,6 @@ export class ApiError extends Error {
   get isUnauthorized(): boolean {
     return this.status === 401
   }
-
-  /** Whether the device was not reached at all — see §9.4's outage handling. */
-  get isOffline(): boolean {
-    return this.status === 0
-  }
 }
 
 export interface ClientOptions {
@@ -124,8 +119,8 @@ export interface ClientOptions {
 const DEFAULT_TIMEOUT_MS = 5000
 
 export class DeviceClient {
-  readonly origin: string
-  private token: string | null
+  private readonly origin: string
+  private readonly token: string | null
   private readonly timeoutMs: number
 
   constructor(options: ClientOptions = {}) {
@@ -134,12 +129,7 @@ export class DeviceClient {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
   }
 
-  withToken(token: string | null): DeviceClient {
-    this.token = token
-    return this
-  }
-
-  url(path: string): string {
+  private url(path: string): string {
     return `${this.origin}${API_BASE}${path}`
   }
 

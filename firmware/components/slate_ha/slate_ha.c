@@ -32,12 +32,12 @@
 #include "http_parser.h"
 #include "mdns.h"
 
-#include "slate_mdns.h"
 #include "slate_action.h"
 #include "slate_api.h"
 #include "slate_ha_actions.h"
 #include "slate_ha_catalog.h"
 #include "slate_ha_entities.h"
+#include "slate_mdns.h"
 #include "slate_state.h"
 #include "slate_store.h"
 #include "slate_wifi.h"

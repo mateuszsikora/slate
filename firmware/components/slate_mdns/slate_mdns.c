@@ -41,18 +41,25 @@ esp_err_t slate_mdns_init(void)
         ESP_LOGW(TAG, "claiming %s.local: %s", name, esp_err_to_name(err));
         return err;
     }
-    mdns_instance_name_set(name);
+    /* The instance name is what a browsing client lists the panel as. Not
+     * fatal if it does not take — the name above is what resolves. */
+    esp_err_t instance_err = mdns_instance_name_set(name);
+    if (instance_err != ESP_OK) {
+        ESP_LOGW(TAG, "setting the instance name: %s", esp_err_to_name(instance_err));
+    }
 
     /*
      * The service is what makes the panel visible to something that is
      * browsing rather than resolving a name it already knows — a second panel
-     * on the same network is #16's "multiple panels" question, and a browser
+     * on the same network is §16's "multiple panels" question, and a browser
      * that lists them needs a record to list. The TXT keys carry what §4.1's
      * `/info` would answer, so a discovery pass does not have to open a
      * connection to tell two models apart.
      */
     const esp_app_desc_t *app = esp_app_get_description();
-    const mdns_txt_item_t txt[] = {
+    /* Not const: mdns_service_add() takes a mutable pointer even though it only
+     * copies what it is given. */
+    mdns_txt_item_t txt[] = {
         {"model", SLATE_API_MODEL_ID},
         {"name", name},
         {"api", SLATE_API_BASE_PATH},

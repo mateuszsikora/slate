@@ -95,6 +95,10 @@ export class DeviceSocket {
   stop(): void {
     this.stopped = true
     this.clearTimers()
+    if (this.retryTimer !== null) {
+      window.clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
     if (this.socket !== null) {
       const socket = this.socket
       this.socket = null

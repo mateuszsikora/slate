@@ -60,7 +60,7 @@ export function TopBar({ info, config, connection, mode, onToggleMode, onUnpair 
           className={`mode${mode === 'edit' ? ' mode--on' : ''}`}
           onClick={onToggleMode}
           disabled={connection !== 'online'}
-          title="Edit mode stops the panel emitting actions on touch (§6.5)"
+          title="In edit mode the panel stops acting on touches and shows changes as you make them"
         >
           {mode === 'edit' ? 'Edit mode' : 'Normal mode'}
         </button>

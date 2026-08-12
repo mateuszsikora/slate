@@ -59,13 +59,24 @@ static size_t bundle_len(void)
     return (size_t) (_binary_editor_html_gz_end - _binary_editor_html_gz_start);
 }
 
-static void bundle_hash(char out[HASH_HEX_LEN + 1])
+/**
+ * The bundle's SHA-256, hex.
+ *
+ * Checked rather than assumed: an unhashed bundle is one whose stamp cannot be
+ * compared, and a stamp of zeroes would either rewrite the file on every boot
+ * or — worse — match another failure's zeroes and keep a stale editor. The
+ * caller answers a failure by not seeding at all.
+ */
+static bool bundle_hash(char out[HASH_HEX_LEN + 1])
 {
     uint8_t digest[32];
-    mbedtls_sha256(_binary_editor_html_gz_start, bundle_len(), digest, 0);
+    if (mbedtls_sha256(_binary_editor_html_gz_start, bundle_len(), digest, 0) != 0) {
+        return false;
+    }
     for (size_t i = 0; i < sizeof(digest); i++) {
         snprintf(out + i * 2, 3, "%02x", digest[i]);
     }
+    return true;
 }
 
 /**
@@ -150,13 +161,20 @@ static void seed(void)
         err = write_through_temporary(STAMP_PATH, STAMP_TMP, s_hash, HASH_HEX_LEN);
     }
     if (err != ESP_OK) {
-        /* A full or unwritable partition is not a reason to have no editor.
-         * The stamp is deliberately not left behind on a failed write, so the
-         * next boot tries again rather than trusting a file it did not
-         * finish. */
+        /*
+         * A full or unwritable partition is not a reason to have no editor:
+         * this boot answers from the image, which is the copy this firmware
+         * was built against either way.
+         *
+         * Nothing is cleaned up, and nothing needs to be. Each write is a
+         * rename over its target, so a failure leaves either the previous
+         * bundle and its stamp untouched, or the new bundle behind the old
+         * stamp. The next boot resolves both the same way — the stamp is not
+         * this image's, so it writes again — and neither is served in the
+         * meantime.
+         */
         ESP_LOGW(TAG, "storing the editor bundle failed (%s); serving it from the image",
                  esp_err_to_name(err));
-        unlink(STAMP_PATH);
         return;
     }
 
@@ -245,8 +263,11 @@ static esp_err_t page_handler(httpd_req_t *req)
 
 esp_err_t slate_editor_init(void)
 {
-    bundle_hash(s_hash);
-    seed();
+    if (bundle_hash(s_hash)) {
+        seed();
+    } else {
+        ESP_LOGW(TAG, "the editor bundle could not be hashed; serving it from the image");
+    }
 
     esp_err_t err = slate_api_register_root(SLATE_API_ROOT_EDITOR, page_handler, NULL);
     if (err != ESP_OK) {

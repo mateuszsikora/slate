@@ -111,11 +111,11 @@ jobs:
         run: |
           plain=$(stat -c %s editor/dist/index.html)
           packed=$(gzip -9 -n -c editor/dist/index.html | wc -c)
+          share=$(python3 -c "print(f'{$packed / 409600 * 100:.1f}')")
           {
             echo '### Editor'
             echo
-            echo "\`index.html\` — **$packed B** gzipped from $plain B, "\
-                 "$(python3 -c "print(f'{$packed / 409600 * 100:.1f}')") % of §10's 400 KB budget"
+            echo "\`index.html\` — **$packed B** gzipped from $plain B, $share % of §10's 400 KB budget"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v7

@@ -63,27 +63,34 @@ export function App() {
     }
   }, [client])
 
+  /*
+   * A token is accepted only after the device has answered with it — the
+   * alternative is an editor that looks paired and fails on the first request
+   * that matters.
+   *
+   * "Refused" and "did not answer" are separate outcomes and not one failure,
+   * because only the first is about the token. A panel too busy to answer
+   * `/status` for five seconds would otherwise throw away a credential that
+   * was never wrong, and send somebody to look for a QR code they do not need.
+   */
   const admit = useCallback(
-    async (candidate: string): Promise<boolean> => {
-      /* A token is accepted only after the device has answered with it. The
-       * alternative is an editor that looks paired and fails on the first
-       * request that matters. */
+    async (candidate: string): Promise<'paired' | 'refused' | 'silent'> => {
       try {
         setStatus(await client(candidate).status())
       } catch (error) {
         if (error instanceof ApiError && error.isUnauthorized) {
           setPairingError('The panel does not know that token. Scan the pairing QR again.')
-          return false
+          return 'refused'
         }
         setPairingError('The panel did not answer. Check that it is on the network.')
-        return false
+        return 'silent'
       }
 
       storeToken(candidate)
       setToken(candidate)
       setPairingError(null)
       setPhase('ready')
-      return true
+      return 'paired'
     },
     [client],
   )
@@ -100,28 +107,34 @@ export function App() {
     setPhase('pairing')
   }, [])
 
-  useEffect(() => {
-    let cancelled = false
-    void (async () => {
-      const fetched = await loadInfo()
-      if (cancelled || fetched === null) {
-        return
-      }
-      if (token === null) {
-        setPhase('pairing')
-        return
-      }
-      if (!(await admit(token))) {
-        if (!cancelled) {
-          setPhase('pairing')
-        }
-      }
-    })()
-    return () => {
-      cancelled = true
+  /**
+   * Reach the panel and decide which view this session starts in.
+   *
+   * Shared by start-up and by the "try again" button, so that a panel which
+   * came back answers the same way whichever of the two asked.
+   */
+  const open = useCallback(async () => {
+    const fetched = await loadInfo()
+    if (fetched === null) {
+      return
     }
-    /* Deliberately once, at start-up: re-pairing goes through admit(), which
-     * sets the phase itself rather than re-running this. */
+    if (token === null) {
+      setPhase('pairing')
+      return
+    }
+    const outcome = await admit(token)
+    if (outcome === 'refused') {
+      setPhase('pairing')
+    } else if (outcome === 'silent') {
+      /* The token is kept: the panel not answering says nothing about it. */
+      setPhase('unreachable')
+    }
+  }, [admit, loadInfo, token])
+
+  useEffect(() => {
+    void open()
+    /* Deliberately once, at start-up. Re-pairing goes through admit(), which
+     * sets the phase itself, and the retry button calls open() directly. */
   }, [])
 
   /* --- The live connection (§4.2) --------------------------------------- */
@@ -267,16 +280,8 @@ export function App() {
 
   const retry = useCallback(() => {
     setPhase('starting')
-    void (async () => {
-      const fetched = await loadInfo()
-      if (fetched === null) {
-        return
-      }
-      if (token === null || !(await admit(token))) {
-        setPhase('pairing')
-      }
-    })()
-  }, [admit, loadInfo, token])
+    void open()
+  }, [open])
 
   /* --- Views ------------------------------------------------------------- */
 

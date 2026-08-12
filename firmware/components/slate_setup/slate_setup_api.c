@@ -588,9 +588,16 @@ esp_err_t slate_setup_api_init(void)
     /*
      * §4.3's exception, and it is narrow on purpose: the page, the sweep and the
      * submission are served without a token on the access point interface only,
-     * and answer 401 on the station exactly as everything else does. #61's
-     * register function enforces the list — SLATE_API_AUTH_SETUP_AP is refused
-     * for any other route — so this cannot grow by a component adding a handler.
+     * and the two endpoints answer 401 on the station exactly as everything else
+     * does. #61's register function enforces the list — SLATE_API_AUTH_SETUP_AP
+     * is refused for any other route — so this cannot grow by a component adding
+     * a handler.
+     *
+     * The page is not in that list any more. `GET /` is claimed by §9.2 here and
+     * by §10's editor, so slate_api owns the route and picks between them by the
+     * interface a request arrived on (#31): this page on the access point's own
+     * address, the editor everywhere else. Nothing about what is served where
+     * changed — the station never saw this page.
      */
     static const httpd_uri_t scan = {
         .uri = SLATE_API_BASE_PATH "/wifi/scan",
