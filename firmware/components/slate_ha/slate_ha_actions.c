@@ -371,7 +371,7 @@ esp_err_t slate_ha_actions_selftest(void)
     invalid = source;
     invalid.resource = "switch.slate_selftest";
     CHECK(slate_ha_action_request_copy(&request, 45, &invalid) == ESP_ERR_INVALID_ARG,
-          "reject non-light resource");
+          "reject unsupported resource domain");
     invalid = source;
     invalid.action = SLATE_ACTION_OPEN;
     CHECK(slate_ha_action_request_copy(&request, 45, &invalid) == ESP_ERR_NOT_SUPPORTED,

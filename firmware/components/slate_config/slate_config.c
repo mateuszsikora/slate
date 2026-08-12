@@ -391,11 +391,6 @@ static void validate_tile(validation_t *validation, const cJSON *pages,
         const cJSON *bindings = cJSON_GetObjectItemCaseSensitive(tile, "bindings");
         char bindings_path[160];
         snprintf(bindings_path, sizeof(bindings_path), "%s/bindings", path);
-        if (!cJSON_IsArray(bindings) || cJSON_GetArraySize(bindings) == 0) {
-            add_error(validation->report, "binding_required", bindings_path, bucket);
-            return;
-        }
-        int binding_count = cJSON_GetArraySize(bindings);
         bool compact = size_ok && width == 1 && height == 1;
         bool bar = size_ok && width == 4 && height == 1;
         if (size_ok && !compact && !bar) {
@@ -403,6 +398,11 @@ static void validate_tile(validation_t *validation, const cJSON *pages,
             snprintf(size_path, sizeof(size_path), "%s/size", path);
             add_error(validation->report, "invalid_size", size_path, bucket);
         }
+        if (!cJSON_IsArray(bindings) || cJSON_GetArraySize(bindings) == 0) {
+            add_error(validation->report, "binding_required", bindings_path, bucket);
+            return;
+        }
+        int binding_count = cJSON_GetArraySize(bindings);
         if ((compact && binding_count != 1) ||
             (bar && (binding_count < 2 || binding_count > 5))) {
             add_error(validation->report, "binding_required", bindings_path, bucket);

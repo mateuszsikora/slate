@@ -154,6 +154,8 @@ void slate_scene_update(slate_scene_view_t *view, const slate_resource_t *resour
                         const slate_theme_t *theme)
 {
     bool missing = missing_presentation(resource->presentation);
+    bool no_current_state = resource->presentation == SLATE_PRESENT_UNAVAILABLE ||
+                            resource->presentation == SLATE_PRESENT_STALE;
     bool success = feedback != NULL && feedback->phase == SLATE_ACTION_SUCCESS;
     bool busy = feedback != NULL && (feedback->phase == SLATE_ACTION_PENDING || success);
     bool interactive = resource->presentation == SLATE_PRESENT_OK && !busy &&
@@ -166,6 +168,14 @@ void slate_scene_update(slate_scene_view_t *view, const slate_resource_t *resour
     set_visible(view->identity, missing);
     set_visible(view->icon, !missing);
     set_visible(view->name, !missing);
+    lv_label_set_text(view->icon,
+                      no_current_state ? "-"
+                                       : view->icon_override != NULL
+                                             ? view->icon_override
+                                             : SLATE_ICON_PLAYLIST_PLAY);
+    lv_obj_set_style_text_font(view->icon,
+                               no_current_state ? theme->body : theme->icons,
+                               LV_PART_MAIN);
     if (!view->label_override && !missing) {
         lv_label_set_text(view->name,
                           resource->name[0] != '\0' ? resource->name : view->resource);

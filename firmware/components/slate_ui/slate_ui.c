@@ -1692,6 +1692,8 @@ static esp_err_t publish_scene_test_states(void)
          .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
         {.resource = "scene-away", .kind = SLATE_KIND_SCENE, .name = "Away",
          .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-missing", .kind = SLATE_KIND_SCENE, .name = "Work",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
         {.resource = "scene-goodnight", .kind = SLATE_KIND_SCENE,
          .name = "Provider name ignored", .available = true,
          .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
@@ -2266,14 +2268,11 @@ static esp_err_t selftest_on_task(void)
     slate_config_t *scenes = scene_test_config();
     UI_CHECK(scenes != NULL && rebuild_on_task(scenes) == ESP_OK,
              "scene component test dashboard activated");
-    if (scenes != NULL) {
-        slate_config_free(scenes);
-    }
     UI_CHECK(publish_scene_test_states() == ESP_OK,
              "scene bar received stateless normalized resources");
 
     static const char *SCENE_RESOURCES[] = {
-        "scene-movie", "scene-relax", "scene-dinner", "scene-away",
+        "scene-movie", "scene-relax", "scene-dinner", "scene-away", "scene-missing",
     };
     bool bar_layout_ok = true;
     bool all_activated = true;
@@ -2284,6 +2283,7 @@ static esp_err_t selftest_on_task(void)
         bar_layout_ok = bar_layout_ok && scene_view != NULL &&
                         scene_view->scene.button != NULL &&
                         lv_obj_get_width(scene_view->scene.button) >= 48 &&
+                        lv_obj_get_height(scene_view->scene.button) >= 48 &&
                         lv_obj_has_flag(scene_view->scene.button, LV_OBJ_FLAG_CLICKABLE);
         unsigned scene_calls = s_fixture.action_calls;
         lv_result_t scene_result = scene_view != NULL
@@ -2322,12 +2322,55 @@ static esp_err_t selftest_on_task(void)
                  strcmp(lv_label_get_text(compact_scene->scene.name), "Good night") == 0 &&
                  strcmp(lv_label_get_text(compact_scene->scene.icon), SLATE_ICON_SLEEP) == 0,
              "1x1 scene renders label and icon overrides");
-    UI_CHECK(missing_scene != NULL &&
+    bool rebound_without_snapshots = scenes != NULL &&
+                                       slate_state_bind(NULL, 0) == ESP_OK &&
+                                       rebuild_on_task(scenes) == ESP_OK;
+    missing_scene = find_view("ui-fixture", "scene-missing");
+    UI_CHECK(rebound_without_snapshots && missing_scene != NULL &&
                  !lv_obj_has_flag(missing_scene->scene.identity, LV_OBJ_FLAG_HIDDEN) &&
                  strcmp(lv_label_get_text(missing_scene->scene.identity),
                         "ui-fixture:scene-missing") == 0 &&
                  !lv_obj_has_flag(missing_scene->scene.button, LV_OBJ_FLAG_CLICKABLE),
              "missing scene identifies its provider-qualified resource");
+
+    const slate_snapshot_t unavailable_scene = {
+        .resource = "scene-missing",
+        .kind = SLATE_KIND_SCENE,
+        .name = "Unavailable scene",
+        .available = false,
+        .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE,
+    };
+    esp_err_t unavailable_scene_err =
+        slate_state_publish("ui-fixture", &unavailable_scene);
+    if (unavailable_scene_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(unavailable_scene_err == ESP_OK && missing_scene != NULL &&
+                 lv_obj_has_flag(missing_scene->scene.identity, LV_OBJ_FLAG_HIDDEN) &&
+                 strcmp(lv_label_get_text(missing_scene->scene.icon), "-") == 0 &&
+                 lv_obj_get_style_opa(missing_scene->scene.button, LV_PART_MAIN) ==
+                     LV_OPA_50 &&
+                 !lv_obj_has_flag(missing_scene->scene.button, LV_OBJ_FLAG_CLICKABLE),
+             "unavailable scene renders a dimmed dash and stays disabled");
+    esp_err_t scene_offline_err =
+        slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_OFFLINE);
+    if (scene_offline_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(scene_offline_err == ESP_OK && missing_scene != NULL &&
+                 strcmp(lv_label_get_text(missing_scene->scene.icon), "-") == 0 &&
+                 lv_obj_get_style_opa(missing_scene->scene.button, LV_PART_MAIN) ==
+                     LV_OPA_50 &&
+                 !lv_obj_has_flag(missing_scene->scene.button, LV_OBJ_FLAG_CLICKABLE),
+             "offline scene renders a dimmed dash and stays disabled");
+    slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_ONLINE);
+    slate_state_drain(discard_changed, NULL);
+    update_all();
+    if (scenes != NULL) {
+        slate_config_free(scenes);
+    }
 
     lights = light_test_config();
     UI_CHECK(lights != NULL && rebuild_on_task(lights) == ESP_OK,

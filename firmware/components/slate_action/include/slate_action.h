@@ -95,8 +95,9 @@ esp_err_t slate_action_dispatch(const slate_action_request_t *request, uint32_t 
 /**
  * @brief Deliver an adapter acknowledgement or explicit failure.
  *
- * Success acknowledges delivery but does not confirm state. A matching provider
- * snapshot does that. Failure reverts immediately. Unknown, duplicate and late
+ * Success acknowledges delivery. Stateful actions still require a matching
+ * provider snapshot; a stateless scene activation enters the brief SUCCESS
+ * phase directly. Failure reverts immediately. Unknown, duplicate and late
  * results are ignored.
  */
 void slate_action_result(const char *provider, uint32_t id, bool success, const char *error);
