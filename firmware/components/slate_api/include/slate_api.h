@@ -15,6 +15,7 @@
 #include "cJSON.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "slate_state.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -57,6 +58,28 @@ esp_err_t slate_api_init(void);
  * contract. The wrapped handler receives its original user_ctx unchanged.
  */
 esp_err_t slate_api_register_uri(const httpd_uri_t *uri, slate_api_auth_t auth);
+
+/**
+ * @brief Append one provider-neutral resource to a JSON array.
+ *
+ * This is the single serializer for §5.2's public vocabulary. Provider
+ * adapters use it for discovery catalogs so upstream field names cannot leak
+ * into the editor API.
+ */
+esp_err_t slate_api_resource_append(cJSON *array, const slate_resource_t *resource);
+
+/** Append a provider's discovery catalog to `array`. */
+typedef esp_err_t (*slate_api_resources_append_fn)(void *ctx, cJSON *array);
+
+/**
+ * @brief Register the discovery catalog behind `GET /resources` for a provider.
+ *
+ * Providers without a separate catalog use the normalized bound-resource
+ * store automatically. Registration is intended during component init.
+ */
+esp_err_t slate_api_resources_register(const char *provider,
+                                       slate_api_resources_append_fn append,
+                                       void *ctx);
 
 /**
  * @brief Send `root` as the response body, and delete it.
