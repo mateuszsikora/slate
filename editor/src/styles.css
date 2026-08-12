@@ -273,6 +273,7 @@ button {
   margin: 14px 0 0;
   color: var(--text-lo);
   font-size: 0.86rem;
+  overflow-wrap: anywhere;
 }
 
 .transfer__errors {
@@ -295,6 +296,10 @@ button {
   font-size: 0.8rem;
 }
 
+.transfer__errors li {
+  overflow-wrap: anywhere;
+}
+
 .transfer__candidate {
   margin-top: 14px;
   padding: 10px 12px;
@@ -306,6 +311,15 @@ button {
 
 .transfer__candidate strong {
   color: var(--text-hi);
+}
+
+.transfer__candidate span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.transfer__candidate .button {
+  flex: 0 0 auto;
 }
 
 .button.button--secondary {

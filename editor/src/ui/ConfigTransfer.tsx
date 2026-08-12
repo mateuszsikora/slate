@@ -30,6 +30,29 @@ interface Props {
 
 type Activity = 'idle' | 'validating' | 'publishing'
 
+/** The browser enforces the same document-size boundary as design.md §3.1. */
+const CONFIG_MAX_BYTES = 64 * 1024
+
+const VALIDATION_MESSAGES: Record<string, string> = {
+  schema_required: 'The schema version is required.',
+  schema_invalid: 'The schema version must be a positive integer.',
+  schema_too_new: 'This configuration requires newer panel firmware.',
+  theme_required: 'A theme is required.',
+  theme_not_found: 'The selected theme is not available on this panel.',
+  pages_required: 'At least one page is required.',
+  duplicate_page_id: 'Page IDs must be unique.',
+  home_page_not_found: 'The home page does not match any page ID.',
+  tile_id_required: 'Every tile needs an ID.',
+  duplicate_tile_id: 'Tile IDs must be unique.',
+  invalid_position: 'The tile position is invalid.',
+  invalid_size: 'The tile size is not supported.',
+  tile_out_of_bounds: 'The tile extends beyond the grid.',
+  tile_overlap: 'The tile overlaps another tile.',
+  binding_required: 'The tile requires a resource binding.',
+  provider_required: 'The binding requires a provider.',
+  resource_required: 'The binding requires a resource.',
+}
+
 export function ConfigTransfer({ config, deviceName, onValidate, onPublish }: Props) {
   const input = useRef<HTMLInputElement>(null)
   const [activity, setActivity] = useState<Activity>('idle')
@@ -71,15 +94,13 @@ export function ConfigTransfer({ config, deviceName, onValidate, onPublish }: Pr
     setFailure(null)
     setNotice(`Validating ${file.name}…`)
 
-    let document: string
-    let parsed: unknown
+    let imported: { document: string; parsed: unknown }
     try {
-      document = await file.text()
-      parsed = JSON.parse(document) as unknown
+      imported = await readImportedFile(file)
     } catch (error) {
       setFailure({
         summary: 'Import failed. The running configuration was not changed.',
-        details: [jsonError(error)],
+        details: [fileError(error)],
       })
       setNotice(null)
       setActivity('idle')
@@ -87,8 +108,12 @@ export function ConfigTransfer({ config, deviceName, onValidate, onPublish }: Pr
     }
 
     try {
-      await onValidate(document)
-      setCandidate({ config: parsed as Config, document, filename: file.name })
+      await onValidate(imported.document)
+      setCandidate({
+        config: imported.parsed as Config,
+        document: imported.document,
+        filename: file.name,
+      })
       setNotice(`${file.name} is valid and ready to publish.`)
     } catch (error) {
       setFailure({
@@ -200,8 +225,40 @@ function safeFilename(name: string): string {
   return safe || 'slate'
 }
 
-function jsonError(error: unknown): string {
-  return error instanceof SyntaxError ? `Invalid JSON: ${error.message}` : 'The file could not be read.'
+class ImportedFileError extends Error {}
+
+async function readImportedFile(file: File): Promise<{ document: string; parsed: unknown }> {
+  if (file.size > CONFIG_MAX_BYTES) {
+    throw new ImportedFileError('The document exceeds the 64 KB configuration limit.')
+  }
+
+  let bytes: ArrayBuffer
+  try {
+    bytes = await file.arrayBuffer()
+  } catch {
+    throw new ImportedFileError('The file could not be read.')
+  }
+
+  let document: string
+  try {
+    /* `fatal` prevents invalid input from being silently changed to U+FFFD.
+     * Keeping the BOM instead of consuming it lets JSON.parse and the device
+     * judge the same bytes rather than two normalized variants of the file. */
+    document = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes)
+  } catch {
+    throw new ImportedFileError('The document must be valid UTF-8.')
+  }
+
+  try {
+    return { document, parsed: JSON.parse(document) as unknown }
+  } catch (error) {
+    const detail = error instanceof SyntaxError ? `: ${error.message}` : ''
+    throw new ImportedFileError(`Invalid JSON${detail}`)
+  }
+}
+
+function fileError(error: unknown): string {
+  return error instanceof ImportedFileError ? error.message : 'The file could not be read.'
 }
 
 function requestErrors(error: unknown, operation: 'validate' | 'publish'): string[] {
@@ -226,6 +283,12 @@ function requestErrors(error: unknown, operation: 'validate' | 'publish'): strin
     return [
       'The panel activated the document in memory but could not persist it. A reboot restores the previous stored configuration.',
     ]
+  }
+  if (error.code === 'empty_body') {
+    return ['The document is empty.']
+  }
+  if (error.code === 'invalid_json') {
+    return ['The panel could not parse the document as UTF-8 JSON.']
   }
 
   const issues = detailedIssues(error.body)
@@ -258,8 +321,10 @@ function issueList(value: unknown, prefix = ''): string[] {
     if (!isObject(issue) || typeof issue['code'] !== 'string') {
       return []
     }
+    const code = issue['code']
+    const message = VALIDATION_MESSAGES[code] ?? 'The configuration is invalid.'
     const path = typeof issue['path'] === 'string' ? ` at ${issue['path']}` : ''
-    return [`${prefix}${issue['code']}${path}`]
+    return [`${prefix}${message} (${code})${path}`]
   })
 }
 
