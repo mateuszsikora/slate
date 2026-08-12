@@ -1961,14 +1961,14 @@ static esp_err_t selftest_on_task(void)
                  midnight->text_hi == 0xF2F5F9 && midnight->text_lo == 0x8A94A6 &&
                  midnight->accent == 0x6C8CFF && midnight->on_accent == 0x101114 &&
                  midnight->warn == 0xF5A524 && minimal_light != NULL &&
-                 minimal_light->bg == 0xF4F6F8 &&
-                 minimal_light->surface == 0xFFFFFF &&
-                 minimal_light->surface_alt == 0xE5EAF0 &&
-                 minimal_light->text_hi == 0x172033 &&
-                 minimal_light->text_lo == 0x526176 &&
-                 minimal_light->accent == 0x315FC6 &&
+                 minimal_light->bg == 0xD8D3C9 &&
+                 minimal_light->surface == 0xF7F5F0 &&
+                 minimal_light->surface_alt == 0xC9C3B8 &&
+                 minimal_light->text_hi == 0x1F2933 &&
+                 minimal_light->text_lo == 0x4A5661 &&
+                 minimal_light->accent == 0x2F6671 &&
                  minimal_light->on_accent == 0xFFFFFF &&
-                 minimal_light->warn == 0xA13C00,
+                 minimal_light->warn == 0x9A442F,
              "both themes supply exact complete colour palettes");
 
     memset(&s_fixture, 0, sizeof(s_fixture));
