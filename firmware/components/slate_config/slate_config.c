@@ -395,6 +395,18 @@ static void validate_tile(validation_t *validation, const cJSON *pages,
             add_error(validation->report, "binding_required", bindings_path, bucket);
             return;
         }
+        int binding_count = cJSON_GetArraySize(bindings);
+        bool compact = size_ok && width == 1 && height == 1;
+        bool bar = size_ok && width == 4 && height == 1;
+        if (size_ok && !compact && !bar) {
+            char size_path[160];
+            snprintf(size_path, sizeof(size_path), "%s/size", path);
+            add_error(validation->report, "invalid_size", size_path, bucket);
+        }
+        if ((compact && binding_count != 1) ||
+            (bar && (binding_count < 2 || binding_count > 5))) {
+            add_error(validation->report, "binding_required", bindings_path, bucket);
+        }
         for (int i = 0; i < cJSON_GetArraySize(bindings); i++) {
             char binding_path[192];
             snprintf(binding_path, sizeof(binding_path), "%s/%d", bindings_path, i);

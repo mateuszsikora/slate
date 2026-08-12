@@ -33,7 +33,7 @@ idf_component_register(
 #                              select RAM-only replacement semantics. It does
 #                              not write flash.
 #   -DSLATE_HA_SELFTEST=1      exercise WebSocket URL/backoff rules, compressed
-#                              entity diffs, and light/sensor normalization.
+#                              entity diffs, and light/sensor/scene normalization.
 #   -DSLATE_UI_SELFTEST=1      exercise the real declarative runtime on the
 #                              panel, including 500 varied rebuild cycles.
 #   -DSLATE_UI_LEAK_BYTES=64   negative control for the UI heap verifier. It is

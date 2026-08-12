@@ -24,6 +24,7 @@
 static const char *TAG = "slate_action";
 
 #define ACTION_TIMEOUT_US (3 * 1000 * 1000LL)
+#define SUCCESS_VISIBLE_US (500 * 1000LL)
 #define ERROR_VISIBLE_US  (1500 * 1000LL)
 #define TIMER_PERIOD_US   (100 * 1000ULL)
 
@@ -277,7 +278,9 @@ static void state_published(void *ctx, const char *provider, const slate_snapsho
 
     LOCK();
     pending_t *pending = find_pair(provider, snapshot->resource);
-    if (pending != NULL && pending->phase == SLATE_ACTION_PENDING) {
+    if (pending != NULL && pending->phase == SLATE_ACTION_PENDING &&
+        !(pending->kind == SLATE_KIND_SCENE &&
+          pending->action == SLATE_ACTION_ACTIVATE)) {
         matched = snapshot_matches(pending, snapshot);
         id = pending->id;
         remove_locked(pending);
@@ -499,7 +502,8 @@ void slate_action_result(const char *provider, uint32_t id, bool success, const 
         pending->deadline_us = esp_timer_get_time() + ERROR_VISIBLE_US;
         changed = true;
     } else if (pending->kind == SLATE_KIND_SCENE && pending->action == SLATE_ACTION_ACTIVATE) {
-        remove_locked(pending);
+        pending->phase = SLATE_ACTION_SUCCESS;
+        pending->deadline_us = esp_timer_get_time() + SUCCESS_VISIBLE_US;
         changed = true;
     } else {
         /* Stateful success deliberately leaves the entry unchanged: delivery
@@ -842,10 +846,19 @@ esp_err_t slate_action_selftest(void)
     uint32_t scene_id = 0;
     CHECK(slate_action_dispatch(&request, &scene_id) == ESP_OK,
           "stateless scene activation dispatched");
+    CHECK(slate_state_publish(PROVIDER, &scene) == ESP_OK,
+          "scene state update may race the adapter result");
+    slate_action_feedback(PROVIDER, SCENE, &feedback);
+    CHECK(feedback.phase == SLATE_ACTION_PENDING,
+          "stateless state does not impersonate action acceptance");
     slate_action_result(PROVIDER, scene_id, true, NULL);
     slate_action_feedback(PROVIDER, SCENE, &feedback);
+    CHECK(feedback.phase == SLATE_ACTION_SUCCESS,
+          "accepted stateless action exposes brief confirmation");
+    expire_at(esp_timer_get_time() + SUCCESS_VISIBLE_US + 1);
+    slate_action_feedback(PROVIDER, SCENE, &feedback);
     CHECK(feedback.phase == SLATE_ACTION_IDLE,
-          "accepted stateless action completes without snapshot");
+          "stateless confirmation expires without a snapshot");
 
     lamp.available = false;
     slate_state_publish(PROVIDER, &lamp);
