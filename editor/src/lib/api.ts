@@ -40,6 +40,23 @@ export interface ProviderStatus {
   resource_count: number
 }
 
+export interface Binding {
+  provider: string
+  resource: string
+}
+
+/** The provider-neutral discovery vocabulary from design.md §5.2. */
+export interface Resource {
+  provider: string
+  resource: string
+  kind: string
+  name?: string
+  area?: string
+  available: boolean
+  state: Record<string, unknown>
+  capabilities?: Record<string, unknown>
+}
+
 export interface DeviceStatus {
   network: NetworkState
   providers: ProviderStatus[]
@@ -62,8 +79,8 @@ export interface Tile {
   size: [number, number]
   label?: string
   icon?: string
-  binding?: { provider: string; resource: string }
-  bindings?: { provider: string; resource: string }[]
+  binding?: Binding
+  bindings?: Binding[]
 }
 
 export interface Page {
@@ -164,6 +181,18 @@ export class DeviceClient {
   /** Persistent `PUT /config`; unlike live preview this writes the document to flash. */
   publishConfig(document: string): Promise<void> {
     return this.request<void>('PUT', '/config', { body: document })
+  }
+
+  /** RAM-only replacement used by §10's live panel preview. */
+  previewConfig(document: string): Promise<void> {
+    return this.request<void>('PUT', '/config?transient=1', { body: document })
+  }
+
+  resources(provider: string): Promise<Resource[]> {
+    return this.request<{ resources: Resource[] }>(
+      'GET',
+      `/resources?provider=${encodeURIComponent(provider)}`,
+    ).then((response) => response.resources)
   }
 
   private async request<T>(
