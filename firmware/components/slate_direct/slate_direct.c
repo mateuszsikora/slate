@@ -9,6 +9,7 @@
 
 #include <inttypes.h>
 #include <math.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -20,6 +21,7 @@
 #include "slate_action.h"
 #include "slate_api.h"
 #include "slate_state.h"
+#include "slate_wifi.h"
 #include "slate_ws.h"
 
 #ifdef SLATE_DIRECT_SELFTEST
@@ -41,6 +43,18 @@ static const char *TAG = "direct";
  * be allocated would make the endpoint fail in a new way under memory pressure.
  */
 #define BODY_MAX 768
+
+/*
+ * The API starts before the radio (§9), so the provider initially has no Wi-Fi
+ * lifecycle to observe and retains §5.4's ordinary publish-only status. Once
+ * slate_direct_start() runs, this becomes the station's actual state and every
+ * later consumer attach/detach is constrained by it: a WebSocket callback
+ * racing the station-down event cannot accidentally make stale values fresh.
+ */
+static atomic_bool s_network_up = ATOMIC_VAR_INIT(true);
+static atomic_bool s_consumer_attached = ATOMIC_VAR_INIT(false);
+static bool s_initialized;
+static bool s_started;
 
 #ifdef SLATE_DIRECT_SELFTEST
 static void selftest_consumer_attached(void);
@@ -390,12 +404,29 @@ static esp_err_t state_handler(httpd_req_t *req)
  * wrong with it: "a read-only direct sensor remains fresh even when no action
  * consumer is attached."
  */
+static void update_provider_status(void)
+{
+    /* The HTTP and event-loop tasks may cross here during a station recovery.
+     * Re-read after publishing so the last status cannot be based on a
+     * consumer snapshot that changed while slate_state took its lock. */
+    bool network_up;
+    bool attached;
+    do {
+        network_up = atomic_load(&s_network_up);
+        attached = atomic_load(&s_consumer_attached);
+        slate_state_provider_set_status(
+            SLATE_DIRECT_PROVIDER_ID,
+            !network_up ? SLATE_PROVIDER_OFFLINE
+                        : attached ? SLATE_PROVIDER_ONLINE : SLATE_PROVIDER_DEGRADED);
+    } while (network_up != atomic_load(&s_network_up) ||
+             attached != atomic_load(&s_consumer_attached));
+}
+
 static void consumer_changed(void *ctx, bool attached)
 {
     (void) ctx;
-    slate_state_provider_set_status(SLATE_DIRECT_PROVIDER_ID, attached
-                                                                  ? SLATE_PROVIDER_ONLINE
-                                                                  : SLATE_PROVIDER_DEGRADED);
+    atomic_store(&s_consumer_attached, attached);
+    update_provider_status();
     if (!attached) {
         slate_action_provider_unavailable(SLATE_DIRECT_PROVIDER_ID, "consumer_disconnected");
     }
@@ -404,6 +435,31 @@ static void consumer_changed(void *ctx, bool attached)
         selftest_consumer_attached();
     }
 #endif
+}
+
+static void network_changed(bool connected)
+{
+    atomic_store(&s_network_up, connected);
+    update_provider_status();
+    if (!connected) {
+        /* The WebSocket close normally reaches consumer_changed() as well, but
+         * the station event is the first authoritative loss and pending state
+         * must revert even if the transport takes longer to notice it. */
+        slate_action_provider_unavailable(SLATE_DIRECT_PROVIDER_ID, "network_offline");
+    }
+}
+
+static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void) arg;
+    (void) base;
+    (void) data;
+
+    if (id == SLATE_WIFI_EVENT_CONNECTED) {
+        network_changed(true);
+    } else if (id == SLATE_WIFI_EVENT_DISCONNECTED) {
+        network_changed(false);
+    }
 }
 
 static void action_result(void *ctx, uint32_t id, bool success, const char *error)
@@ -489,6 +545,9 @@ esp_err_t slate_direct_dispatch(uint32_t id, const slate_direct_action_t *action
 
 esp_err_t slate_direct_init(void)
 {
+    if (s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
     /*
      * §5.1: the direct provider "is always present". Registering with the store
      * first, and separately from everything below, is what makes that true of a
@@ -508,6 +567,7 @@ esp_err_t slate_direct_init(void)
     if (err != ESP_OK) {
         return err;
     }
+    s_initialized = true;
     slate_state_provider_set_status(SLATE_DIRECT_PROVIDER_ID, SLATE_PROVIDER_DEGRADED);
 
     const slate_action_provider_t action_provider = {
@@ -546,6 +606,25 @@ esp_err_t slate_direct_init(void)
         return action_err;
     }
     return err != ESP_OK ? err : route_err;
+}
+
+esp_err_t slate_direct_start(void)
+{
+    if (!s_initialized || s_started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = esp_event_handler_instance_register(
+        SLATE_WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    s_started = true;
+    slate_wifi_status_t wifi;
+    slate_wifi_status(&wifi);
+    network_changed(wifi.connected);
+    return ESP_OK;
 }
 
 #ifdef SLATE_DIRECT_SELFTEST
@@ -646,6 +725,21 @@ esp_err_t slate_direct_selftest(void)
           "registered and degraded with no consumer");
 
     CHECK(selftest_bind_fixture() == ESP_OK, "fixture bound in place of a configuration");
+
+    slate_resource_t lamp_state;
+    wifi_event(NULL, SLATE_WIFI_EVENT, SLATE_WIFI_EVENT_DISCONNECTED, NULL);
+    CHECK(slate_state_provider_status(SLATE_DIRECT_PROVIDER_ID) == SLATE_PROVIDER_OFFLINE,
+          "station loss makes the provider offline");
+    CHECK(slate_state_get(SLATE_DIRECT_PROVIDER_ID, "living-room", &lamp_state) == ESP_OK &&
+              lamp_state.presentation == SLATE_PRESENT_STALE,
+          "station loss makes only direct state stale");
+
+    wifi_event(NULL, SLATE_WIFI_EVENT, SLATE_WIFI_EVENT_CONNECTED, NULL);
+    CHECK(slate_state_provider_status(SLATE_DIRECT_PROVIDER_ID) == SLATE_PROVIDER_DEGRADED,
+          "station recovery restores publish-only mode");
+    CHECK(slate_state_get(SLATE_DIRECT_PROVIDER_ID, "living-room", &lamp_state) == ESP_OK &&
+              lamp_state.presentation == SLATE_PRESENT_OK,
+          "station recovery makes direct state fresh");
 
     /* §5.4's immediate failure, which is a return value and not a callback: a
      * caller must never have to decide whether an answer is still coming. */

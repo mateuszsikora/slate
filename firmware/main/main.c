@@ -368,6 +368,16 @@ static void start_network(void)
         return;
     }
 
+    /* Direct publication and action delivery use this same station. Keep the
+     * adapter's freshness status tied to it just as HA's connection is below:
+     * a router outage must stale both providers, not only the one with its own
+     * outbound WebSocket. */
+    err = slate_direct_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "direct provider network lifecycle unavailable: %s — continuing",
+                 esp_err_to_name(err));
+    }
+
     /* The adapter registers its API routes before the radio starts, then joins
      * the Wi-Fi lifecycle here once the event loop and station exist. Reading
      * the current station snapshot inside slate_ha_start() closes the small

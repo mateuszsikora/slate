@@ -46,6 +46,7 @@ static const char *TAG = "slate_ui";
 
 #define UI_REBUILD_POST_TIMEOUT_MS 1000
 #define UI_LABEL_LIMIT             64
+#define UI_PROVIDER_SUMMARY_MAX    128
 
 typedef struct {
     char provider[SLATE_PROVIDER_ID_MAX + 1];
@@ -147,6 +148,85 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t 
     return label;
 }
 
+static unsigned provider_status_rank(slate_provider_status_t status)
+{
+    switch (status) {
+    case SLATE_PROVIDER_ERROR:
+        return 5;
+    case SLATE_PROVIDER_OFFLINE:
+        return 4;
+    case SLATE_PROVIDER_CONNECTING:
+        return 3;
+    case SLATE_PROVIDER_UNCONFIGURED:
+        return 2;
+    case SLATE_PROVIDER_DEGRADED:
+        return 1;
+    case SLATE_PROVIDER_ONLINE:
+        return 0;
+    }
+    return 0;
+}
+
+static void append_upper(char *out, size_t size, const char *text)
+{
+    size_t used = strlen(out);
+    while (*text != '\0' && used + 1 < size) {
+        char ch = *text++;
+        out[used++] = ch >= 'a' && ch <= 'z' ? (char) (ch - 'a' + 'A') : ch;
+    }
+    out[used] = '\0';
+}
+
+static void provider_summary(char *out, size_t size, uint32_t *color,
+                             const slate_theme_t *theme)
+{
+    unsigned selected_rank = 0;
+    slate_provider_status_t selected_status = SLATE_PROVIDER_ONLINE;
+    out[0] = '\0';
+
+    size_t provider_count = slate_state_provider_count();
+    for (size_t i = 0; i < provider_count; i++) {
+        slate_state_provider_info_t info;
+        if (slate_state_provider_at(i, &info) != ESP_OK || info.resource_count == 0) {
+            continue;
+        }
+
+        unsigned rank = provider_status_rank(info.status);
+        if (rank == 0 || rank < selected_rank) {
+            continue;
+        }
+        if (rank > selected_rank) {
+            out[0] = '\0';
+            selected_rank = rank;
+            selected_status = info.status;
+        } else {
+            strlcat(out, " + ", size);
+        }
+        append_upper(out, size, info.id);
+    }
+
+    if (selected_rank == 0) {
+        strlcpy(out, "PROVIDERS ONLINE", size);
+        *color = theme->accent;
+        return;
+    }
+
+    const char *status = selected_status == SLATE_PROVIDER_ERROR
+                             ? " ERROR"
+                             : selected_status == SLATE_PROVIDER_OFFLINE
+                                   ? " OFFLINE"
+                                   : selected_status == SLATE_PROVIDER_CONNECTING
+                                         ? " CONNECTING"
+                                         : selected_status == SLATE_PROVIDER_UNCONFIGURED
+                                               ? " UNCONFIGURED"
+                                               : " DEGRADED";
+    strlcat(out, status, size);
+    *color = selected_status == SLATE_PROVIDER_ERROR ||
+                     selected_status == SLATE_PROVIDER_OFFLINE
+                 ? theme->warn
+                 : theme->text_lo;
+}
+
 static void update_bar(ui_tree_t *tree)
 {
     if (tree == NULL) {
@@ -163,33 +243,9 @@ static void update_bar(ui_tree_t *tree)
     }
     lv_label_set_text(tree->clock, clock);
 
-    size_t provider_count = slate_state_provider_count();
-    bool offline = false;
-    bool degraded = false;
-    for (size_t i = 0; i < provider_count; i++) {
-        slate_state_provider_info_t info;
-        if (slate_state_provider_at(i, &info) != ESP_OK) {
-            continue;
-        }
-        switch (info.status) {
-        case SLATE_PROVIDER_CONNECTING:
-        case SLATE_PROVIDER_OFFLINE:
-        case SLATE_PROVIDER_ERROR:
-            offline = true;
-            break;
-        case SLATE_PROVIDER_UNCONFIGURED:
-        case SLATE_PROVIDER_DEGRADED:
-            degraded = true;
-            break;
-        case SLATE_PROVIDER_ONLINE:
-            break;
-        }
-    }
-
-    const char *text = offline ? "PROVIDERS OFFLINE"
-                                : degraded ? "PROVIDERS DEGRADED" : "PROVIDERS ONLINE";
-    uint32_t color = offline ? tree->theme->warn
-                             : degraded ? tree->theme->text_lo : tree->theme->accent;
+    char text[UI_PROVIDER_SUMMARY_MAX];
+    uint32_t color = tree->theme->accent;
+    provider_summary(text, sizeof(text), &color, tree->theme);
     lv_label_set_text(tree->provider, text);
     lv_obj_set_style_text_color(tree->provider, lv_color_hex(color), LV_PART_MAIN);
 }
@@ -382,6 +438,9 @@ static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title)
         tree_destroy(tree);
         return NULL;
     }
+    lv_label_set_long_mode(tree->provider, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(tree->provider, 220);
+    lv_obj_set_style_text_align(tree->provider, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_obj_align(tree->provider, LV_ALIGN_RIGHT_MID, 0, 0);
 
     tree->bar_timer = lv_timer_create(bar_timer_cb, 1000, NULL);
@@ -2081,8 +2140,9 @@ static esp_err_t selftest_on_task(void)
     }
     UI_CHECK(offline_err == ESP_OK && sensor_view_text("temperature", "-", "°C") &&
                  temperature != NULL &&
-                 lv_obj_get_style_opa(temperature->tile, LV_PART_MAIN) == LV_OPA_50,
-             "an offline provider renders its stale sensor as a dimmed dash");
+                 lv_obj_get_style_opa(temperature->tile, LV_PART_MAIN) == LV_OPA_50 &&
+                 strcmp(lv_label_get_text(s_tree->provider), "DIRECT OFFLINE") == 0,
+             "an offline provider dims its sensor and is named in the bar");
 
     esp_err_t online_err =
         slate_state_provider_set_status("direct", SLATE_PROVIDER_ONLINE);
@@ -2094,6 +2154,21 @@ static esp_err_t selftest_on_task(void)
                  temperature != NULL &&
                  lv_obj_get_style_opa(temperature->tile, LV_PART_MAIN) == LV_OPA_COVER,
              "a sensor restores its value when the provider returns online");
+
+    esp_err_t degraded_err =
+        slate_state_provider_set_status("direct", SLATE_PROVIDER_DEGRADED);
+    if (degraded_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(degraded_err == ESP_OK && sensor_view_text("temperature", "-12.4", "°C") &&
+                 temperature != NULL &&
+                 lv_obj_get_style_opa(temperature->tile, LV_PART_MAIN) == LV_OPA_COVER &&
+                 strcmp(lv_label_get_text(s_tree->provider), "DIRECT DEGRADED") == 0,
+             "a degraded provider keeps state fresh and is named in the bar");
+    slate_state_provider_set_status("direct", SLATE_PROVIDER_ONLINE);
+    slate_state_drain(discard_changed, NULL);
+    update_all();
 
     slate_config_t *icons = sensor_icon_test_config();
     UI_CHECK(icons != NULL && rebuild_on_task(icons) == ESP_OK,

@@ -11,7 +11,8 @@
 idf_component_register(
     SRCS "slate_direct.c"
     INCLUDE_DIRS "include"
-    REQUIRES esp_http_server esp_timer json slate_action slate_api slate_state slate_ws
+    REQUIRES esp_event esp_http_server esp_timer json slate_action slate_api slate_state
+             slate_wifi slate_ws
 )
 
 if(DEFINED SLATE_DIRECT_SELFTEST)
