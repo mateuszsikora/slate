@@ -15,13 +15,14 @@ import { parseToken } from '../lib/token'
 interface Props {
   info: DeviceInfo | null
   error: string | null
+  notice: string | null
   /* Resolves when the panel has answered, whatever it answered: this view only
    * needs to know when to stop saying "Checking", and the outcome arrives back
    * as `error` or as a different view entirely. */
   onSubmit: (token: string) => Promise<unknown>
 }
 
-export function Pairing({ info, error, onSubmit }: Props) {
+export function Pairing({ info, error, notice, onSubmit }: Props) {
   const [value, setValue] = useState('')
   const [busy, setBusy] = useState(false)
   const [localError, setLocalError] = useState<string | null>(null)
@@ -64,6 +65,12 @@ export function Pairing({ info, error, onSubmit }: Props) {
           The panel shows a pairing QR with its address and token. Scanning it opens this editor
           already paired. If you cannot scan it, type the token — or paste the whole URL — here.
         </p>
+
+        {notice === null ? null : (
+          <p className="warning" role="status">
+            {notice}
+          </p>
+        )}
 
         <form className="pair-form" onSubmit={submit}>
           <input

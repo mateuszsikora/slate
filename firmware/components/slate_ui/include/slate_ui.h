@@ -64,10 +64,19 @@ bool slate_ui_ready(void);
 /**
  * @brief Apply §6.5's edit-mode presentation and touch policy.
  *
- * Safe from any task. The system bar redraw is queued onto the LVGL owner and
- * semantic component actions are suppressed immediately.
+ * Safe from any task. The system bar redraw is queued onto the LVGL owner.
+ * Entering edit mode suppresses semantic actions immediately; leaving it keeps
+ * them suppressed until slate_ui_mode_restore_complete().
  */
 void slate_ui_mode_set(bool edit);
+
+/**
+ * @brief Finish leaving edit mode after the persisted tree is active.
+ *
+ * Safe against a concurrent return to edit mode; actions are enabled only if
+ * the matching normal-mode transition is still current.
+ */
+void slate_ui_mode_restore_complete(void);
 
 /**
  * @brief Refresh an error/pairing presentation after the station gets an IP.

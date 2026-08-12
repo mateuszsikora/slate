@@ -109,6 +109,19 @@ static void reboot(void *ctx)
     esp_restart();
 }
 
+static void schedule_reboot(void)
+{
+    esp_err_t err = esp_timer_start_once(s_reboot_timer, FACTORY_REBOOT_US);
+    if (err == ESP_OK) {
+        return;
+    }
+
+    /* The store has invalidated handles held by other subsystems. Rebooting is
+     * no longer optional, even if it costs the HTTP response. */
+    ESP_LOGE(TAG, "scheduling reboot after factory reset: %s", esp_err_to_name(err));
+    esp_restart();
+}
+
 static esp_err_t factory_reset_handler(httpd_req_t *req)
 {
     if (req->content_len != 0) {
@@ -116,22 +129,15 @@ static esp_err_t factory_reset_handler(httpd_req_t *req)
     }
 
     esp_err_t reset_err = slate_store_factory_reset();
-    esp_err_t response_err;
-    if (reset_err == ESP_OK) {
-        response_err = send_no_content(req);
-    } else {
-        response_err = slate_api_refuse(req, "500 Internal Server Error", "reset_failed");
-    }
+    /* Arm the reboot before touching response I/O. A peer that stopped reading
+     * can block httpd_resp_send() up to the server's socket timeout, but cannot
+     * be allowed to keep the device running with invalidated NVS handles. */
+    schedule_reboot();
 
-    /* slate_store_factory_reset() invalidates NVS handles even when one of its
-     * best-effort steps failed. The response gets a short head start, then the
-     * device reboots into the only supported post-reset state. */
-    esp_err_t timer_err = esp_timer_start_once(s_reboot_timer, FACTORY_REBOOT_US);
-    if (timer_err != ESP_OK) {
-        ESP_LOGE(TAG, "scheduling reboot after factory reset: %s", esp_err_to_name(timer_err));
-        esp_restart();
+    if (reset_err == ESP_OK) {
+        return send_no_content(req);
     }
-    return response_err;
+    return slate_api_refuse(req, "500 Internal Server Error", "reset_failed");
 }
 
 esp_err_t slate_control_api_init(void)

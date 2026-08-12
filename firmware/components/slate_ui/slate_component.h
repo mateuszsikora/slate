@@ -9,8 +9,22 @@
 
 #define SLATE_COMPONENT_PLACEHOLDER_MAX 128
 
-/** @brief Globally suppress semantic touch actions while §6.5 edit mode is active. */
-void slate_component_actions_set_enabled(bool enabled);
+/**
+ * @brief Apply the action policy for a mode transition.
+ *
+ * Entering edit mode suppresses actions immediately. Leaving it keeps them
+ * suppressed until slate_component_actions_restore_complete() confirms that
+ * the persisted tree replaced any transient preview.
+ */
+void slate_component_actions_mode_set(bool edit);
+
+/**
+ * @brief Re-enable actions after the persisted presentation is restored.
+ *
+ * This is a compare-and-transition rather than an unconditional enable: if a
+ * client re-entered edit mode while restoration was running, it does nothing.
+ */
+void slate_component_actions_restore_complete(void);
 
 /** @brief Whether a component event may reach the provider-neutral action bus. */
 bool slate_component_actions_enabled(void);

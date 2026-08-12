@@ -36,6 +36,7 @@ export function App() {
   const [token, setToken] = useState<string | null>(() => claimTokenFromUrl() ?? readStoredToken())
   const [phase, setPhase] = useState<Phase>('starting')
   const [pairingError, setPairingError] = useState<string | null>(null)
+  const [pairingNotice, setPairingNotice] = useState<string | null>(null)
   const [info, setInfo] = useState<DeviceInfo | null>(null)
   const [status, setStatus] = useState<DeviceStatus | null>(null)
   const [heartbeat, setHeartbeat] = useState<StatusFrame | null>(null)
@@ -107,6 +108,7 @@ export function App() {
    */
   const admit = useCallback(
     async (candidate: string): Promise<'paired' | 'refused' | 'silent'> => {
+      setPairingNotice(null)
       try {
         setStatus(await client(candidate).status())
       } catch (error) {
@@ -136,6 +138,7 @@ export function App() {
     socketRef.current?.stop()
     socketRef.current = null
     forgetToken()
+    setPairingNotice(null)
     setToken(null)
     setStatus(null)
     setHeartbeat(null)
@@ -370,7 +373,10 @@ export function App() {
     setMode('normal')
     modeRef.current = 'normal'
     setLogs([])
-    setPairingError('Factory reset complete. Wait for the panel to restart, then scan its new pairing QR.')
+    setPairingError(null)
+    setPairingNotice(
+      "Factory reset complete. Follow the panel's network setup screen to reconnect it to Wi-Fi, then scan the new pairing QR.",
+    )
     setPhase('pairing')
   }, [client, token])
 
@@ -569,7 +575,7 @@ export function App() {
   }
 
   if (phase === 'pairing') {
-    return <Pairing info={info} error={pairingError} onSubmit={admit} />
+    return <Pairing info={info} error={pairingError} notice={pairingNotice} onSubmit={admit} />
   }
 
   return (

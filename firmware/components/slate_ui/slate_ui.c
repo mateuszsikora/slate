@@ -1114,10 +1114,15 @@ bool slate_ui_ready(void)
 void slate_ui_mode_set(bool edit)
 {
     atomic_store_explicit(&s_edit_mode, edit, memory_order_release);
-    slate_component_actions_set_enabled(!edit);
+    slate_component_actions_mode_set(edit);
     if (s_ready) {
         schedule_update(NULL);
     }
+}
+
+void slate_ui_mode_restore_complete(void)
+{
+    slate_component_actions_restore_complete();
 }
 
 void slate_ui_network_connected(void)

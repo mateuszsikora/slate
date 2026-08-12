@@ -234,13 +234,15 @@ document. It returns `404 not_found` when neither exists.
 validates the complete document, then atomically replaces the LVGL tree and all
 provider subscriptions. A regular replacement is persisted only after that
 activation succeeds; a transient replacement requires edit mode and never
-writes flash. Leaving edit mode discards a RAM-only transient replacement
-and restores the persisted presentation and subscription set. When persistence
-fails after activation, the submitted document remains the active in-memory
-configuration and the previous persisted document is preserved for the next
-boot. Every activated replacement publishes a `reloaded` WebSocket event, even
-when its subsequent persistence fails. Transient requests outside edit mode
-return `409 edit_mode_required`; any query other than the exact
+writes flash. Leaving edit mode discards a RAM-only transient replacement and
+restores the persisted presentation and subscription set. Semantic touch
+actions remain suppressed until that restoration completes, so a tile that
+exists only in the outgoing preview cannot act during the transition. When
+persistence fails after activation, the submitted document remains the active
+in-memory configuration and the previous persisted document is preserved for
+the next boot. Every activated replacement publishes a `reloaded` WebSocket
+event, even when its subsequent persistence fails. Transient requests outside
+edit mode return `409 edit_mode_required`; any query other than the exact
 `?transient=1` returns `400 invalid_query`; activation and persistence failures
 return `500 apply_failed` and `500 store_failed`, respectively.
 

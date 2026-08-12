@@ -222,6 +222,7 @@ static void restore_on_mode_task(void *ctx)
             continue;
         }
 
+        bool restore_complete = true;
         xSemaphoreTake(s_lock, portMAX_DELAY);
         if (s_transient_json != NULL && slate_ws_mode() == SLATE_WS_MODE_NORMAL) {
             slate_ui_config_info_t info;
@@ -234,12 +235,20 @@ static void restore_on_mode_task(void *ctx)
                 ESP_LOGI(TAG, "discarded transient dashboard on leaving edit mode");
             } else {
                 /* The old presentation stays live when even its replacement could
-                 * not be built; retain its JSON so GET continues to tell the truth. */
+                 * not be built; retain its JSON so GET continues to tell the truth,
+                 * and keep actions suppressed because it is still a preview tree. */
+                restore_complete = false;
                 ESP_LOGE(TAG, "restoring persisted dashboard failed: %s",
                          esp_err_to_name(err));
             }
         }
         xSemaphoreGive(s_lock);
+        if (restore_complete) {
+            /* A concurrent transition back to edit mode changes the component
+             * state first, so the compare-and-transition inside this call
+             * refuses to re-enable actions for the obsolete normal transition. */
+            slate_ui_mode_restore_complete();
+        }
     }
 }
 
@@ -361,7 +370,12 @@ esp_err_t slate_config_api_init(void)
         s_lock = NULL;
         return observer_err;
     }
-    slate_ui_mode_set(slate_ws_mode() == SLATE_WS_MODE_EDIT);
+    bool edit = slate_ws_mode() == SLATE_WS_MODE_EDIT;
+    slate_ui_mode_set(edit);
+    if (!edit) {
+        /* Initial normal mode has no transient tree to restore. */
+        slate_ui_mode_restore_complete();
+    }
 
     const httpd_uri_t get_config = {
         .uri = SLATE_API_BASE_PATH "/config",
