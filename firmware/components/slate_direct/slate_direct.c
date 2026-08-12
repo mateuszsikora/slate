@@ -9,7 +9,6 @@
 
 #include <inttypes.h>
 #include <math.h>
-#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,6 +16,8 @@
 #include "cJSON.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "slate_action.h"
 #include "slate_api.h"
@@ -51,8 +52,10 @@ static const char *TAG = "direct";
  * later consumer attach/detach is constrained by it: a WebSocket callback
  * racing the station-down event cannot accidentally make stale values fresh.
  */
-static atomic_bool s_network_up = ATOMIC_VAR_INIT(true);
-static atomic_bool s_consumer_attached = ATOMIC_VAR_INIT(false);
+static bool s_network_up = true;
+static bool s_consumer_attached;
+static SemaphoreHandle_t s_status_lock;
+static StaticSemaphore_t s_status_lock_storage;
 static bool s_initialized;
 static bool s_started;
 
@@ -404,32 +407,26 @@ static esp_err_t state_handler(httpd_req_t *req)
  * wrong with it: "a read-only direct sensor remains fresh even when no action
  * consumer is attached."
  */
-static void update_provider_status(void)
+/* Caller holds s_status_lock. */
+static void update_provider_status_locked(void)
 {
-    /* The HTTP and event-loop tasks may cross here during a station recovery.
-     * Re-read after publishing so the last status cannot be based on a
-     * consumer snapshot that changed while slate_state took its lock. */
-    bool network_up;
-    bool attached;
-    do {
-        network_up = atomic_load(&s_network_up);
-        attached = atomic_load(&s_consumer_attached);
-        slate_state_provider_set_status(
-            SLATE_DIRECT_PROVIDER_ID,
-            !network_up ? SLATE_PROVIDER_OFFLINE
-                        : attached ? SLATE_PROVIDER_ONLINE : SLATE_PROVIDER_DEGRADED);
-    } while (network_up != atomic_load(&s_network_up) ||
-             attached != atomic_load(&s_consumer_attached));
+    slate_state_provider_set_status(
+        SLATE_DIRECT_PROVIDER_ID,
+        !s_network_up ? SLATE_PROVIDER_OFFLINE
+                      : s_consumer_attached ? SLATE_PROVIDER_ONLINE
+                                            : SLATE_PROVIDER_DEGRADED);
 }
 
 static void consumer_changed(void *ctx, bool attached)
 {
     (void) ctx;
-    atomic_store(&s_consumer_attached, attached);
-    update_provider_status();
+    xSemaphoreTake(s_status_lock, portMAX_DELAY);
+    s_consumer_attached = attached;
+    update_provider_status_locked();
     if (!attached) {
         slate_action_provider_unavailable(SLATE_DIRECT_PROVIDER_ID, "consumer_disconnected");
     }
+    xSemaphoreGive(s_status_lock);
 #ifdef SLATE_DIRECT_SELFTEST
     if (attached) {
         selftest_consumer_attached();
@@ -439,14 +436,22 @@ static void consumer_changed(void *ctx, bool attached)
 
 static void network_changed(bool connected)
 {
-    atomic_store(&s_network_up, connected);
-    update_provider_status();
+    xSemaphoreTake(s_status_lock, portMAX_DELAY);
+    s_network_up = connected;
+    if (!connected) {
+        /* A consumer belongs to the station connection that carried its
+         * WebSocket. Do not let that stale attachment make a fast reconnect
+         * look online before the replacement session attaches. */
+        s_consumer_attached = false;
+    }
+    update_provider_status_locked();
     if (!connected) {
         /* The WebSocket close normally reaches consumer_changed() as well, but
          * the station event is the first authoritative loss and pending state
          * must revert even if the transport takes longer to notice it. */
         slate_action_provider_unavailable(SLATE_DIRECT_PROVIDER_ID, "network_offline");
     }
+    xSemaphoreGive(s_status_lock);
 }
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -501,6 +506,9 @@ esp_err_t slate_direct_dispatch(uint32_t id, const slate_direct_action_t *action
         (unsigned) action->value_type > SLATE_ACTION_VALUE_NUMBER) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (s_status_lock == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
 
     /* Built with cJSON rather than printed, because the resource id is opaque
      * (§3.3) and a quote inside one would otherwise produce a frame that parses
@@ -528,7 +536,11 @@ esp_err_t slate_direct_dispatch(uint32_t id, const slate_direct_action_t *action
     /* The length is the transport's to judge, and only its to judge: a second
      * ceiling here would be a constant to keep in step with one in another
      * component, which is the kind of pair that drifts quietly. */
-    esp_err_t err = slate_ws_provider_send(SLATE_DIRECT_PROVIDER_ID, text, strlen(text));
+    xSemaphoreTake(s_status_lock, portMAX_DELAY);
+    esp_err_t err = s_network_up && s_consumer_attached
+                        ? slate_ws_provider_send(SLATE_DIRECT_PROVIDER_ID, text, strlen(text))
+                        : ESP_ERR_INVALID_STATE;
+    xSemaphoreGive(s_status_lock);
     cJSON_free(text);
 
     if (err != ESP_OK) {
@@ -547,6 +559,12 @@ esp_err_t slate_direct_init(void)
 {
     if (s_initialized) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (s_status_lock == NULL) {
+        s_status_lock = xSemaphoreCreateMutexStatic(&s_status_lock_storage);
+        if (s_status_lock == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
     }
     /*
      * §5.1: the direct provider "is always present". Registering with the store
@@ -620,10 +638,16 @@ esp_err_t slate_direct_start(void)
         return err;
     }
 
-    s_started = true;
+    /* Serialize the initial snapshot with the event callback. If the station
+     * changes after this read, its callback waits and applies the newer state;
+     * if it changed before the lock, the snapshot already contains it. */
+    xSemaphoreTake(s_status_lock, portMAX_DELAY);
     slate_wifi_status_t wifi;
     slate_wifi_status(&wifi);
-    network_changed(wifi.connected);
+    s_network_up = wifi.connected;
+    update_provider_status_locked();
+    s_started = true;
+    xSemaphoreGive(s_status_lock);
     return ESP_OK;
 }
 
@@ -727,16 +751,19 @@ esp_err_t slate_direct_selftest(void)
     CHECK(selftest_bind_fixture() == ESP_OK, "fixture bound in place of a configuration");
 
     slate_resource_t lamp_state;
+    consumer_changed(NULL, true);
+    CHECK(slate_state_provider_status(SLATE_DIRECT_PROVIDER_ID) == SLATE_PROVIDER_ONLINE,
+          "consumer attachment makes provider online");
     wifi_event(NULL, SLATE_WIFI_EVENT, SLATE_WIFI_EVENT_DISCONNECTED, NULL);
     CHECK(slate_state_provider_status(SLATE_DIRECT_PROVIDER_ID) == SLATE_PROVIDER_OFFLINE,
           "station loss makes the provider offline");
     CHECK(slate_state_get(SLATE_DIRECT_PROVIDER_ID, "living-room", &lamp_state) == ESP_OK &&
               lamp_state.presentation == SLATE_PRESENT_STALE,
-          "station loss makes only direct state stale");
+          "station loss makes direct state stale");
 
     wifi_event(NULL, SLATE_WIFI_EVENT, SLATE_WIFI_EVENT_CONNECTED, NULL);
     CHECK(slate_state_provider_status(SLATE_DIRECT_PROVIDER_ID) == SLATE_PROVIDER_DEGRADED,
-          "station recovery restores publish-only mode");
+          "station recovery rejects the stale consumer");
     CHECK(slate_state_get(SLATE_DIRECT_PROVIDER_ID, "living-room", &lamp_state) == ESP_OK &&
               lamp_state.presentation == SLATE_PRESENT_OK,
           "station recovery makes direct state fresh");

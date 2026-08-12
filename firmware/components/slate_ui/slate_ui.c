@@ -167,6 +167,11 @@ static unsigned provider_status_rank(slate_provider_status_t status)
     return 0;
 }
 
+static bool provider_status_unavailable(slate_provider_status_t status)
+{
+    return status != SLATE_PROVIDER_ONLINE && status != SLATE_PROVIDER_DEGRADED;
+}
+
 static void append_upper(char *out, size_t size, const char *text)
 {
     size_t used = strlen(out);
@@ -180,49 +185,48 @@ static void append_upper(char *out, size_t size, const char *text)
 static void provider_summary(char *out, size_t size, uint32_t *color,
                              const slate_theme_t *theme)
 {
-    unsigned selected_rank = 0;
-    slate_provider_status_t selected_status = SLATE_PROVIDER_ONLINE;
+    unsigned worst_rank = 0;
+    bool unavailable = false;
     out[0] = '\0';
 
+    slate_state_provider_info_t providers[SLATE_STATE_MAX_PROVIDERS];
+    size_t active_count = 0;
     size_t provider_count = slate_state_provider_count();
-    for (size_t i = 0; i < provider_count; i++) {
+    for (size_t i = 0; i < provider_count && active_count < SLATE_STATE_MAX_PROVIDERS; i++) {
         slate_state_provider_info_t info;
         if (slate_state_provider_at(i, &info) != ESP_OK || info.resource_count == 0) {
             continue;
         }
+        providers[active_count++] = info;
+        unavailable = unavailable || provider_status_unavailable(info.status);
+    }
 
+    for (size_t i = 0; i < active_count; i++) {
+        slate_state_provider_info_t info = providers[i];
         unsigned rank = provider_status_rank(info.status);
-        if (rank == 0 || rank < selected_rank) {
+        bool include = unavailable ? provider_status_unavailable(info.status)
+                                   : info.status == SLATE_PROVIDER_DEGRADED;
+        if (!include) {
             continue;
         }
-        if (rank > selected_rank) {
-            out[0] = '\0';
-            selected_rank = rank;
-            selected_status = info.status;
-        } else {
+        if (out[0] != '\0') {
             strlcat(out, " + ", size);
         }
         append_upper(out, size, info.id);
+        strlcat(out, " ", size);
+        append_upper(out, size, slate_provider_status_str(info.status));
+        if (rank > worst_rank) {
+            worst_rank = rank;
+        }
     }
 
-    if (selected_rank == 0) {
+    if (worst_rank == 0) {
         strlcpy(out, "PROVIDERS ONLINE", size);
         *color = theme->accent;
         return;
     }
 
-    const char *status = selected_status == SLATE_PROVIDER_ERROR
-                             ? " ERROR"
-                             : selected_status == SLATE_PROVIDER_OFFLINE
-                                   ? " OFFLINE"
-                                   : selected_status == SLATE_PROVIDER_CONNECTING
-                                         ? " CONNECTING"
-                                         : selected_status == SLATE_PROVIDER_UNCONFIGURED
-                                               ? " UNCONFIGURED"
-                                               : " DEGRADED";
-    strlcat(out, status, size);
-    *color = selected_status == SLATE_PROVIDER_ERROR ||
-                     selected_status == SLATE_PROVIDER_OFFLINE
+    *color = worst_rank >= provider_status_rank(SLATE_PROVIDER_CONNECTING)
                  ? theme->warn
                  : theme->text_lo;
 }
@@ -2033,6 +2037,69 @@ static esp_err_t selftest_on_task(void)
                  strcmp(lv_label_get_text(fixture_view->sensor.unit), "°C") == 0,
              "the fixture tile observed the same normalized path");
 
+    ui_tree_t *mixed_tree = s_tree;
+    slate_provider_status_t direct_status_before =
+        slate_state_provider_status("direct");
+    esp_err_t mixed_offline_err =
+        slate_state_provider_set_status("direct", SLATE_PROVIDER_OFFLINE);
+    if (mixed_offline_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(mixed_offline_err == ESP_OK && s_tree == mixed_tree && direct_view != NULL &&
+                 lv_obj_get_style_opa(direct_view->tile, LV_PART_MAIN) == LV_OPA_50 &&
+                 strcmp(lv_label_get_text(direct_view->light.icon), "-") == 0 &&
+                 fixture_view != NULL &&
+                 lv_obj_get_style_opa(fixture_view->tile, LV_PART_MAIN) == LV_OPA_COVER &&
+                 strcmp(lv_label_get_text(fixture_view->sensor.value), "21.4") == 0 &&
+                 strcmp(lv_label_get_text(s_tree->provider), "DIRECT OFFLINE") == 0,
+             "one provider offline leaves its peer fresh without rebuilding");
+
+    esp_err_t connecting_err =
+        slate_state_provider_set_status("direct", SLATE_PROVIDER_CONNECTING);
+    if (connecting_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(connecting_err == ESP_OK && s_tree == mixed_tree &&
+                 strcmp(lv_label_get_text(s_tree->provider), "DIRECT CONNECTING") == 0 &&
+                 lv_color_eq(lv_obj_get_style_text_color(s_tree->provider, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->warn)),
+             "a connecting provider keeps the warning treatment");
+
+    esp_err_t fixture_offline_err =
+        slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_OFFLINE);
+    if (fixture_offline_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(fixture_offline_err == ESP_OK && s_tree == mixed_tree &&
+                 direct_view != NULL &&
+                 lv_obj_get_style_opa(direct_view->tile, LV_PART_MAIN) == LV_OPA_50 &&
+                 fixture_view != NULL &&
+                 lv_obj_get_style_opa(fixture_view->tile, LV_PART_MAIN) == LV_OPA_50 &&
+                 strcmp(lv_label_get_text(s_tree->provider),
+                        "DIRECT CONNECTING + UI-FIXTURE OFFLINE") == 0,
+             "the bar names simultaneous unavailable providers");
+
+    esp_err_t direct_degraded_err =
+        slate_state_provider_set_status("direct", SLATE_PROVIDER_DEGRADED);
+    if (direct_degraded_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(direct_degraded_err == ESP_OK && s_tree == mixed_tree &&
+                 direct_view != NULL &&
+                 lv_obj_get_style_opa(direct_view->tile, LV_PART_MAIN) == LV_OPA_COVER &&
+                 fixture_view != NULL &&
+                 lv_obj_get_style_opa(fixture_view->tile, LV_PART_MAIN) == LV_OPA_50 &&
+                 strcmp(lv_label_get_text(s_tree->provider), "UI-FIXTURE OFFLINE") == 0,
+             "a degraded provider stays fresh without crowding an outage warning");
+    slate_state_provider_set_status("direct", direct_status_before);
+    slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_ONLINE);
+    slate_state_drain(discard_changed, NULL);
+    update_all();
+
     slate_config_t *sensors = sensor_test_config();
     UI_CHECK(sensors != NULL && rebuild_on_task(sensors) == ESP_OK,
              "sensor component test dashboard activated");
@@ -2132,6 +2199,9 @@ static esp_err_t selftest_on_task(void)
                  lv_obj_get_style_opa(humidity->tile, LV_PART_MAIN) == LV_OPA_50,
              "unavailable sensor keeps its unit and renders a dimmed dash");
 
+    ui_tree_t *sensor_tree = s_tree;
+    slate_provider_status_t sensor_direct_status =
+        slate_state_provider_status("direct");
     esp_err_t offline_err =
         slate_state_provider_set_status("direct", SLATE_PROVIDER_OFFLINE);
     if (offline_err == ESP_OK) {
@@ -2141,7 +2211,8 @@ static esp_err_t selftest_on_task(void)
     UI_CHECK(offline_err == ESP_OK && sensor_view_text("temperature", "-", "°C") &&
                  temperature != NULL &&
                  lv_obj_get_style_opa(temperature->tile, LV_PART_MAIN) == LV_OPA_50 &&
-                 strcmp(lv_label_get_text(s_tree->provider), "DIRECT OFFLINE") == 0,
+                 strcmp(lv_label_get_text(s_tree->provider), "DIRECT OFFLINE") == 0 &&
+                 s_tree == sensor_tree,
              "an offline provider dims its sensor and is named in the bar");
 
     esp_err_t online_err =
@@ -2152,7 +2223,8 @@ static esp_err_t selftest_on_task(void)
     }
     UI_CHECK(online_err == ESP_OK && sensor_view_text("temperature", "-12.4", "°C") &&
                  temperature != NULL &&
-                 lv_obj_get_style_opa(temperature->tile, LV_PART_MAIN) == LV_OPA_COVER,
+                 lv_obj_get_style_opa(temperature->tile, LV_PART_MAIN) == LV_OPA_COVER &&
+                 s_tree == sensor_tree,
              "a sensor restores its value when the provider returns online");
 
     esp_err_t degraded_err =
@@ -2164,9 +2236,10 @@ static esp_err_t selftest_on_task(void)
     UI_CHECK(degraded_err == ESP_OK && sensor_view_text("temperature", "-12.4", "°C") &&
                  temperature != NULL &&
                  lv_obj_get_style_opa(temperature->tile, LV_PART_MAIN) == LV_OPA_COVER &&
-                 strcmp(lv_label_get_text(s_tree->provider), "DIRECT DEGRADED") == 0,
+                 strcmp(lv_label_get_text(s_tree->provider), "DIRECT DEGRADED") == 0 &&
+                 s_tree == sensor_tree,
              "a degraded provider keeps state fresh and is named in the bar");
-    slate_state_provider_set_status("direct", SLATE_PROVIDER_ONLINE);
+    slate_state_provider_set_status("direct", sensor_direct_status);
     slate_state_drain(discard_changed, NULL);
     update_all();
 
