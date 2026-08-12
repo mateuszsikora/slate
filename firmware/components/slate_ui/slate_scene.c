@@ -190,9 +190,4 @@ void slate_scene_update(slate_scene_view_t *view, const slate_resource_t *resour
     lv_obj_set_style_text_color(view->icon,
                                 lv_color_hex(success ? theme->text_hi : theme->accent),
                                 LV_PART_MAIN);
-    /* A scene bar shares its outer tile across up to five bindings. Keep the
-     * pending affordance on the one button whose action is in flight. */
-    lv_obj_set_style_border_width(view->button, pending ? 2 : 0, LV_PART_MAIN);
-    lv_obj_set_style_border_color(view->button, lv_color_hex(theme->accent),
-                                  LV_PART_MAIN);
 }

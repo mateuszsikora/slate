@@ -14,7 +14,11 @@ bool slate_component_is_placeholder(slate_presentation_t presentation)
 void slate_component_placeholder_text(const slate_resource_t *resource,
                                       char *out, size_t size)
 {
-    if (resource == NULL || out == NULL || size == 0) {
+    if (out == NULL || size == 0) {
+        return;
+    }
+    out[0] = '\0';
+    if (resource == NULL) {
         return;
     }
 

@@ -2704,6 +2704,7 @@ static esp_err_t selftest_on_task(void)
                                        slate_state_bind(NULL, 0) == ESP_OK &&
                                        rebuild_on_task(scenes) == ESP_OK;
     missing_scene = find_view("ui-fixture", "scene-missing");
+    binding_view_t *peer_scene = find_view("ui-fixture", "scene-movie");
     UI_CHECK(rebound_without_snapshots && missing_scene != NULL &&
                  !lv_obj_has_flag(missing_scene->scene.identity, LV_OBJ_FLAG_HIDDEN) &&
                  strcmp(lv_label_get_text(missing_scene->scene.identity),
@@ -2724,9 +2725,20 @@ static esp_err_t selftest_on_task(void)
         update_all();
     }
     UI_CHECK(wrong_scene_err == ESP_ERR_INVALID_STATE && missing_scene != NULL &&
+                 peer_scene != NULL &&
+                 missing_scene->tile == missing_scene->scene.button &&
+                 peer_scene->tile == peer_scene->scene.button &&
+                 missing_scene->scene.button != peer_scene->scene.button &&
                  strcmp(lv_label_get_text(missing_scene->scene.identity),
-                        "ui-fixture:scene-missing\nExpected scene, got light") == 0,
-             "incompatible scene explains expected and received kinds");
+                        "ui-fixture:scene-missing\nExpected scene, got light") == 0 &&
+                 lv_obj_get_style_border_width(missing_scene->scene.button,
+                                               LV_PART_MAIN) == 2 &&
+                 lv_color_eq(lv_obj_get_style_border_color(
+                                 missing_scene->scene.button, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->warn)) &&
+                 lv_obj_get_style_border_width(peer_scene->scene.button,
+                                               LV_PART_MAIN) == 0,
+             "incompatible scene explains and isolates its warning");
 
     const slate_snapshot_t unavailable_scene = {
         .resource = "scene-missing",
@@ -2742,12 +2754,15 @@ static esp_err_t selftest_on_task(void)
         update_all();
     }
     UI_CHECK(unavailable_scene_err == ESP_OK && missing_scene != NULL &&
+                 peer_scene != NULL &&
                  lv_obj_has_flag(missing_scene->scene.identity, LV_OBJ_FLAG_HIDDEN) &&
                  strcmp(lv_label_get_text(missing_scene->scene.icon), "-") == 0 &&
                  lv_obj_get_style_opa(missing_scene->scene.button, LV_PART_MAIN) ==
                      LV_OPA_50 &&
+                 lv_obj_get_style_opa(peer_scene->scene.button, LV_PART_MAIN) ==
+                     LV_OPA_COVER &&
                  !lv_obj_has_flag(missing_scene->scene.button, LV_OBJ_FLAG_CLICKABLE),
-             "unavailable scene renders a dimmed dash and stays disabled");
+             "unavailable scene dims only its button and stays disabled");
     esp_err_t scene_offline_err =
         slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_OFFLINE);
     if (scene_offline_err == ESP_OK) {

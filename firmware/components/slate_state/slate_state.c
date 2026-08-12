@@ -48,11 +48,11 @@ typedef struct {
 } provider_t;
 
 /*
- * The published half of an entry is what slate_resource_t exposes; the rest is
- * bookkeeping the components have no use for. `mismatch` and `mismatch_kind`
- * outlive the publish that set them because §3.3's incompatible-binding
- * placeholder has to stay on screen after the refusal has been answered, and
- * `changed` is the coalescing the drain is built on.
+ * The fields through `state` form the published half exposed by
+ * slate_resource_t; the rest is store bookkeeping. `mismatch` and
+ * `mismatch_kind` outlive the publish that set them because §3.3's
+ * incompatible-binding placeholder has to stay on screen after the refusal
+ * has been answered, and `changed` is the coalescing the drain is built on.
  */
 typedef struct {
     char provider[SLATE_PROVIDER_ID_MAX + 1];
