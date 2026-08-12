@@ -9,8 +9,9 @@ and optimistic updates), §5.4 (the direct provider).
 This is the reference consumer and the other half of `publish.sh`: it attaches
 to the direct provider, receives the `action` frames a tap produces, applies
 them to a small in-memory model of one light, answers with `action_result`, and
-publishes the resulting §5.2 snapshot back over HTTP. That last step is the one
-worth watching, because §5.3 makes it load-bearing — an `action_result` with
+publishes the resulting §5.2 snapshot back over HTTP. It can model either a
+light or a cover, including the cover's mid-travel `stop` path. That last step
+is the one worth watching, because §5.3 makes it load-bearing — an `action_result` with
 `success: true` acknowledges delivery and nothing more, and it is the matching
 state snapshot that confirms the tile. A consumer that answered and never
 published would leave every tap reverting after three seconds.
@@ -185,6 +186,48 @@ class Light:
         }
 
 
+class Cover:
+    """One position-reporting cover with explicit opening/closing motion."""
+
+    def __init__(self, resource: str = "living-room-blind") -> None:
+        self.resource = resource
+        self.position = 43
+        self.motion = "idle"
+
+    def apply(self, action: str, params: dict) -> bool:
+        if params:
+            return False
+        if action == "toggle":
+            if self.motion != "idle":
+                self.motion = "idle"
+            else:
+                self.motion = "closing" if self.position > 0 else "opening"
+        elif action == "open":
+            self.motion = "opening"
+        elif action == "stop":
+            self.motion = "idle"
+        elif action == "close":
+            self.motion = "closing"
+        else:
+            return False
+        return True
+
+    def snapshot(self) -> dict:
+        return {
+            "resource": self.resource,
+            "kind": "cover",
+            "name": "Living room blind",
+            "available": True,
+            "state": {"position": self.position, "motion": self.motion},
+            "capabilities": {
+                "toggle": True,
+                "open": True,
+                "stop": True,
+                "close": True,
+            },
+        }
+
+
 def publish(base: str, token: str, snapshot: dict) -> None:
     """§5.3's confirmation: the state update, not the acknowledgement."""
     request = urllib.request.Request(
@@ -209,6 +252,12 @@ def main() -> int:
         help="answer every action with success:false — §5.3's immediate revert",
     )
     parser.add_argument("--resource", default="living-room")
+    parser.add_argument(
+        "--kind",
+        choices=("light", "cover"),
+        default="light",
+        help="normalized resource model to serve (default: light)",
+    )
     args = parser.parse_args()
 
     token = os.environ.get("SLATE_TOKEN")
@@ -219,7 +268,7 @@ def main() -> int:
     host = args.host.removeprefix("http://").removeprefix("https://").rstrip("/")
     hostname, _, port = host.partition(":")
     base = f"http://{host}"
-    light = Light(args.resource)
+    model = Light(args.resource) if args.kind == "light" else Cover(args.resource)
 
     ws = WebSocket(hostname, int(port or 80), "/api/v1/ws")
     ws.send(json.dumps({"type": "auth", "token": token}))
@@ -289,7 +338,7 @@ def main() -> int:
                 print("  answered success:false — the tile reverts immediately (§5.3)")
                 continue
 
-            applied = light.apply(action, params)
+            applied = model.apply(action, params)
             ws.send(
                 json.dumps(
                     {
@@ -303,7 +352,7 @@ def main() -> int:
             if applied:
                 # The acknowledgement above says only that the request was
                 # taken. This is what confirms the tile (§5.3).
-                publish(base, token, light.snapshot())
+                publish(base, token, model.snapshot())
     except KeyboardInterrupt:
         return 0
     except ConnectionError as error:

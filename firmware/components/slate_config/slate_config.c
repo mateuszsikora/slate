@@ -387,6 +387,14 @@ static void validate_tile(validation_t *validation, const cJSON *pages,
         return; /* §3.1: a future component is a placeholder, not an error. */
     }
 
+    if (component == SLATE_COMPONENT_COVER && size_ok &&
+        !((width == 1 && height == 1) || (width == 1 && height == 2) ||
+          (width == 2 && height == 1))) {
+        char size_path[160];
+        snprintf(size_path, sizeof(size_path), "%s/size", path);
+        add_error(validation->report, "invalid_size", size_path, bucket);
+    }
+
     if (component == SLATE_COMPONENT_SCENE) {
         const cJSON *bindings = cJSON_GetObjectItemCaseSensitive(tile, "bindings");
         char bindings_path[160];

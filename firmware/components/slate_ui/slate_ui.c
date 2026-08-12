@@ -19,6 +19,7 @@
 #include "lvgl.h"
 
 #include "slate_action.h"
+#include "slate_cover.h"
 #include "slate_display.h"
 #include "slate_light.h"
 #include "slate_scene.h"
@@ -53,6 +54,7 @@ typedef struct {
     lv_obj_t *tile;
     lv_obj_t *name;
     lv_obj_t *detail;
+    slate_cover_view_t cover;
     slate_light_view_t light;
     slate_scene_view_t scene;
     slate_sensor_view_t sensor;
@@ -247,6 +249,12 @@ static void update_view(binding_view_t *view, const slate_resource_t *resource,
 
     if (view->kind == SLATE_KIND_LIGHT && view->light.icon != NULL) {
         slate_light_update(&view->light, resource, &feedback, theme);
+        style_presentation(view, resource->presentation, feedback.phase, theme);
+        return;
+    }
+
+    if (view->kind == SLATE_KIND_COVER && view->cover.icon != NULL) {
+        slate_cover_update(&view->cover, resource, &feedback, theme);
         style_presentation(view, resource->presentation, feedback.phase, theme);
         return;
     }
@@ -491,6 +499,29 @@ static bool build_light_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
     return true;
 }
 
+static bool build_cover_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
+                             lv_obj_t *object, size_t *view_index)
+{
+    const slate_config_binding_t *binding = &tile->bindings[0];
+    binding_view_t *view = &tree->views[(*view_index)++];
+
+    if (strlcpy(view->provider, binding->provider, sizeof(view->provider)) >=
+            sizeof(view->provider) ||
+        strlcpy(view->resource, binding->resource, sizeof(view->resource)) >=
+            sizeof(view->resource)) {
+        return false;
+    }
+    view->kind = SLATE_KIND_COVER;
+    view->label_override = tile->label != NULL;
+    view->tile = object;
+    if (!slate_cover_build(object, tile, tree->theme, &view->cover,
+                           view->provider, view->resource)) {
+        return false;
+    }
+    view->name = view->cover.name;
+    return true;
+}
+
 static bool build_scene_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
                              lv_obj_t *object, size_t *view_index)
 {
@@ -611,6 +642,11 @@ static ui_tree_t *build_config_tree(const slate_config_t *config)
             }
         } else if (tile->component == SLATE_COMPONENT_SENSOR) {
             if (!build_sensor_tile(tree, tile, object, &view_index)) {
+                tree_destroy(tree);
+                return NULL;
+            }
+        } else if (tile->component == SLATE_COMPONENT_COVER) {
+            if (!build_cover_tile(tree, tile, object, &view_index)) {
                 tree_destroy(tree);
                 return NULL;
             }
@@ -1289,6 +1325,33 @@ static slate_config_t *light_action_test_config(void)
     return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
 }
 
+static slate_config_t *cover_test_config(void)
+{
+    static const char JSON[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"covers\",\"pages\":[{"
+        "\"id\":\"covers\",\"title\":\"Cover component #25\",\"tiles\":["
+        "{\"id\":\"compact\",\"type\":\"cover\",\"pos\":[0,0],\"size\":[1,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"cover-compact\"}},"
+        "{\"id\":\"horizontal\",\"type\":\"cover\",\"pos\":[1,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"cover-horizontal\"}},"
+        "{\"id\":\"missing\",\"type\":\"cover\",\"pos\":[3,0],\"size\":[1,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"cover-missing\"}},"
+        "{\"id\":\"vertical\",\"type\":\"cover\",\"label\":\"Bedroom curtain\","
+        "\"icon\":\"curtains\",\"pos\":[0,1],\"size\":[1,2],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"cover-vertical\"}},"
+        "{\"id\":\"unavailable\",\"type\":\"cover\",\"pos\":[1,1],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"cover-unavailable\"}},"
+        "{\"id\":\"wrong\",\"type\":\"cover\",\"pos\":[3,1],\"size\":[1,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"cover-wrong\"}}]}]}";
+
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
 static slate_config_t *scene_test_config(void)
 {
     static const char JSON[] =
@@ -1677,6 +1740,62 @@ static esp_err_t publish_action_test_states(bool toggled, int16_t brightness,
     if (err == ESP_OK) {
         slate_state_drain(discard_changed, NULL);
         update_all();
+    }
+    return err;
+}
+
+static slate_capabilities_t cover_test_capabilities(void)
+{
+    return (slate_capabilities_t) {
+        .actions = (1u << SLATE_ACTION_TOGGLE) | (1u << SLATE_ACTION_OPEN) |
+                   (1u << SLATE_ACTION_STOP) | (1u << SLATE_ACTION_CLOSE),
+    };
+}
+
+static esp_err_t publish_cover_state(const char *resource, int16_t position,
+                                     slate_cover_motion_t motion, bool available)
+{
+    const slate_snapshot_t snapshot = {
+        .resource = resource,
+        .kind = SLATE_KIND_COVER,
+        .name = "Provider cover name",
+        .available = available,
+        .capabilities = cover_test_capabilities(),
+        .state.cover = {.position = position, .motion = motion},
+    };
+    esp_err_t err = slate_state_publish("ui-fixture", &snapshot);
+    if (err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    return err;
+}
+
+static esp_err_t publish_cover_test_states(void)
+{
+    esp_err_t err = publish_cover_state("cover-compact", 0, SLATE_COVER_IDLE, true);
+    if (err == ESP_OK) {
+        err = publish_cover_state("cover-horizontal", 43, SLATE_COVER_OPENING, true);
+    }
+    if (err == ESP_OK) {
+        err = publish_cover_state("cover-vertical", 100, SLATE_COVER_IDLE, true);
+    }
+    if (err == ESP_OK) {
+        err = publish_cover_state("cover-unavailable", 62, SLATE_COVER_IDLE, false);
+    }
+    if (err == ESP_OK) {
+        const slate_snapshot_t wrong = {
+            .resource = "cover-wrong",
+            .kind = SLATE_KIND_SENSOR,
+            .available = true,
+            .state.sensor = {.numeric = false, .text = "wrong kind"},
+        };
+        err = slate_state_publish("ui-fixture", &wrong);
+        if (err == ESP_ERR_INVALID_STATE) {
+            slate_state_drain(discard_changed, NULL);
+            update_all();
+            err = ESP_OK;
+        }
     }
     return err;
 }
@@ -2264,6 +2383,163 @@ static esp_err_t selftest_on_task(void)
                  strcmp(lv_label_get_text(action_temperature->light.temperature_value),
                         "4100 K") == 0,
              "confirmed colour temperature clears pending presentation");
+
+    slate_config_t *covers = cover_test_config();
+    UI_CHECK(covers != NULL && rebuild_on_task(covers) == ESP_OK && verify_layout(covers),
+             "all three cover layouts activated on the exact grid");
+    UI_CHECK(publish_cover_test_states() == ESP_OK,
+             "cover variants received normalized state");
+
+    binding_view_t *compact_cover = find_view("ui-fixture", "cover-compact");
+    binding_view_t *horizontal_cover = find_view("ui-fixture", "cover-horizontal");
+    binding_view_t *vertical_cover = find_view("ui-fixture", "cover-vertical");
+    binding_view_t *missing_cover = find_view("ui-fixture", "cover-missing");
+    binding_view_t *unavailable_cover = find_view("ui-fixture", "cover-unavailable");
+    binding_view_t *wrong_cover = find_view("ui-fixture", "cover-wrong");
+    lv_obj_update_layout(s_tree->screen);
+    bool cover_targets_ok = horizontal_cover != NULL && vertical_cover != NULL &&
+                            lv_obj_get_width(horizontal_cover->cover.open_button) >= 48 &&
+                            lv_obj_get_height(horizontal_cover->cover.open_button) >= 48 &&
+                            lv_obj_get_width(horizontal_cover->cover.stop_button) >= 48 &&
+                            lv_obj_get_height(horizontal_cover->cover.stop_button) >= 48 &&
+                            lv_obj_get_width(horizontal_cover->cover.close_button) >= 48 &&
+                            lv_obj_get_height(horizontal_cover->cover.close_button) >= 48 &&
+                            lv_obj_get_width(vertical_cover->cover.open_button) >= 48 &&
+                            lv_obj_get_height(vertical_cover->cover.open_button) >= 48 &&
+                            lv_obj_get_width(vertical_cover->cover.stop_button) >= 48 &&
+                            lv_obj_get_height(vertical_cover->cover.stop_button) >= 48 &&
+                            lv_obj_get_width(vertical_cover->cover.close_button) >= 48 &&
+                            lv_obj_get_height(vertical_cover->cover.close_button) >= 48;
+    UI_CHECK(cover_targets_ok, "1x2 and 2x1 cover controls meet the 48 px target");
+    UI_CHECK(compact_cover != NULL && compact_cover->cover.compact &&
+                 strcmp(lv_label_get_text(compact_cover->cover.icon),
+                        SLATE_ICON_WINDOW_SHUTTER) == 0 &&
+                 strcmp(lv_label_get_text(compact_cover->cover.position), "0%") == 0 &&
+                 lv_obj_has_flag(compact_cover->tile, LV_OBJ_FLAG_CLICKABLE) &&
+                 vertical_cover != NULL && vertical_cover->cover.vertical &&
+                 strcmp(lv_label_get_text(vertical_cover->cover.name),
+                        "Bedroom curtain") == 0 &&
+                 strcmp(lv_label_get_text(vertical_cover->cover.icon),
+                        SLATE_ICON_CURTAINS) == 0,
+             "compact icon follows position and configured overrides survive state");
+    UI_CHECK(horizontal_cover != NULL && horizontal_cover->cover.motion_animation &&
+                 !lv_obj_has_flag(horizontal_cover->cover.motion, LV_OBJ_FLAG_HIDDEN) &&
+                 strcmp(lv_label_get_text(horizontal_cover->cover.motion),
+                        SLATE_ICON_ARROW_UP) == 0 &&
+                 lv_obj_has_flag(horizontal_cover->cover.stop_button,
+                                 LV_OBJ_FLAG_CLICKABLE),
+             "opening cover animates its direction and enables stop");
+    UI_CHECK(missing_cover != NULL &&
+                 !lv_obj_has_flag(missing_cover->cover.identity, LV_OBJ_FLAG_HIDDEN) &&
+                 strcmp(lv_label_get_text(missing_cover->cover.identity),
+                        "ui-fixture:cover-missing") == 0 &&
+                 wrong_cover != NULL &&
+                 !lv_obj_has_flag(wrong_cover->cover.identity, LV_OBJ_FLAG_HIDDEN) &&
+                 strcmp(lv_label_get_text(wrong_cover->cover.identity),
+                        "ui-fixture:cover-wrong") == 0,
+             "missing and incompatible covers identify the provider-qualified resource");
+    UI_CHECK(unavailable_cover != NULL &&
+                 strcmp(lv_label_get_text(unavailable_cover->cover.position), "-") == 0 &&
+                 lv_obj_get_style_opa(unavailable_cover->tile, LV_PART_MAIN) == LV_OPA_50 &&
+                 !lv_obj_has_flag(unavailable_cover->cover.open_button,
+                                  LV_OBJ_FLAG_CLICKABLE),
+             "unavailable cover renders a dimmed dash and disables controls");
+
+    unsigned cover_calls = s_fixture.action_calls;
+    lv_result_t compact_toggle = compact_cover != NULL
+                                     ? lv_obj_send_event(compact_cover->tile,
+                                                         LV_EVENT_CLICKED, NULL)
+                                     : LV_RESULT_INVALID;
+    slate_action_feedback_t cover_feedback = {0};
+    esp_err_t cover_feedback_err =
+        slate_action_feedback("ui-fixture", "cover-compact", &cover_feedback);
+    update_all();
+    UI_CHECK(compact_toggle == LV_RESULT_OK &&
+                 s_fixture.action_calls == cover_calls + 1 &&
+                 s_fixture.action == SLATE_ACTION_TOGGLE &&
+                 strcmp(s_fixture.action_resource, "cover-compact") == 0 &&
+                 cover_feedback_err == ESP_OK &&
+                 cover_feedback.phase == SLATE_ACTION_PENDING &&
+                 cover_feedback.optimistic.cover.motion == SLATE_COVER_OPENING,
+             "1x1 cover tap emits an optimistic semantic toggle");
+    UI_CHECK(publish_cover_state("cover-compact", 0, SLATE_COVER_OPENING, true) == ESP_OK &&
+                 slate_action_feedback("ui-fixture", "cover-compact", &cover_feedback) ==
+                     ESP_OK &&
+                 cover_feedback.phase == SLATE_ACTION_IDLE && compact_cover != NULL &&
+                 compact_cover->cover.motion_animation,
+             "confirmed opening state clears pending while motion keeps animating");
+
+    cover_calls = s_fixture.action_calls;
+    lv_result_t stop_result = horizontal_cover != NULL
+                                  ? lv_obj_send_event(horizontal_cover->cover.stop_button,
+                                                      LV_EVENT_CLICKED, NULL)
+                                  : LV_RESULT_INVALID;
+    cover_feedback_err =
+        slate_action_feedback("ui-fixture", "cover-horizontal", &cover_feedback);
+    update_all();
+    UI_CHECK(stop_result == LV_RESULT_OK && s_fixture.action_calls == cover_calls + 1 &&
+                 s_fixture.action == SLATE_ACTION_STOP &&
+                 strcmp(s_fixture.action_resource, "cover-horizontal") == 0 &&
+                 cover_feedback_err == ESP_OK &&
+                 cover_feedback.phase == SLATE_ACTION_PENDING &&
+                 cover_feedback.optimistic.cover.motion == SLATE_COVER_IDLE &&
+                 horizontal_cover != NULL && !horizontal_cover->cover.motion_animation,
+             "mid-travel stop immediately settles the optimistic motion indicator");
+    slate_action_result("ui-fixture", s_fixture.action_id, true, NULL);
+    update_all();
+    UI_CHECK(publish_cover_state("cover-horizontal", 45, SLATE_COVER_IDLE, true) == ESP_OK &&
+                 slate_action_feedback("ui-fixture", "cover-horizontal", &cover_feedback) ==
+                     ESP_OK &&
+                 cover_feedback.phase == SLATE_ACTION_IDLE && horizontal_cover != NULL &&
+                 !horizontal_cover->cover.motion_animation &&
+                 lv_obj_has_flag(horizontal_cover->cover.open_button,
+                                 LV_OBJ_FLAG_CLICKABLE) &&
+                 !lv_obj_has_flag(horizontal_cover->cover.stop_button,
+                                  LV_OBJ_FLAG_CLICKABLE) &&
+                 lv_obj_has_flag(horizontal_cover->cover.close_button,
+                                 LV_OBJ_FLAG_CLICKABLE),
+             "idle snapshot confirms stop and restores directional controls");
+
+    bool directional_actions_ok = horizontal_cover != NULL;
+    if (horizontal_cover != NULL) {
+        lv_obj_t *buttons[] = {
+            horizontal_cover->cover.open_button,
+            horizontal_cover->cover.close_button,
+        };
+        slate_action_t actions[] = {SLATE_ACTION_OPEN, SLATE_ACTION_CLOSE};
+        for (size_t i = 0; i < 2; i++) {
+            cover_calls = s_fixture.action_calls;
+            directional_actions_ok = directional_actions_ok &&
+                                     lv_obj_send_event(buttons[i], LV_EVENT_CLICKED, NULL) ==
+                                         LV_RESULT_OK &&
+                                     s_fixture.action_calls == cover_calls + 1 &&
+                                     s_fixture.action == actions[i];
+            slate_action_result("ui-fixture", s_fixture.action_id, false,
+                                "fixture_reset");
+            update_all();
+        }
+    }
+    UI_CHECK(directional_actions_ok,
+             "2x1 controls emit provider-neutral open and close actions");
+
+    esp_err_t cover_offline_err =
+        slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_OFFLINE);
+    if (cover_offline_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(cover_offline_err == ESP_OK && horizontal_cover != NULL &&
+                 strcmp(lv_label_get_text(horizontal_cover->cover.position), "-") == 0 &&
+                 lv_obj_get_style_opa(horizontal_cover->tile, LV_PART_MAIN) == LV_OPA_50 &&
+                 !lv_obj_has_flag(horizontal_cover->cover.open_button,
+                                  LV_OBJ_FLAG_CLICKABLE),
+             "offline cover stays visible with stale controls disabled");
+    slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_ONLINE);
+    slate_state_drain(discard_changed, NULL);
+    update_all();
+    if (covers != NULL) {
+        slate_config_free(covers);
+    }
 
     slate_config_t *scenes = scene_test_config();
     UI_CHECK(scenes != NULL && rebuild_on_task(scenes) == ESP_OK,

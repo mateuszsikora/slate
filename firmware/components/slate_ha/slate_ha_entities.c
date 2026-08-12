@@ -19,6 +19,10 @@
 #define HA_STATE_MAX        31
 #define HA_DEVICE_CLASS_MAX 31
 
+#define HA_COVER_FEATURE_OPEN         (1u << 0)
+#define HA_COVER_FEATURE_CLOSE        (1u << 1)
+#define HA_COVER_FEATURE_STOP         (1u << 3)
+
 static const char *TAG = "slate_ha_entities";
 
 typedef struct {
@@ -53,12 +57,18 @@ typedef struct {
     bool has_supported_color_modes;
     bool brightness_mode;
     bool color_temp_mode;
+    bool has_current_position;
+    double current_position;
+    bool has_supported_features;
+    double supported_features;
 
     char normalized_name[SLATE_RESOURCE_NAME_MAX + 1];
     slate_capabilities_t normalized_capabilities;
     slate_light_state_t normalized_light;
+    slate_cover_state_t normalized_cover;
     slate_sensor_state_t normalized_sensor;
     bool normalized_light_ready;
+    bool normalized_cover_ready;
     bool normalized_sensor_ready;
 } ha_entity_t;
 
@@ -111,6 +121,8 @@ static void clear_raw_attributes(ha_entity_t *entity)
     entity->has_supported_color_modes = false;
     entity->brightness_mode = false;
     entity->color_temp_mode = false;
+    entity->has_current_position = false;
+    entity->has_supported_features = false;
 }
 
 static void set_supported_color_modes(ha_entity_t *entity, const cJSON *item)
@@ -179,6 +191,10 @@ static void set_attribute(ha_entity_t *entity, const char *name, const cJSON *it
         entity->has_max_mireds = number_value(item, &entity->max_mireds);
     } else if (strcmp(name, "supported_color_modes") == 0) {
         set_supported_color_modes(entity, item);
+    } else if (strcmp(name, "current_position") == 0) {
+        entity->has_current_position = number_value(item, &entity->current_position);
+    } else if (strcmp(name, "supported_features") == 0) {
+        entity->has_supported_features = number_value(item, &entity->supported_features);
     }
 }
 
@@ -209,6 +225,10 @@ static void remove_attribute(ha_entity_t *entity, const char *name)
         entity->has_supported_color_modes = false;
         entity->brightness_mode = false;
         entity->color_temp_mode = false;
+    } else if (strcmp(name, "current_position") == 0) {
+        entity->has_current_position = false;
+    } else if (strcmp(name, "supported_features") == 0) {
+        entity->has_supported_features = false;
     }
 }
 
@@ -293,6 +313,28 @@ static int16_t rounded_i16(double value)
 static int16_t mired_to_kelvin(double value)
 {
     return value > 0 ? rounded_i16(1000000.0 / value) : SLATE_STATE_ABSENT;
+}
+
+static bool cover_state_current(const ha_entity_t *entity)
+{
+    if (!entity->present || !entity->has_state) {
+        return false;
+    }
+    return strcmp(entity->raw_state, "open") == 0 ||
+           strcmp(entity->raw_state, "closed") == 0 ||
+           strcmp(entity->raw_state, "opening") == 0 ||
+           strcmp(entity->raw_state, "closing") == 0 ||
+           strcmp(entity->raw_state, "stopped") == 0;
+}
+
+static uint32_t cover_features(const ha_entity_t *entity)
+{
+    if (!entity->has_supported_features || entity->supported_features < 0 ||
+        entity->supported_features > UINT32_MAX ||
+        floor(entity->supported_features) != entity->supported_features) {
+        return 0;
+    }
+    return (uint32_t) entity->supported_features;
 }
 
 static slate_measurement_t measurement(const ha_entity_t *entity)
@@ -395,6 +437,49 @@ static bool normalize_entity(ha_entity_t *entity, ha_entity_t *out,
             entity->normalized_capabilities = caps;
         }
         *available = current;
+    } else if (domain_is(entity->resource, "cover")) {
+        *kind = SLATE_KIND_COVER;
+        bool current = cover_state_current(entity);
+        if (!entity->normalized_cover_ready) {
+            entity->normalized_cover.position = SLATE_STATE_ABSENT;
+            entity->normalized_cover.motion = SLATE_COVER_IDLE;
+            entity->normalized_cover_ready = true;
+        }
+        if (current) {
+            if (entity->has_current_position && entity->current_position >= 0 &&
+                entity->current_position <= 100) {
+                entity->normalized_cover.position =
+                    (int16_t) lround(entity->current_position);
+            } else if (strcmp(entity->raw_state, "open") == 0) {
+                entity->normalized_cover.position = 100;
+            } else if (strcmp(entity->raw_state, "closed") == 0) {
+                entity->normalized_cover.position = 0;
+            }
+            entity->normalized_cover.motion =
+                strcmp(entity->raw_state, "opening") == 0
+                    ? SLATE_COVER_OPENING
+                    : strcmp(entity->raw_state, "closing") == 0
+                          ? SLATE_COVER_CLOSING
+                          : SLATE_COVER_IDLE;
+
+            uint32_t features = cover_features(entity);
+            slate_capabilities_t caps = {0};
+            if ((features & (HA_COVER_FEATURE_OPEN | HA_COVER_FEATURE_CLOSE)) ==
+                (HA_COVER_FEATURE_OPEN | HA_COVER_FEATURE_CLOSE)) {
+                caps.actions |= 1u << SLATE_ACTION_TOGGLE;
+            }
+            if ((features & HA_COVER_FEATURE_OPEN) != 0) {
+                caps.actions |= 1u << SLATE_ACTION_OPEN;
+            }
+            if ((features & HA_COVER_FEATURE_STOP) != 0) {
+                caps.actions |= 1u << SLATE_ACTION_STOP;
+            }
+            if ((features & HA_COVER_FEATURE_CLOSE) != 0) {
+                caps.actions |= 1u << SLATE_ACTION_CLOSE;
+            }
+            entity->normalized_capabilities = caps;
+        }
+        *available = current;
     } else if (domain_is(entity->resource, "sensor")) {
         *kind = SLATE_KIND_SENSOR;
         bool current = entity->present && entity->has_state &&
@@ -454,6 +539,8 @@ static esp_err_t publish_copy(const ha_entity_t *entity, slate_kind_t kind, bool
     };
     if (kind == SLATE_KIND_LIGHT) {
         snapshot.state.light = entity->normalized_light;
+    } else if (kind == SLATE_KIND_COVER) {
+        snapshot.state.cover = entity->normalized_cover;
     } else if (kind == SLATE_KIND_SENSOR) {
         snapshot.state.sensor = entity->normalized_sensor;
     }
@@ -721,18 +808,20 @@ esp_err_t slate_ha_entities_selftest(void)
 
     const char *ids[] = {
         "light.kitchen",
+        "cover.office_blind",
         "sensor.room_temperature",
         "scene.relax",
     };
     bool binding_changed = false;
-    CHECK(slate_ha_entities_bind(ids, 3, &binding_changed) == ESP_OK && binding_changed,
+    CHECK(slate_ha_entities_bind(ids, 4, &binding_changed) == ESP_OK && binding_changed,
           "bind explicit entity ids");
     const char *reordered[] = {
         "scene.relax",
         "sensor.room_temperature",
+        "cover.office_blind",
         "light.kitchen",
     };
-    CHECK(slate_ha_entities_bind(reordered, 3, &binding_changed) == ESP_OK &&
+    CHECK(slate_ha_entities_bind(reordered, 4, &binding_changed) == ESP_OK &&
               !binding_changed,
           "unchanged entity set avoids resubscription");
     const char *duplicates[] = {"light.kitchen", "light.kitchen"};
@@ -746,6 +835,9 @@ esp_err_t slate_ha_entities_selftest(void)
         "{\"a\":{\"light.kitchen\":{\"s\":\"on\",\"a\":{"
         "\"friendly_name\":\"Kitchen\",\"brightness\":128,"
         "\"supported_color_modes\":[\"brightness\"]}},"
+        "\"cover.office_blind\":{\"s\":\"opening\",\"a\":{"
+        "\"friendly_name\":\"Office blind\",\"current_position\":43,"
+        "\"supported_features\":15}},"
         "\"sensor.room_temperature\":{\"s\":\"21.5\",\"a\":{"
         "\"friendly_name\":\"Room temperature\","
         "\"unit_of_measurement\":\"°C\",\"device_class\":\"temperature\"}},"
@@ -757,20 +849,25 @@ esp_err_t slate_ha_entities_selftest(void)
     cJSON_Delete(initial);
 
     ha_entity_t light;
+    ha_entity_t cover;
     ha_entity_t sensor;
     ha_entity_t scene;
     slate_kind_t light_kind;
+    slate_kind_t cover_kind;
     slate_kind_t sensor_kind;
     slate_kind_t scene_kind;
     bool light_available = false;
+    bool cover_available = false;
     bool sensor_available = false;
     bool scene_available = false;
     LOCK();
     bool mapped_light = normalize_entity(find_entity(ids[0]), &light, &light_kind,
                                           &light_available);
-    bool mapped_sensor = normalize_entity(find_entity(ids[1]), &sensor, &sensor_kind,
+    bool mapped_cover = normalize_entity(find_entity(ids[1]), &cover, &cover_kind,
+                                          &cover_available);
+    bool mapped_sensor = normalize_entity(find_entity(ids[2]), &sensor, &sensor_kind,
                                            &sensor_available);
-    bool mapped_scene = normalize_entity(find_entity(ids[2]), &scene, &scene_kind,
+    bool mapped_scene = normalize_entity(find_entity(ids[3]), &scene, &scene_kind,
                                           &scene_available);
     UNLOCK();
     CHECK(mapped_light && light_kind == SLATE_KIND_LIGHT && light_available &&
@@ -778,6 +875,51 @@ esp_err_t slate_ha_entities_selftest(void)
               slate_capabilities_have(&light.normalized_capabilities,
                                       SLATE_ACTION_SET_BRIGHTNESS),
           "map light state and capability");
+    CHECK(mapped_cover && cover_kind == SLATE_KIND_COVER && cover_available &&
+              cover.normalized_cover.position == 43 &&
+              cover.normalized_cover.motion == SLATE_COVER_OPENING &&
+              slate_capabilities_have(&cover.normalized_capabilities,
+                                      SLATE_ACTION_TOGGLE) &&
+              slate_capabilities_have(&cover.normalized_capabilities,
+                                      SLATE_ACTION_OPEN) &&
+              slate_capabilities_have(&cover.normalized_capabilities,
+                                      SLATE_ACTION_STOP) &&
+              slate_capabilities_have(&cover.normalized_capabilities,
+                                      SLATE_ACTION_CLOSE) &&
+              !slate_capabilities_have(&cover.normalized_capabilities,
+                                       SLATE_ACTION_SET_POSITION),
+          "map cover position, motion and feature bits");
+
+    cJSON *cover_change = cJSON_Parse(
+        "{\"c\":{\"cover.office_blind\":{\"+\":{\"s\":\"closing\","
+        "\"a\":{\"current_position\":62}}}}}"
+    );
+    CHECK(cover_change != NULL && process_event(cover_change, false) == ESP_OK,
+          "apply compressed cover motion update");
+    cJSON_Delete(cover_change);
+    LOCK();
+    mapped_cover = normalize_entity(find_entity(ids[1]), &cover, &cover_kind,
+                                    &cover_available);
+    UNLOCK();
+    CHECK(mapped_cover && cover_available && cover.normalized_cover.position == 62 &&
+              cover.normalized_cover.motion == SLATE_COVER_CLOSING,
+          "map a mid-travel closing cover");
+
+    cJSON *cover_unavailable = cJSON_Parse(
+        "{\"c\":{\"cover.office_blind\":{\"+\":{\"s\":\"unavailable\"}}}}"
+    );
+    CHECK(cover_unavailable != NULL &&
+              process_event(cover_unavailable, false) == ESP_OK,
+          "apply unavailable cover state");
+    cJSON_Delete(cover_unavailable);
+    LOCK();
+    mapped_cover = normalize_entity(find_entity(ids[1]), &cover, &cover_kind,
+                                    &cover_available);
+    UNLOCK();
+    CHECK(mapped_cover && !cover_available && cover.normalized_cover.position == 62 &&
+              cover.normalized_cover.motion == SLATE_COVER_CLOSING,
+          "unavailable cover keeps its last normalized state");
+
     CHECK(mapped_sensor && sensor_kind == SLATE_KIND_SENSOR && sensor_available &&
               sensor.normalized_sensor.numeric && sensor.normalized_sensor.value == 21.5 &&
               sensor.normalized_sensor.measurement == SLATE_MEASUREMENT_TEMPERATURE &&
@@ -813,7 +955,7 @@ esp_err_t slate_ha_entities_selftest(void)
           "accept long textual sensor state");
     cJSON_Delete(long_number);
     LOCK();
-    mapped_sensor = normalize_entity(find_entity(ids[1]), &sensor, &sensor_kind,
+    mapped_sensor = normalize_entity(find_entity(ids[2]), &sensor, &sensor_kind,
                                      &sensor_available);
     UNLOCK();
     CHECK(mapped_sensor && sensor_available && sensor.normalized_sensor.numeric &&
@@ -832,7 +974,7 @@ esp_err_t slate_ha_entities_selftest(void)
           "expand entity removal");
     cJSON_Delete(removed);
     LOCK();
-    mapped_sensor = normalize_entity(find_entity(ids[1]), &sensor, &sensor_kind,
+    mapped_sensor = normalize_entity(find_entity(ids[2]), &sensor, &sensor_kind,
                                      &sensor_available);
     UNLOCK();
     CHECK(mapped_sensor && !sensor_available && sensor.normalized_sensor.numeric &&
