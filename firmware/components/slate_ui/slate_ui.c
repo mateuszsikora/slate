@@ -1250,15 +1250,16 @@ static char *test_config_json(int cycle)
     if (json == NULL) {
         return NULL;
     }
+    const char *theme = cycle % 2 == 0 ? "midnight" : "minimal-light";
     int written = snprintf(json, capacity,
-                           "{\"schema\":1,\"theme\":\"midnight\","
+                           "{\"schema\":1,\"theme\":\"%s\","
                            "\"home_page\":\"home\",\"pages\":[{\"id\":\"home\","
                            "\"title\":\"Runtime cycle %d\",\"tiles\":[%s]},"
                            "{\"id\":\"secondary\",\"title\":\"Secondary\",\"tiles\":["
                            "{\"id\":\"offscreen\",\"type\":\"sensor\","
                            "\"pos\":[0,0],\"size\":[1,1],\"binding\":{"
                            "\"provider\":\"ui-fixture\",\"resource\":\"offscreen\"}}]}]}",
-                           cycle, layout);
+                           theme, cycle, layout);
     if (written < 0 || (size_t) written >= capacity) {
         free(json);
         return NULL;
@@ -1283,7 +1284,7 @@ static slate_config_t *test_config(int cycle)
 static slate_config_t *sensor_test_config(void)
 {
     static const char JSON[] =
-        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"sensors\",\"pages\":[{"
+        "{\"schema\":1,\"theme\":\"minimal-light\",\"home_page\":\"sensors\",\"pages\":[{"
         "\"id\":\"sensors\",\"title\":\"Sensor component #23\",\"tiles\":["
         "{\"id\":\"temperature\",\"type\":\"sensor\",\"pos\":[0,0],\"size\":[1,1],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"temperature\"}},"
@@ -1313,7 +1314,7 @@ static slate_config_t *sensor_test_config(void)
 static slate_config_t *sensor_icon_test_config(void)
 {
     static const char JSON[] =
-        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"icons\",\"pages\":[{"
+        "{\"schema\":1,\"theme\":\"minimal-light\",\"home_page\":\"icons\",\"pages\":[{"
         "\"id\":\"icons\",\"tiles\":["
         "{\"id\":\"temperature\",\"type\":\"sensor\",\"pos\":[0,0],\"size\":[2,1],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"temperature\"}},"
@@ -1337,7 +1338,7 @@ static slate_config_t *sensor_icon_test_config(void)
 static slate_config_t *light_test_config(void)
 {
     static const char JSON[] =
-        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"lights\",\"pages\":[{"
+        "{\"schema\":1,\"theme\":\"minimal-light\",\"home_page\":\"lights\",\"pages\":[{"
         "\"id\":\"lights\",\"title\":\"Light component #22\",\"tiles\":["
         "{\"id\":\"compact\",\"type\":\"light\",\"pos\":[0,0],\"size\":[1,1],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"living-room\"}},"
@@ -1364,7 +1365,7 @@ static slate_config_t *light_test_config(void)
 static slate_config_t *light_layout_test_config(void)
 {
     static const char JSON[] =
-        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"layouts\",\"pages\":[{"
+        "{\"schema\":1,\"theme\":\"minimal-light\",\"home_page\":\"layouts\",\"pages\":[{"
         "\"id\":\"layouts\",\"title\":\"Light layout fallbacks #22\",\"tiles\":["
         "{\"id\":\"vertical\",\"type\":\"light\",\"pos\":[0,0],\"size\":[1,2],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"living-room\"}},"
@@ -1382,7 +1383,7 @@ static slate_config_t *light_layout_test_config(void)
 static slate_config_t *light_action_test_config(void)
 {
     static const char JSON[] =
-        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"actions\",\"pages\":[{"
+        "{\"schema\":1,\"theme\":\"minimal-light\",\"home_page\":\"actions\",\"pages\":[{"
         "\"id\":\"actions\",\"title\":\"Light actions #22\",\"tiles\":["
         "{\"id\":\"toggle\",\"type\":\"light\",\"pos\":[0,0],\"size\":[1,1],"
         "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"action-toggle\"}},"
@@ -1403,7 +1404,7 @@ static slate_config_t *light_action_test_config(void)
 static slate_config_t *cover_test_config(void)
 {
     static const char JSON[] =
-        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"covers\",\"pages\":[{"
+        "{\"schema\":1,\"theme\":\"minimal-light\",\"home_page\":\"covers\",\"pages\":[{"
         "\"id\":\"covers\",\"title\":\"Cover component #25\",\"tiles\":["
         "{\"id\":\"compact\",\"type\":\"cover\",\"pos\":[0,0],\"size\":[1,1],"
         "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"cover-compact\"}},"
@@ -1430,7 +1431,7 @@ static slate_config_t *cover_test_config(void)
 static slate_config_t *scene_test_config(void)
 {
     static const char JSON[] =
-        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"scenes\",\"pages\":[{"
+        "{\"schema\":1,\"theme\":\"minimal-light\",\"home_page\":\"scenes\",\"pages\":[{"
         "\"id\":\"scenes\",\"title\":\"Scene component #26\",\"tiles\":["
         "{\"id\":\"bar\",\"type\":\"scene\",\"pos\":[0,0],\"size\":[4,1],"
         "\"bindings\":["
@@ -1938,6 +1939,38 @@ static esp_err_t selftest_on_task(void)
         ESP_LOGI(TAG, "selftest: %-48s %s", description, passed_ ? "PASS" : "FAIL"); \
     } while (0)
 
+    const slate_theme_t *midnight = slate_theme_find("midnight");
+    const slate_theme_t *minimal_light = slate_theme_find("minimal-light");
+    UI_CHECK(slate_theme_count() == 2 && slate_theme_at(0) == midnight &&
+                 slate_theme_at(1) == minimal_light &&
+                 slate_theme_default() == midnight,
+             "both themes registered with Midnight default");
+    UI_CHECK(midnight != NULL && minimal_light != NULL &&
+                 midnight->radius == minimal_light->radius &&
+                 midnight->gap == minimal_light->gap &&
+                 midnight->pad == minimal_light->pad &&
+                 midnight->hero == minimal_light->hero &&
+                 midnight->body == minimal_light->body &&
+                 midnight->caption == minimal_light->caption &&
+                 midnight->icons == minimal_light->icons &&
+                 midnight->icons_large == minimal_light->icons_large,
+             "theme switch preserves geometry and typography");
+    UI_CHECK(midnight != NULL && midnight->bg == 0x101114 &&
+                 midnight->surface == 0x1A1C21 &&
+                 midnight->surface_alt == 0x22252B &&
+                 midnight->text_hi == 0xF2F5F9 && midnight->text_lo == 0x8A94A6 &&
+                 midnight->accent == 0x6C8CFF && midnight->on_accent == 0x101114 &&
+                 midnight->warn == 0xF5A524 && minimal_light != NULL &&
+                 minimal_light->bg == 0xD8D3C9 &&
+                 minimal_light->surface == 0xF7F5F0 &&
+                 minimal_light->surface_alt == 0xC9C3B8 &&
+                 minimal_light->text_hi == 0x1F2933 &&
+                 minimal_light->text_lo == 0x4A5661 &&
+                 minimal_light->accent == 0x2F6671 &&
+                 minimal_light->on_accent == 0xFFFFFF &&
+                 minimal_light->warn == 0x9A442F,
+             "both themes supply exact complete colour palettes");
+
     memset(&s_fixture, 0, sizeof(s_fixture));
     const slate_state_provider_t registration = {
         .id = "ui-fixture",
@@ -2116,6 +2149,15 @@ static esp_err_t selftest_on_task(void)
     slate_config_t *sensors = sensor_test_config();
     UI_CHECK(sensors != NULL && rebuild_on_task(sensors) == ESP_OK,
              "sensor component test dashboard activated");
+    binding_view_t *temperature_view = find_view("direct", "temperature");
+    UI_CHECK(s_tree != NULL && s_tree->theme == minimal_light &&
+                 lv_color_eq(lv_obj_get_style_bg_color(s_tree->screen, LV_PART_MAIN),
+                             lv_color_hex(minimal_light->bg)) &&
+                 temperature_view != NULL &&
+                 lv_color_eq(lv_obj_get_style_bg_color(temperature_view->tile, LV_PART_MAIN),
+                             lv_color_hex(minimal_light->surface)) &&
+                 verify_layout(sensors),
+             "Minimal Light changes palette without moving the grid");
     if (sensors != NULL) {
         slate_config_free(sensors);
     }
@@ -2842,11 +2884,18 @@ static esp_err_t selftest_on_task(void)
                         scene_view != NULL &&
                         lv_color_eq(lv_obj_get_style_bg_color(scene_view->scene.button,
                                                               LV_PART_MAIN),
-                                    lv_color_hex(s_tree->theme->accent));
+                                    lv_color_hex(s_tree->theme->accent)) &&
+                        lv_color_eq(lv_obj_get_style_text_color(scene_view->scene.icon,
+                                                                LV_PART_MAIN),
+                                    lv_color_hex(s_tree->theme->on_accent)) &&
+                        lv_color_eq(lv_obj_get_style_text_color(scene_view->scene.name,
+                                                                LV_PART_MAIN),
+                                    lv_color_hex(s_tree->theme->on_accent));
     }
     UI_CHECK(bar_layout_ok, "4x1 bar gives every scene an independent touch target");
     UI_CHECK(all_activated, "every scene button emits its own activate action");
-    UI_CHECK(all_confirmed, "accepted scene actions flash only their own button");
+    UI_CHECK(all_confirmed,
+             "accepted scenes flash only their button with a legible foreground");
 
     binding_view_t *compact_scene = find_view("ui-fixture", "scene-goodnight");
     binding_view_t *missing_scene = find_view("ui-fixture", "scene-missing");
