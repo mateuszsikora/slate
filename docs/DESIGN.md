@@ -895,6 +895,12 @@ Saving: while in edit mode the editor sends `PUT /config?transient=1` debounced 
 
 JSON import and export are required. They protect configurations across reflashes and let people share layouts.
 
+The bundle is one document — the JavaScript and the CSS inlined into a single `index.html` — and it reaches LittleFS from the firmware image rather than from a flashing tool. Nothing else writes that partition: this section's files have no endpoint in section 4.1, and both OTA mechanisms (11.1, 11.4) write an application slot. A bundle that only ever lived on LittleFS would therefore arrive by serial flash — the cable M1 exists to put away — and would then age against the API it talks to, which is exactly what ADR-2 refuses for the component library. So the compressed bundle is linked into the image and written to `/slate/www/index.html.gz` on the first boot that finds a different one stored there, stamped with its own SHA-256 so a later boot writes nothing.
+
+What is served is the file. That keeps this section's meaning: a future asset manager (section 15) or file endpoint can replace the editor without a reflash, and the firmware leaves a replacement alone until the image's own bundle changes. A panel whose filesystem is empty or unwritable serves the copy in the image instead and says so in the boot log — section 9.2's reasoning for the setup page, applied here. The cost is the bundle counted twice, once per application slot and once on LittleFS, which is affordable against 6 MB slots and the 400 KB budget above.
+
+The editor answers `GET /` on every interface except the setup access point, where section 9.2's page answers it. Neither carries a device token, for the reason section 4.3 gives for the setup page: a browser cannot put an `Authorization` header on a navigation, and neither document contains anything the API would not hand to an unauthenticated `/info`. Every request the editor makes afterwards authenticates normally.
+
 ## 11. OTA and untethered development
 
 Two distinct things that are frequently conflated. The first is a development tool and lands in M1. The second is a product feature and can wait.

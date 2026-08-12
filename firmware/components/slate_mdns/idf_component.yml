@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.5"
+  # The same version slate_ha resolves, repeated rather than inherited because
+  # a manifest declares what its own component uses. This component owns
+  # mdns_init(); slate_ha queries the responder it starts.
+  espressif/mdns: "==1.11.3"
