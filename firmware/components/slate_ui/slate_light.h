@@ -24,6 +24,7 @@ typedef struct {
     bool temperature_range_advertised;
     int32_t temperature_min;
     int32_t temperature_max;
+    const lv_font_t *icon_font;
     lv_obj_t *tile;
     lv_obj_t *icon;
     lv_obj_t *name;

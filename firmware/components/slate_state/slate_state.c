@@ -13,7 +13,7 @@
  *
  * LOOKUP IS LINEAR. Twelve tiles per page (§3.2) and a few dozen resources
  * across a dashboard; a hash table would be more code to get wrong than a scan
- * over a contiguous array of 288-byte structs costs to run. If a configuration
+ * over a contiguous array of fixed-size structs costs to run. If a configuration
  * ever makes this measurable, the fix is an index built inside bind(), not a
  * different data structure — the table's identity has to stay stable because
  * §5.4's publication path is what a script hits ten times a second.
@@ -49,15 +49,16 @@ typedef struct {
 
 /*
  * The published half of an entry is what slate_resource_t exposes; the rest is
- * bookkeeping the components have no use for. `mismatch` outlives the publish
- * that set it because §3.3's incompatible-binding placeholder has to stay on
- * screen after the refusal has been answered, and `changed` is the coalescing
- * the drain is built on.
+ * bookkeeping the components have no use for. `mismatch` and `mismatch_kind`
+ * outlive the publish that set them because §3.3's incompatible-binding
+ * placeholder has to stay on screen after the refusal has been answered, and
+ * `changed` is the coalescing the drain is built on.
  */
 typedef struct {
     char provider[SLATE_PROVIDER_ID_MAX + 1];
     char resource[SLATE_RESOURCE_ID_MAX + 1];
     slate_kind_t kind;
+    slate_kind_t mismatch_kind;
     char name[SLATE_RESOURCE_NAME_MAX + 1];
     char area[SLATE_RESOURCE_AREA_MAX + 1];
     slate_capabilities_t capabilities;
@@ -338,6 +339,7 @@ static void export_entry(const entry_t *entry, slate_resource_t *out)
     memcpy(out->name, entry->name, sizeof(out->name));
     memcpy(out->area, entry->area, sizeof(out->area));
     out->kind = entry->kind;
+    out->mismatch_kind = entry->mismatch_kind;
     out->presentation = presentation_of(entry);
     out->capabilities = entry->capabilities;
     out->state = entry->state;
@@ -646,6 +648,7 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
         copy_field(entry->provider, sizeof(entry->provider), bindings[i].provider);
         copy_field(entry->resource, sizeof(entry->resource), bindings[i].resource);
         entry->kind = bindings[i].kind;
+        entry->mismatch_kind = bindings[i].kind;
 
         /* Carry the last known value across the rebuild. Same pair and same
          * kind only: a tile whose type changed is asking for a different
@@ -659,6 +662,7 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
             entry->updated_us = previous->updated_us;
             entry->available = previous->available;
             entry->mismatch = previous->mismatch;
+            entry->mismatch_kind = previous->mismatch_kind;
 
             /* An undelivered change survives too, and this is not bookkeeping
              * tidiness. §6.4 builds the replacement tree before activating it,
@@ -853,6 +857,7 @@ esp_err_t slate_state_publish(const char *provider, const slate_snapshot_t *snap
         err = ESP_ERR_NOT_FOUND;
     } else if (entry->kind != snapshot->kind) {
         entry->mismatch = true;
+        entry->mismatch_kind = snapshot->kind;
         entry->changed = true;
         err = ESP_ERR_INVALID_STATE;
     } else {
@@ -861,6 +866,7 @@ esp_err_t slate_state_publish(const char *provider, const slate_snapshot_t *snap
         entry->capabilities = capabilities;
         entry->available = snapshot->available;
         entry->mismatch = false;
+        entry->mismatch_kind = entry->kind;
         entry->changed = true;
         entry->updated_us = esp_timer_get_time();
 
@@ -1192,8 +1198,25 @@ esp_err_t slate_state_selftest(void)
     CHECK(slate_state_publish("st-alpha", &blind_as_light) == ESP_ERR_INVALID_STATE,
           "a cover binding refuses a light");
     CHECK(slate_state_get("st-alpha", "blind", &r) == ESP_OK &&
-              r.presentation == SLATE_PRESENT_INCOMPATIBLE,
-          "a mismatch with nothing to show presents incompatible");
+              r.presentation == SLATE_PRESENT_INCOMPATIBLE &&
+              r.kind == SLATE_KIND_COVER && r.mismatch_kind == SLATE_KIND_LIGHT,
+          "an incompatible resource reports expected and received kinds");
+    CHECK(slate_state_bind(set, SET_LEN) == ESP_OK &&
+              slate_state_get("st-alpha", "blind", &r) == ESP_OK &&
+              r.presentation == SLATE_PRESENT_INCOMPATIBLE &&
+              r.mismatch_kind == SLATE_KIND_LIGHT,
+          "an incompatible diagnostic survives a layout rebuild");
+    const slate_snapshot_t blind = {
+        .resource = "blind",
+        .kind = SLATE_KIND_COVER,
+        .available = true,
+        .state.cover = {.position = 50, .motion = SLATE_COVER_IDLE},
+    };
+    CHECK(slate_state_publish("st-alpha", &blind) == ESP_OK &&
+              slate_state_get("st-alpha", "blind", &r) == ESP_OK &&
+              r.presentation == SLATE_PRESENT_OK &&
+              r.mismatch_kind == SLATE_KIND_COVER,
+          "a valid snapshot clears the incompatible diagnostic");
 
     CHECK(slate_state_publish("st-beta", &temp) == ESP_OK, "publish a sensor");
     CHECK(slate_state_get("st-beta", "temp", &r) == ESP_OK && r.presentation == SLATE_PRESENT_OK &&

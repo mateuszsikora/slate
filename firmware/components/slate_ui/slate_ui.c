@@ -19,6 +19,7 @@
 #include "lvgl.h"
 
 #include "slate_action.h"
+#include "slate_component.h"
 #include "slate_cover.h"
 #include "slate_display.h"
 #include "slate_light.h"
@@ -216,18 +217,8 @@ static void update_sensor_view(binding_view_t *view, const slate_resource_t *res
 {
     slate_sensor_update(&view->sensor, resource, theme);
 
-    if (resource->presentation == SLATE_PRESENT_MISSING ||
-        resource->presentation == SLATE_PRESENT_MISSING_PROVIDER ||
-        resource->presentation == SLATE_PRESENT_INCOMPATIBLE) {
-        char identity[SLATE_PROVIDER_ID_MAX + SLATE_RESOURCE_ID_MAX + 2];
-        snprintf(identity, sizeof(identity), "%s:%s", view->provider, view->resource);
-        if (view->label_override) {
-            lv_label_set_text(view->sensor.value, identity);
-            lv_obj_set_style_text_font(view->sensor.value, theme->caption, LV_PART_MAIN);
-        } else {
-            lv_label_set_text(view->name, identity);
-        }
-    } else if (!view->label_override) {
+    if (!slate_component_is_placeholder(resource->presentation) &&
+        !view->label_override) {
         lv_label_set_text(view->name,
                           resource->name[0] != '\0' ? resource->name : view->resource);
     }
@@ -473,7 +464,11 @@ static bool build_sensor_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
     view->kind = SLATE_KIND_SENSOR;
     view->label_override = tile->label != NULL;
     view->tile = object;
-    return slate_sensor_build(object, tile, theme, &view->sensor, &view->name);
+    if (!slate_sensor_build(object, tile, theme, &view->sensor)) {
+        return false;
+    }
+    view->name = view->sensor.name;
+    return true;
 }
 
 static bool build_light_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
@@ -1225,7 +1220,11 @@ static slate_config_t *sensor_test_config(void)
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"power\"}},"
         "{\"id\":\"status\",\"type\":\"sensor\",\"icon\":\"fire\","
         "\"pos\":[2,1],\"size\":[2,1],"
-        "\"binding\":{\"provider\":\"direct\",\"resource\":\"status\"}}]}]}";
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"status\"}},"
+        "{\"id\":\"wrong\",\"type\":\"sensor\",\"pos\":[0,2],\"size\":[1,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"wrong-sensor\"}},"
+        "{\"id\":\"future\",\"type\":\"sensor\",\"pos\":[1,2],\"size\":[1,1],"
+        "\"binding\":{\"provider\":\"future\",\"resource\":\"outside\"}}]}]}";
 
     slate_config_t *config = NULL;
     slate_config_report_t report;
@@ -1571,7 +1570,7 @@ static esp_err_t publish_sensor_test_states(void)
             .kind = SLATE_KIND_SENSOR,
             .name = "Air quality",
             .available = true,
-            .state.sensor = {.numeric = false, .text = "Nominal",
+            .state.sensor = {.numeric = false, .text = "Air quality needs attention",
                              .measurement = SLATE_MEASUREMENT_NONE},
         },
     };
@@ -1580,6 +1579,19 @@ static esp_err_t publish_sensor_test_states(void)
         esp_err_t err = slate_state_publish("direct", &SENSORS[i]);
         if (err != ESP_OK) {
             return err;
+        }
+    }
+    const slate_snapshot_t wrong = {
+        .resource = "wrong-sensor",
+        .kind = SLATE_KIND_LIGHT,
+        .available = true,
+        .state.light = {.brightness = SLATE_STATE_ABSENT,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    slate_resource_t bound;
+    if (slate_state_get("direct", "wrong-sensor", &bound) == ESP_OK) {
+        if (slate_state_publish("direct", &wrong) != ESP_ERR_INVALID_STATE) {
+            return ESP_FAIL;
         }
     }
     slate_state_drain(discard_changed, NULL);
@@ -1971,8 +1983,11 @@ static esp_err_t selftest_on_task(void)
 
     binding_view_t *power = find_view("direct", "power");
     binding_view_t *status = find_view("direct", "status");
+    binding_view_t *wrong_sensor = find_view("direct", "wrong-sensor");
+    binding_view_t *future_sensor = find_view("future", "outside");
     UI_CHECK(power != NULL && strcmp(lv_label_get_text(power->name), "Solar output") == 0 &&
-                 strcmp(lv_label_get_text(power->sensor.value), "direct:power") == 0,
+                 !lv_obj_has_flag(power->sensor.identity, LV_OBJ_FLAG_HIDDEN) &&
+                 strcmp(lv_label_get_text(power->sensor.identity), "direct:power") == 0,
              "a configured label survives the initial missing placeholder");
     UI_CHECK(status != NULL && status->sensor.icon != NULL &&
                  strcmp(lv_label_get_text(status->sensor.icon), SLATE_ICON_FIRE) == 0,
@@ -1984,18 +1999,45 @@ static esp_err_t selftest_on_task(void)
              "temperature keeps one decimal and its unit");
     UI_CHECK(sensor_view_text("humidity", "59", "%"),
              "humidity rounds to a readable whole percent");
-    UI_CHECK(sensor_view_text("pressure", "1013", "hPa"),
-             "pressure rounds to a readable whole value");
+    UI_CHECK(sensor_view_text("pressure", "1013.25", "hPa"),
+             "pressure preserves the out-of-range fixture value");
     UI_CHECK(sensor_view_text("power", "42.8", "W"),
              "power keeps useful precision and its unit");
-    UI_CHECK(sensor_view_text("status", "Nominal", ""),
+    UI_CHECK(sensor_view_text("status", "Air quality needs attention", ""),
              "textual normalized sensor values render unchanged");
+    wrong_sensor = find_view("direct", "wrong-sensor");
+    future_sensor = find_view("future", "outside");
+    UI_CHECK(wrong_sensor != NULL &&
+                 !lv_obj_has_flag(wrong_sensor->sensor.identity, LV_OBJ_FLAG_HIDDEN) &&
+                 strcmp(lv_label_get_text(wrong_sensor->sensor.identity),
+                        "direct:wrong-sensor\nExpected sensor, got light") == 0,
+             "incompatible sensor explains expected and received kinds");
+    UI_CHECK(future_sensor != NULL &&
+                 !lv_obj_has_flag(future_sensor->sensor.identity, LV_OBJ_FLAG_HIDDEN) &&
+                 strcmp(lv_label_get_text(future_sensor->sensor.identity),
+                        "future:outside") == 0,
+             "missing-provider sensor keeps its provider-qualified identity");
 
     binding_view_t *temperature = find_view("direct", "temperature");
     binding_view_t *humidity = find_view("direct", "humidity");
     binding_view_t *pressure = find_view("direct", "pressure");
     power = find_view("direct", "power");
     status = find_view("direct", "status");
+    UI_CHECK(temperature != NULL &&
+                 lv_label_get_long_mode(temperature->name) == LV_LABEL_LONG_DOT &&
+                 pressure != NULL &&
+                 lv_label_get_long_mode(pressure->name) == LV_LABEL_LONG_DOT,
+             "sensor names use glyph-safe ellipsis");
+    UI_CHECK(temperature != NULL &&
+                 lv_obj_get_style_text_font(temperature->sensor.value, LV_PART_MAIN) ==
+                     s_tree->theme->hero &&
+                 pressure != NULL &&
+                 lv_obj_get_style_text_font(pressure->sensor.value, LV_PART_MAIN) ==
+                     s_tree->theme->body &&
+                 status != NULL &&
+                 lv_obj_get_style_text_font(status->sensor.value, LV_PART_MAIN) ==
+                     s_tree->theme->caption,
+             "sensor type scale steps down as rendered values grow");
     UI_CHECK(temperature != NULL && temperature->sensor.icon == NULL && humidity != NULL &&
                  humidity->sensor.icon == NULL,
              "1x1 sensors omit the leading icon");
@@ -2133,6 +2175,11 @@ static esp_err_t selftest_on_task(void)
                  lv_slider_get_max_value(wide->light.brightness_slider) == 95 &&
                  strcmp(lv_label_get_text(wide->light.brightness_value), "62%") == 0,
              "2x1 light renders advertised brightness range");
+    UI_CHECK(wide != NULL &&
+                 lv_label_get_long_mode(wide->name) == LV_LABEL_LONG_DOT &&
+                 strcmp(lv_label_get_text(wide->name),
+                        "Kitchen pendants with a long name") == 0,
+             "long light names use glyph-safe ellipsis without changing text");
     UI_CHECK(large != NULL && large->light.state_dot != NULL &&
                  large->light.brightness_slider != NULL &&
                  large->light.temperature_slider != NULL &&
@@ -2152,6 +2199,22 @@ static esp_err_t selftest_on_task(void)
                  strcmp(lv_label_get_text(missing_light->light.identity),
                         "direct:missing-light") == 0,
              "missing light identifies its provider-qualified resource");
+
+    const slate_snapshot_t wrong_light = {
+        .resource = "missing-light",
+        .kind = SLATE_KIND_SENSOR,
+        .available = true,
+        .state.sensor = {.numeric = false, .text = "wrong kind"},
+    };
+    esp_err_t wrong_light_err = slate_state_publish("direct", &wrong_light);
+    if (wrong_light_err == ESP_ERR_INVALID_STATE) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(wrong_light_err == ESP_ERR_INVALID_STATE && missing_light != NULL &&
+                 strcmp(lv_label_get_text(missing_light->light.identity),
+                        "direct:missing-light\nExpected light, got sensor") == 0,
+             "incompatible light explains expected and received kinds");
 
     const slate_snapshot_t local_temperature = {
         .resource = "studio",
@@ -2227,11 +2290,24 @@ static esp_err_t selftest_on_task(void)
         update_all();
     }
     UI_CHECK(unavailable_light_err == ESP_OK && wide != NULL &&
+                 strcmp(lv_label_get_text(wide->light.icon), "-") == 0 &&
                  strcmp(lv_label_get_text(wide->light.brightness_value), "-") == 0 &&
                  lv_obj_has_state(wide->light.brightness_slider, LV_STATE_DISABLED) &&
                  lv_obj_get_style_opa(wide->tile, LV_PART_MAIN) == LV_OPA_50,
              "unavailable light keeps controls but renders a dimmed dash");
-
+    slate_snapshot_t unavailable_compact = compact_with_late_dimming;
+    unavailable_compact.available = false;
+    esp_err_t unavailable_compact_err =
+        slate_state_publish("direct", &unavailable_compact);
+    if (unavailable_compact_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(unavailable_compact_err == ESP_OK && compact != NULL &&
+                 strcmp(lv_label_get_text(compact->light.icon), "-") == 0 &&
+                 lv_obj_has_flag(compact->light.state_dot, LV_OBJ_FLAG_HIDDEN) &&
+                 lv_obj_get_style_opa(compact->tile, LV_PART_MAIN) == LV_OPA_50,
+             "compact unavailable light has an unambiguous dimmed dash");
     slate_config_t *light_layouts = light_layout_test_config();
     bool light_layouts_active = light_layouts != NULL &&
                                 rebuild_on_task(light_layouts) == ESP_OK;
@@ -2283,7 +2359,9 @@ static esp_err_t selftest_on_task(void)
                  toggle_feedback_err == ESP_OK &&
                  toggle_feedback.phase == SLATE_ACTION_PENDING &&
                  !toggle_feedback.optimistic.light.on &&
-                 action_toggle->light.pending_animation,
+                 action_toggle->light.pending_animation &&
+                 lv_obj_get_style_border_width(action_toggle->tile,
+                                               LV_PART_MAIN) == 2,
              "1x1 tap emits optimistic toggle with a pending pulse");
     UI_CHECK(publish_action_test_states(false, 62, 3200) == ESP_OK,
              "matching state confirms optimistic toggle");
@@ -2429,6 +2507,13 @@ static esp_err_t selftest_on_task(void)
                  lv_obj_has_flag(horizontal_cover->cover.stop_button,
                                  LV_OBJ_FLAG_CLICKABLE),
              "opening cover animates its direction and enables stop");
+    UI_CHECK(horizontal_cover != NULL &&
+                 lv_label_get_long_mode(horizontal_cover->cover.name) ==
+                     LV_LABEL_LONG_DOT &&
+                 vertical_cover != NULL &&
+                 lv_label_get_long_mode(vertical_cover->cover.name) ==
+                     LV_LABEL_LONG_DOT,
+             "cover names use glyph-safe ellipsis");
     UI_CHECK(missing_cover != NULL &&
                  !lv_obj_has_flag(missing_cover->cover.identity, LV_OBJ_FLAG_HIDDEN) &&
                  strcmp(lv_label_get_text(missing_cover->cover.identity),
@@ -2436,8 +2521,8 @@ static esp_err_t selftest_on_task(void)
                  wrong_cover != NULL &&
                  !lv_obj_has_flag(wrong_cover->cover.identity, LV_OBJ_FLAG_HIDDEN) &&
                  strcmp(lv_label_get_text(wrong_cover->cover.identity),
-                        "ui-fixture:cover-wrong") == 0,
-             "missing and incompatible covers identify the provider-qualified resource");
+                        "ui-fixture:cover-wrong\nExpected cover, got sensor") == 0,
+             "cover placeholders identify missing resources and kind mismatches");
     UI_CHECK(unavailable_cover != NULL &&
                  strcmp(lv_label_get_text(unavailable_cover->cover.position), "-") == 0 &&
                  lv_obj_get_style_opa(unavailable_cover->tile, LV_PART_MAIN) == LV_OPA_50 &&
@@ -2460,7 +2545,10 @@ static esp_err_t selftest_on_task(void)
                  strcmp(s_fixture.action_resource, "cover-compact") == 0 &&
                  cover_feedback_err == ESP_OK &&
                  cover_feedback.phase == SLATE_ACTION_PENDING &&
-                 cover_feedback.optimistic.cover.motion == SLATE_COVER_OPENING,
+                 cover_feedback.optimistic.cover.motion == SLATE_COVER_OPENING &&
+                 compact_cover != NULL &&
+                 lv_obj_get_style_border_width(compact_cover->tile,
+                                               LV_PART_MAIN) == 2,
              "1x1 cover tap emits an optimistic semantic toggle");
     UI_CHECK(publish_cover_state("cover-compact", 0, SLATE_COVER_OPENING, true) == ESP_OK &&
                  slate_action_feedback("ui-fixture", "cover-compact", &cover_feedback) ==
@@ -2569,13 +2657,20 @@ static esp_err_t selftest_on_task(void)
         slate_action_feedback_t scene_feedback = {0};
         esp_err_t scene_feedback_err = slate_action_feedback(
             "ui-fixture", SCENE_RESOURCES[i], &scene_feedback);
+        update_all();
+        unsigned pending_border = scene_view != NULL
+                                      ? lv_obj_get_style_border_width(
+                                            scene_view->scene.button, LV_PART_MAIN)
+                                      : 0;
         all_activated = all_activated && scene_result == LV_RESULT_OK &&
                         s_fixture.action_calls == scene_calls + 1 &&
                         strcmp(s_fixture.action_resource, SCENE_RESOURCES[i]) == 0 &&
                         s_fixture.action == SLATE_ACTION_ACTIVATE &&
                         s_fixture.value_type == SLATE_ACTION_VALUE_NONE &&
                         scene_feedback_err == ESP_OK &&
-                        scene_feedback.phase == SLATE_ACTION_PENDING;
+                        scene_feedback.phase == SLATE_ACTION_PENDING &&
+                        scene_view != NULL &&
+                        pending_border == 2;
 
         slate_action_result("ui-fixture", s_fixture.action_id, true, NULL);
         update_all();
@@ -2598,6 +2693,13 @@ static esp_err_t selftest_on_task(void)
                  strcmp(lv_label_get_text(compact_scene->scene.name), "Good night") == 0 &&
                  strcmp(lv_label_get_text(compact_scene->scene.icon), SLATE_ICON_SLEEP) == 0,
              "1x1 scene renders label and icon overrides");
+    UI_CHECK(compact_scene != NULL &&
+                 lv_label_get_long_mode(compact_scene->scene.name) ==
+                     LV_LABEL_LONG_DOT &&
+                 missing_scene != NULL &&
+                 lv_label_get_long_mode(missing_scene->scene.name) ==
+                     LV_LABEL_LONG_DOT,
+             "scene names use glyph-safe ellipsis");
     bool rebound_without_snapshots = scenes != NULL &&
                                        slate_state_bind(NULL, 0) == ESP_OK &&
                                        rebuild_on_task(scenes) == ESP_OK;
@@ -2608,6 +2710,23 @@ static esp_err_t selftest_on_task(void)
                         "ui-fixture:scene-missing") == 0 &&
                  !lv_obj_has_flag(missing_scene->scene.button, LV_OBJ_FLAG_CLICKABLE),
              "missing scene identifies its provider-qualified resource");
+
+    const slate_snapshot_t wrong_scene = {
+        .resource = "scene-missing",
+        .kind = SLATE_KIND_LIGHT,
+        .available = true,
+        .state.light = {.brightness = SLATE_STATE_ABSENT,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    esp_err_t wrong_scene_err = slate_state_publish("ui-fixture", &wrong_scene);
+    if (wrong_scene_err == ESP_ERR_INVALID_STATE) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    UI_CHECK(wrong_scene_err == ESP_ERR_INVALID_STATE && missing_scene != NULL &&
+                 strcmp(lv_label_get_text(missing_scene->scene.identity),
+                        "ui-fixture:scene-missing\nExpected scene, got light") == 0,
+             "incompatible scene explains expected and received kinds");
 
     const slate_snapshot_t unavailable_scene = {
         .resource = "scene-missing",

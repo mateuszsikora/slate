@@ -4,7 +4,8 @@
 # execute through slate_display's single-owner task.
 #
 idf_component_register(
-    SRCS "slate_ui.c" "slate_cover.c" "slate_light.c" "slate_scene.c" "slate_sensor.c"
+    SRCS "slate_ui.c" "slate_component.c" "slate_cover.c" "slate_light.c"
+         "slate_scene.c" "slate_sensor.c"
     INCLUDE_DIRS "include"
     REQUIRES slate_action slate_config slate_display slate_state slate_store slate_theme
              slate_time lvgl__lvgl

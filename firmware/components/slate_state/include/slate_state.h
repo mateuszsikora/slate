@@ -348,7 +348,10 @@ const char *slate_presentation_str(slate_presentation_t presentation);
  *
  * `kind` is the binding's, not the last snapshot's: a component built for a
  * light stays a light when a provider sends it a sensor, and says so through
- * `presentation`. `state` and `capabilities` are meaningful only when
+ * `presentation`. `mismatch_kind` is the provider's rejected kind while that
+ * presentation is INCOMPATIBLE, so the component can explain both halves of
+ * the mismatch instead of showing an unexplained warning. `state` and
+ * `capabilities` are meaningful only when
  * `presentation` is OK, STALE or UNAVAILABLE, which is exactly when
  * `updated_us` is non-zero.
  */
@@ -356,6 +359,7 @@ typedef struct {
     char provider[SLATE_PROVIDER_ID_MAX + 1];
     char resource[SLATE_RESOURCE_ID_MAX + 1];
     slate_kind_t kind;
+    slate_kind_t mismatch_kind;
     slate_presentation_t presentation;
     char name[SLATE_RESOURCE_NAME_MAX + 1];
     char area[SLATE_RESOURCE_AREA_MAX + 1];
