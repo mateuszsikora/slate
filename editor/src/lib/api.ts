@@ -89,12 +89,14 @@ export interface Config {
 export class ApiError extends Error {
   readonly status: number
   readonly code: string
+  readonly body: unknown
 
-  constructor(status: number, code: string, message?: string) {
+  constructor(status: number, code: string, message?: string, body?: unknown) {
     super(message ?? `${status} ${code}`)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.body = body
   }
 
   /** Whether the device refused the token rather than the request. */
@@ -154,14 +156,27 @@ export class DeviceClient {
     }
   }
 
+  /** `POST /config/validate` — checks a complete document without changing the panel. */
+  validateConfig(document: string): Promise<void> {
+    return this.request<void>('POST', '/config/validate', { body: document })
+  }
+
+  /** Persistent `PUT /config`; unlike live preview this writes the document to flash. */
+  publishConfig(document: string): Promise<void> {
+    return this.request<void>('PUT', '/config', { body: document })
+  }
+
   private async request<T>(
     method: string,
     path: string,
-    options: { authenticated?: boolean } = {},
+    options: { authenticated?: boolean; body?: string } = {},
   ): Promise<T> {
     const headers: Record<string, string> = {}
     if (options.authenticated !== false && this.token !== null) {
       headers['Authorization'] = `Bearer ${this.token}`
+    }
+    if (options.body !== undefined) {
+      headers['Content-Type'] = 'application/json; charset=utf-8'
     }
 
     const controller = new AbortController()
@@ -171,6 +186,7 @@ export class DeviceClient {
       response = await fetch(this.url(path), {
         method,
         headers,
+        body: options.body,
         signal: controller.signal,
         cache: 'no-store',
       })
@@ -184,7 +200,9 @@ export class DeviceClient {
     }
 
     if (!response.ok) {
-      throw new ApiError(response.status, await errorCode(response))
+      const body = await errorBody(response)
+      const code = isObject(body) && typeof body['error'] === 'string' ? body['error'] : 'unknown'
+      throw new ApiError(response.status, code, undefined, body)
     }
     if (response.status === 204) {
       return undefined as T
@@ -193,15 +211,16 @@ export class DeviceClient {
   }
 }
 
-async function errorCode(response: Response): Promise<string> {
+async function errorBody(response: Response): Promise<unknown> {
   try {
-    const body = (await response.json()) as { error?: unknown }
-    if (typeof body.error === 'string') {
-      return body.error
-    }
+    return (await response.json()) as unknown
   } catch {
     /* §4 promises `{"error": …}` on every failure, but a proxy or a truncated
      * response is not the device and does not owe us the shape. */
   }
-  return 'unknown'
+  return null
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

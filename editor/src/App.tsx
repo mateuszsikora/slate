@@ -278,6 +278,29 @@ export function App() {
     setMode(next)
   }, [mode])
 
+  /* --- Configuration files (§10) --------------------------------------- */
+
+  const validateImportedConfig = useCallback(
+    async (document: string) => {
+      if (token === null) {
+        throw new ApiError(401, 'unauthorized')
+      }
+      await client(token).validateConfig(document)
+    },
+    [client, token],
+  )
+
+  const publishImportedConfig = useCallback(
+    async (document: string, imported: Config) => {
+      if (token === null) {
+        throw new ApiError(401, 'unauthorized')
+      }
+      await client(token).publishConfig(document)
+      setConfig(imported)
+    },
+    [client, token],
+  )
+
   const retry = useCallback(() => {
     setPhase('starting')
     void open()
@@ -317,7 +340,12 @@ export function App() {
         onUnpair={unpair}
       />
       <div className="shell__body">
-        <Workspace config={config} />
+        <Workspace
+          config={config}
+          deviceName={info?.name ?? 'slate'}
+          onValidateConfig={validateImportedConfig}
+          onPublishConfig={publishImportedConfig}
+        />
         <aside className="sidebar">
           <DevicePanel info={info} status={status} heartbeat={heartbeat} />
           <LogPanel lines={logs} connection={connection} />

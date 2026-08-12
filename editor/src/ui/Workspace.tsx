@@ -8,12 +8,16 @@
  */
 
 import type { Config } from '../lib/api'
+import { ConfigTransfer } from './ConfigTransfer'
 
 interface Props {
   config: Config | null
+  deviceName: string
+  onValidateConfig: (document: string) => Promise<void>
+  onPublishConfig: (document: string, config: Config) => Promise<void>
 }
 
-export function Workspace({ config }: Props) {
+export function Workspace({ config, deviceName, onValidateConfig, onPublishConfig }: Props) {
   return (
     <main className="workspace">
       <div className="workspace__pending">
@@ -21,9 +25,16 @@ export function Workspace({ config }: Props) {
         <p>
           This shell pairs with the panel, keeps the connection and reports what it is running.
           Arranging tiles — the grid, the inspector, the library and the live preview — is the next
-          issue; import and export follow in #33.
+          issue. Configuration files can already be backed up, shared and restored below.
         </p>
       </div>
+
+      <ConfigTransfer
+        config={config}
+        deviceName={deviceName}
+        onValidate={onValidateConfig}
+        onPublish={onPublishConfig}
+      />
 
       <section className="configuration">
         <h3 className="configuration__title">Running configuration</h3>
