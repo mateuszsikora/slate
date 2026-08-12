@@ -34,6 +34,7 @@
 #include "slate_action.h"
 #include "slate_api.h"
 #include "slate_ha_actions.h"
+#include "slate_ha_catalog.h"
 #include "slate_ha_entities.h"
 #include "slate_state.h"
 #include "slate_store.h"
@@ -127,6 +128,7 @@ struct main_connection {
     atomic_bool authenticated;
     atomic_size_t backoff_index;
     atomic_uint_fast32_t subscription_id;
+    atomic_uint_fast32_t catalog_ids[SLATE_HA_CATALOG_STAGE_COUNT];
     uint32_t next_command_id;
 };
 
@@ -669,6 +671,69 @@ static esp_err_t send_json_frame(cJSON *root)
     return sent == (int) len ? ESP_OK : ESP_FAIL;
 }
 
+static const char *catalog_command(slate_ha_catalog_stage_t stage)
+{
+    static const char *const COMMANDS[SLATE_HA_CATALOG_STAGE_COUNT] = {
+        [SLATE_HA_CATALOG_ENTITIES] = "config/entity_registry/list_for_display",
+        [SLATE_HA_CATALOG_DEVICES] = "config/device_registry/list",
+        [SLATE_HA_CATALOG_AREAS] = "config/area_registry/list",
+        [SLATE_HA_CATALOG_STATES] = "get_states",
+    };
+    return stage < SLATE_HA_CATALOG_STAGE_COUNT ? COMMANDS[stage] : NULL;
+}
+
+static void connection_cancel_catalog(void)
+{
+    for (slate_ha_catalog_stage_t stage = 0;
+         stage < SLATE_HA_CATALOG_STAGE_COUNT; stage++) {
+        atomic_store(&s_main.catalog_ids[stage], 0);
+    }
+    slate_ha_catalog_cancel();
+}
+
+/** Ask for the four §5.7 payloads once, with ids reserved before any send. */
+static void connection_refresh_catalog(void)
+{
+    if (slate_ha_catalog_begin() != ESP_OK) {
+        ESP_LOGW(TAG, "could not start Home Assistant discovery refresh");
+        return;
+    }
+
+    uint32_t ids[SLATE_HA_CATALOG_STAGE_COUNT];
+    for (slate_ha_catalog_stage_t stage = 0;
+         stage < SLATE_HA_CATALOG_STAGE_COUNT; stage++) {
+        ids[stage] = next_command_id();
+        atomic_store(&s_main.catalog_ids[stage], ids[stage]);
+    }
+
+    for (slate_ha_catalog_stage_t stage = 0;
+         stage < SLATE_HA_CATALOG_STAGE_COUNT; stage++) {
+        cJSON *frame = cJSON_CreateObject();
+        bool ok = frame != NULL &&
+                  cJSON_AddNumberToObject(frame, "id", ids[stage]) != NULL &&
+                  cJSON_AddStringToObject(frame, "type", catalog_command(stage)) != NULL;
+        esp_err_t err = ok ? send_json_frame(frame) : ESP_ERR_NO_MEM;
+        cJSON_Delete(frame);
+        if (err == ESP_OK) {
+            continue;
+        }
+
+        atomic_store(&s_main.catalog_ids[stage], 0);
+        bool complete = false;
+        bool degraded = false;
+        esp_err_t accept_err = slate_ha_catalog_accept(
+            stage, false, NULL, &complete, &degraded);
+        ESP_LOGW(TAG, "could not request Home Assistant discovery stage %u: %s",
+                 (unsigned) stage, esp_err_to_name(err));
+        if (accept_err != ESP_OK) {
+            ESP_LOGW(TAG, "Home Assistant discovery refresh kept its previous catalog");
+        } else if (complete) {
+            ESP_LOGI(TAG, "Home Assistant discovery catalog refreshed%s",
+                     degraded ? " without registry areas" : "");
+        }
+    }
+}
+
 static void fail_bus_action(uint32_t bus_id, const char *error)
 {
     slate_action_result(SLATE_HA_PROVIDER_ID, bus_id, false, error);
@@ -954,7 +1019,33 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         const cJSON *success = cJSON_GetObjectItemCaseSensitive(root, "success");
         uint32_t id_value = 0;
         bool has_id = command_id(id_item, &id_value);
-        if (has_id && id_value == atomic_load(&connection->subscription_id)) {
+        bool catalog_result = false;
+        if (has_id) {
+            for (slate_ha_catalog_stage_t stage = 0;
+                 stage < SLATE_HA_CATALOG_STAGE_COUNT; stage++) {
+                if (id_value != atomic_load(&connection->catalog_ids[stage])) {
+                    continue;
+                }
+                atomic_store(&connection->catalog_ids[stage], 0);
+                bool complete = false;
+                bool degraded = false;
+                const cJSON *result = cJSON_GetObjectItemCaseSensitive(root, "result");
+                esp_err_t err = slate_ha_catalog_accept(
+                    stage, cJSON_IsTrue(success), result, &complete, &degraded);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "discarding Home Assistant discovery stage %u: %s",
+                             (unsigned) stage, esp_err_to_name(err));
+                } else if (complete) {
+                    ESP_LOGI(TAG, "Home Assistant discovery catalog refreshed%s",
+                             degraded ? " without registry areas" : "");
+                }
+                catalog_result = true;
+                break;
+            }
+        }
+        if (catalog_result) {
+            /* Discovery command results never enter action correlation. */
+        } else if (has_id && id_value == atomic_load(&connection->subscription_id)) {
             if (!cJSON_IsTrue(success)) {
                 const cJSON *error = cJSON_GetObjectItemCaseSensitive(root, "error");
                 const cJSON *code = cJSON_GetObjectItemCaseSensitive(error, "code");
@@ -1007,6 +1098,10 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 static void connection_destroy(void)
 {
+    atomic_store(&s_main.enabled, false);
+    atomic_store(&s_main.authenticated, false);
+    atomic_store(&s_main.subscription_id, 0);
+    connection_cancel_catalog();
     if (s_main.client == NULL) {
         if (s_main.event_context != NULL) {
             payload_reset(&s_main.event_context->message);
@@ -1015,9 +1110,6 @@ static void connection_destroy(void)
         s_main.event_context = NULL;
         return;
     }
-    atomic_store(&s_main.enabled, false);
-    atomic_store(&s_main.authenticated, false);
-    atomic_store(&s_main.subscription_id, 0);
     esp_websocket_client_stop(s_main.client);
     esp_websocket_client_destroy(s_main.client);
     s_main.client = NULL;
@@ -1132,6 +1224,7 @@ static void manager_task(void *arg)
         case CMD_WIFI_DOWN:
             s_wifi_up = false;
             atomic_store(&s_main.authenticated, false);
+            connection_cancel_catalog();
             clear_bus_actions("wifi_disconnected");
             if (slate_store_ha_token_is_set() &&
                 !atomic_load(&s_main.auth_rejected)) {
@@ -1142,6 +1235,7 @@ static void manager_task(void *arg)
         case CMD_RELOAD:
             clear_bus_actions("credentials_reloaded");
             connection_destroy();
+            slate_ha_catalog_clear();
             explicit_bzero(s_main.token, sizeof(s_main.token));
             s_auth_blocked = false;
             if (s_wifi_up) {
@@ -1160,6 +1254,7 @@ static void manager_task(void *arg)
                 break;
             }
             atomic_store(&s_main.authenticated, true);
+            connection_refresh_catalog();
             if (connection_resubscribe() != ESP_OK) {
                 ESP_LOGW(TAG, "could not establish Home Assistant entity subscription");
             }
@@ -1206,6 +1301,7 @@ static void manager_task(void *arg)
         case CMD_CLEAR_ACTIONS:
             if (received.generation == s_main.generation) {
                 slate_ha_action_clear();
+                connection_cancel_catalog();
             }
             break;
         }
@@ -1423,6 +1519,10 @@ esp_err_t slate_ha_init(void)
     if (entities_err != ESP_OK) {
         return entities_err;
     }
+    esp_err_t catalog_err = slate_ha_catalog_init();
+    if (catalog_err != ESP_OK) {
+        return catalog_err;
+    }
     esp_err_t actions_err = slate_ha_action_tracker_init();
     if (actions_err != ESP_OK) {
         return actions_err;
@@ -1491,6 +1591,10 @@ esp_err_t slate_ha_init(void)
     esp_err_t route_err = slate_api_register_uri(&configure, SLATE_API_AUTH_DEVICE_TOKEN);
     if (route_err == ESP_OK) {
         route_err = slate_api_register_uri(&discover, SLATE_API_AUTH_DEVICE_TOKEN);
+    }
+    if (route_err == ESP_OK) {
+        route_err = slate_api_resources_register(SLATE_HA_PROVIDER_ID,
+                                                 slate_ha_catalog_append, NULL);
     }
 
     s_initialized = true;
@@ -1626,6 +1730,8 @@ esp_err_t slate_ha_selftest(void)
 
     CHECK(slate_ha_entities_selftest() == ESP_OK,
           "compressed entity diff and normalized mapping fixtures");
+    CHECK(slate_ha_catalog_selftest() == ESP_OK,
+          "area-aware discovery catalog and flat fallback fixtures");
     CHECK(slate_ha_actions_selftest() == ESP_OK,
           "service-call mapping and result correlation fixtures");
 

@@ -37,8 +37,16 @@ typedef struct {
     httpd_uri_t wrapped;
 } route_t;
 
+typedef struct {
+    bool used;
+    char provider[SLATE_PROVIDER_ID_MAX + 1];
+    slate_api_resources_append_fn append;
+    void *ctx;
+} resource_catalog_t;
+
 static httpd_handle_t s_server;
 static route_t s_routes[SLATE_API_MAX_URI_HANDLERS];
+static resource_catalog_t s_resource_catalogs[SLATE_STATE_MAX_PROVIDERS];
 
 /* --- Shared response policy -------------------------------------------- */
 
@@ -262,6 +270,37 @@ esp_err_t slate_api_register_uri(const httpd_uri_t *uri, slate_api_auth_t auth)
         memset(route, 0, sizeof(*route));
     }
     return err;
+}
+
+esp_err_t slate_api_resources_register(const char *provider,
+                                       slate_api_resources_append_fn append,
+                                       void *ctx)
+{
+    if (provider == NULL || provider[0] == '\0' ||
+        strnlen(provider, SLATE_PROVIDER_ID_MAX + 1) > SLATE_PROVIDER_ID_MAX ||
+        append == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    resource_catalog_t *free_slot = NULL;
+    for (size_t i = 0; i < SLATE_STATE_MAX_PROVIDERS; i++) {
+        if (s_resource_catalogs[i].used &&
+            strcmp(s_resource_catalogs[i].provider, provider) == 0) {
+            return ESP_ERR_INVALID_STATE;
+        }
+        if (!s_resource_catalogs[i].used && free_slot == NULL) {
+            free_slot = &s_resource_catalogs[i];
+        }
+    }
+    if (free_slot == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    free_slot->used = true;
+    strlcpy(free_slot->provider, provider, sizeof(free_slot->provider));
+    free_slot->append = append;
+    free_slot->ctx = ctx;
+    return ESP_OK;
 }
 
 /* --- Contract values --------------------------------------------------- */
@@ -563,6 +602,122 @@ esp_err_t slate_api_send_json(httpd_req_t *req, cJSON *root)
     return err;
 }
 
+static bool add_capability(cJSON *object, const slate_capabilities_t *caps,
+                           slate_action_t action)
+{
+    if (!slate_capabilities_have(caps, action)) {
+        return true;
+    }
+
+    const char *name = slate_action_str(action);
+    int16_t min = 0;
+    int16_t max = 0;
+    bool ranged = false;
+    if (action == SLATE_ACTION_SET_BRIGHTNESS) {
+        min = caps->brightness_min;
+        max = caps->brightness_max;
+        ranged = true;
+    } else if (action == SLATE_ACTION_SET_COLOR_TEMPERATURE) {
+        min = caps->color_temperature_min;
+        max = caps->color_temperature_max;
+        ranged = min != 0 || max != 0;
+    } else if (action == SLATE_ACTION_SET_POSITION) {
+        min = caps->position_min;
+        max = caps->position_max;
+        ranged = true;
+    }
+
+    if (!ranged) {
+        return cJSON_AddBoolToObject(object, name, true) != NULL;
+    }
+    cJSON *range = cJSON_AddObjectToObject(object, name);
+    return range != NULL && cJSON_AddNumberToObject(range, "min", min) != NULL &&
+           cJSON_AddNumberToObject(range, "max", max) != NULL;
+}
+
+static const char *cover_motion_str(slate_cover_motion_t motion)
+{
+    switch (motion) {
+    case SLATE_COVER_OPENING: return "opening";
+    case SLATE_COVER_CLOSING: return "closing";
+    case SLATE_COVER_IDLE:
+    default:                  return "idle";
+    }
+}
+
+esp_err_t slate_api_resource_append(cJSON *array, const slate_resource_t *resource)
+{
+    if (!cJSON_IsArray(array) || resource == NULL || resource->provider[0] == '\0' ||
+        resource->resource[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *item = cJSON_CreateObject();
+    cJSON *state = item != NULL ? cJSON_AddObjectToObject(item, "state") : NULL;
+    bool available = resource->presentation == SLATE_PRESENT_OK;
+    bool ok = state != NULL &&
+              cJSON_AddStringToObject(item, "provider", resource->provider) != NULL &&
+              cJSON_AddStringToObject(item, "resource", resource->resource) != NULL &&
+              cJSON_AddStringToObject(item, "kind", slate_kind_str(resource->kind)) != NULL &&
+              cJSON_AddBoolToObject(item, "available", available) != NULL;
+    if (ok && resource->name[0] != '\0') {
+        ok = cJSON_AddStringToObject(item, "name", resource->name) != NULL;
+    }
+    if (ok && resource->area[0] != '\0') {
+        ok = cJSON_AddStringToObject(item, "area", resource->area) != NULL;
+    }
+
+    if (ok && resource->kind == SLATE_KIND_LIGHT) {
+        ok = cJSON_AddStringToObject(state, "power",
+                                     resource->state.light.on ? "on" : "off") != NULL;
+        if (ok && resource->state.light.brightness != SLATE_STATE_ABSENT) {
+            ok = cJSON_AddNumberToObject(state, "brightness",
+                                         resource->state.light.brightness) != NULL;
+        }
+        if (ok && resource->state.light.color_temperature != SLATE_STATE_ABSENT) {
+            ok = cJSON_AddNumberToObject(state, "color_temperature",
+                                         resource->state.light.color_temperature) != NULL;
+        }
+    } else if (ok && resource->kind == SLATE_KIND_COVER) {
+        if (resource->state.cover.position != SLATE_STATE_ABSENT) {
+            ok = cJSON_AddNumberToObject(state, "position",
+                                         resource->state.cover.position) != NULL;
+        }
+        ok = ok && cJSON_AddStringToObject(
+                       state, "motion", cover_motion_str(resource->state.cover.motion)) != NULL;
+    } else if (ok && resource->kind == SLATE_KIND_SENSOR) {
+        ok = resource->state.sensor.numeric
+                 ? cJSON_AddNumberToObject(state, "value",
+                                           resource->state.sensor.value) != NULL
+                 : cJSON_AddStringToObject(state, "value",
+                                           resource->state.sensor.text) != NULL;
+        if (ok && resource->state.sensor.unit[0] != '\0') {
+            ok = cJSON_AddStringToObject(state, "unit",
+                                         resource->state.sensor.unit) != NULL;
+        }
+        const char *measurement = slate_measurement_str(resource->state.sensor.measurement);
+        if (ok && measurement != NULL) {
+            ok = cJSON_AddStringToObject(state, "measurement", measurement) != NULL;
+        }
+    }
+
+    if (ok && resource->capabilities.actions != 0) {
+        cJSON *capabilities = cJSON_AddObjectToObject(item, "capabilities");
+        ok = capabilities != NULL;
+        for (slate_action_t action = 0; ok && action < SLATE_ACTION_COUNT; action++) {
+            ok = add_capability(capabilities, &resource->capabilities, action);
+        }
+    }
+    if (ok) {
+        ok = cJSON_AddItemToArray(array, item);
+        if (ok) {
+            item = NULL;
+        }
+    }
+    cJSON_Delete(item);
+    return ok ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
 /* --- Built-in routes --------------------------------------------------- */
 
 static esp_err_t info_handler(httpd_req_t *req)
@@ -633,6 +788,103 @@ static esp_err_t status_handler(httpd_req_t *req)
          cJSON_AddBoolToObject(root, "storage_reset",
                                slate_store_storage_was_reset()) != NULL;
     if (!ok) {
+        cJSON_Delete(root);
+        return slate_api_send_json(req, NULL);
+    }
+    return slate_api_send_json(req, root);
+}
+
+static bool provider_registered(const char *id, slate_provider_status_t *status)
+{
+    for (size_t i = 0; i < slate_state_provider_count(); i++) {
+        slate_state_provider_info_t info;
+        if (slate_state_provider_at(i, &info) == ESP_OK && strcmp(info.id, id) == 0) {
+            *status = info.status;
+            return true;
+        }
+    }
+    return false;
+}
+
+static resource_catalog_t *resource_catalog(const char *provider)
+{
+    for (size_t i = 0; i < SLATE_STATE_MAX_PROVIDERS; i++) {
+        if (s_resource_catalogs[i].used &&
+            strcmp(s_resource_catalogs[i].provider, provider) == 0) {
+            return &s_resource_catalogs[i];
+        }
+    }
+    return NULL;
+}
+
+static esp_err_t append_bound_resources(const char *provider, cJSON *array)
+{
+    size_t count = slate_state_count();
+    for (size_t i = 0; i < count; i++) {
+        slate_resource_t resource;
+        esp_err_t err = slate_state_at(i, &resource);
+        if (err == ESP_ERR_NOT_FOUND) {
+            continue; /* A configuration replacement shortened the table. */
+        }
+        if (err != ESP_OK) {
+            return err;
+        }
+        if (resource.updated_us != 0 && strcmp(resource.provider, provider) == 0) {
+            err = slate_api_resource_append(array, &resource);
+            if (err != ESP_OK) {
+                return err;
+            }
+        }
+    }
+    return ESP_OK;
+}
+
+static esp_err_t resources_handler(httpd_req_t *req)
+{
+    char provider[SLATE_PROVIDER_ID_MAX + 1];
+    size_t query_len = httpd_req_get_url_query_len(req);
+    if (query_len == 0) {
+        return slate_api_refuse(req, "400 Bad Request", "provider_required");
+    }
+
+    char *query = malloc(query_len + 1);
+    if (query == NULL) {
+        return slate_api_send_json(req, NULL);
+    }
+    esp_err_t query_err = httpd_req_get_url_query_str(req, query, query_len + 1);
+    esp_err_t provider_err = query_err == ESP_OK
+                                 ? httpd_query_key_value(query, "provider", provider,
+                                                        sizeof(provider))
+                                 : query_err;
+    free(query);
+    if (provider_err == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        /* A present id outside the public provider-id bound is unknown, not
+         * missing. Keep the same answer as any other non-registered id. */
+        return slate_api_refuse(req, "404 Not Found", "provider_not_found");
+    }
+    if (provider_err != ESP_OK || provider[0] == '\0') {
+        return slate_api_refuse(req, "400 Bad Request", "provider_required");
+    }
+
+    slate_provider_status_t status;
+    if (!provider_registered(provider, &status)) {
+        return slate_api_refuse(req, "404 Not Found", "provider_not_found");
+    }
+    if (status == SLATE_PROVIDER_UNCONFIGURED) {
+        return slate_api_refuse(req, "409 Conflict", "provider_unconfigured");
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON *array = root != NULL ? cJSON_AddArrayToObject(root, "resources") : NULL;
+    if (array == NULL) {
+        cJSON_Delete(root);
+        return slate_api_send_json(req, NULL);
+    }
+
+    resource_catalog_t *catalog = resource_catalog(provider);
+    esp_err_t err = catalog != NULL ? catalog->append(catalog->ctx, array)
+                                    : append_bound_resources(provider, array);
+    if (err != ESP_OK) {
         cJSON_Delete(root);
         return slate_api_send_json(req, NULL);
     }
@@ -727,6 +979,11 @@ esp_err_t slate_api_init(void)
         .method = HTTP_GET,
         .handler = status_handler,
     };
+    const httpd_uri_t resources = {
+        .uri = SLATE_API_BASE_PATH "/resources",
+        .method = HTTP_GET,
+        .handler = resources_handler,
+    };
     const httpd_uri_t options = {
         .uri = SLATE_API_BASE_PATH "/*",
         .method = HTTP_OPTIONS,
@@ -736,6 +993,9 @@ esp_err_t slate_api_init(void)
     err = slate_api_register_uri(&info, SLATE_API_AUTH_PUBLIC);
     if (err == ESP_OK) {
         err = slate_api_register_uri(&status, SLATE_API_AUTH_DEVICE_TOKEN);
+    }
+    if (err == ESP_OK) {
+        err = slate_api_register_uri(&resources, SLATE_API_AUTH_DEVICE_TOKEN);
     }
     if (err == ESP_OK) {
         err = slate_api_register_uri(&options, SLATE_API_AUTH_PUBLIC);
@@ -940,20 +1200,51 @@ esp_err_t slate_api_selftest(void)
                                   "WWW-Authenticate: Bearer");
 
     char token[SLATE_DEVICE_TOKEN_LEN + 1];
-    char request[256];
+    char request[320];
     bool token_ready = slate_store_device_token_copy(token, sizeof(token)) == ESP_OK;
     int len = token_ready ? snprintf(request, sizeof(request),
                                      "GET /api/v1/status HTTP/1.0\r\nHost: 127.0.0.1\r\n"
                                      "Authorization: Bearer %s\r\nConnection: close\r\n\r\n",
                                      token)
                           : -1;
-    memset(token, 0, sizeof(token));
     bool request_ready = len > 0 && (size_t) len < sizeof(request);
     failures += !request_ready ||
                 !selftest_request("correct bearer token accepted", request, 200,
                                   "\"providers\":[{\"id\":\"direct\","
                                   "\"status\":\"degraded\"");
     memset(request, 0, sizeof(request));
+
+    static const struct {
+        const char *path;
+        int status;
+        const char *error;
+        const char *name;
+    } RESOURCE_CASES[] = {
+        {"/api/v1/resources", 400, "\"error\":\"provider_required\"",
+         "resources require provider"},
+        {"/api/v1/resources?provider=does-not-exist", 404,
+         "\"error\":\"provider_not_found\"", "resources reject unknown provider"},
+        {"/api/v1/resources?provider=unknown-provider-long", 404,
+         "\"error\":\"provider_not_found\"", "resources reject long unknown provider"},
+        {"/api/v1/resources?provider=direct&padding=1234567890123456789012345678901234567890",
+         200, "\"resources\":[", "resources accept unrelated query fields"},
+        {"/api/v1/resources?provider=direct", 200, "\"resources\":[",
+         "direct resources use common route"},
+    };
+    for (size_t i = 0; token_ready && i < sizeof(RESOURCE_CASES) / sizeof(RESOURCE_CASES[0]);
+         i++) {
+        len = snprintf(request, sizeof(request),
+                       "GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\n"
+                       "Authorization: Bearer %s\r\nConnection: close\r\n\r\n",
+                       RESOURCE_CASES[i].path, token);
+        request_ready = len > 0 && (size_t) len < sizeof(request);
+        failures += !request_ready ||
+                    !selftest_request(RESOURCE_CASES[i].name, request,
+                                      RESOURCE_CASES[i].status,
+                                      RESOURCE_CASES[i].error);
+        memset(request, 0, sizeof(request));
+    }
+    memset(token, 0, sizeof(token));
 
     failures += !selftest_request("CORS preflight is public", OPTIONS, 204,
                                   "Access-Control-Allow-Origin: *");

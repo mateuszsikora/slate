@@ -792,6 +792,54 @@ esp_err_t slate_ha_entities_process_event(const cJSON *event)
     return process_event(event, true);
 }
 
+esp_err_t slate_ha_entities_normalize_full_state(const cJSON *state,
+                                                 slate_resource_t *out)
+{
+    if (!cJSON_IsObject(state) || out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const cJSON *entity_id = cJSON_GetObjectItemCaseSensitive(state, "entity_id");
+    const cJSON *raw_state = cJSON_GetObjectItemCaseSensitive(state, "state");
+    const cJSON *attributes = cJSON_GetObjectItemCaseSensitive(state, "attributes");
+    if (!cJSON_IsString(entity_id) || !resource_ok(entity_id->valuestring) ||
+        !cJSON_IsString(raw_state) || !cJSON_IsObject(attributes)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ha_entity_t entity = {0};
+    strlcpy(entity.resource, entity_id->valuestring, sizeof(entity.resource));
+    entity.present = true;
+    entity.has_state = true;
+    entity.raw_state_numeric =
+        parse_sensor_number(raw_state->valuestring, &entity.raw_state_number);
+    strlcpy(entity.raw_state, raw_state->valuestring, sizeof(entity.raw_state));
+    apply_attributes(&entity, attributes, true);
+
+    ha_entity_t normalized;
+    slate_kind_t kind;
+    bool available = false;
+    if (!normalize_entity(&entity, &normalized, &kind, &available)) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    *out = (slate_resource_t) {0};
+    strlcpy(out->provider, SLATE_HA_PROVIDER_ID, sizeof(out->provider));
+    strlcpy(out->resource, normalized.resource, sizeof(out->resource));
+    strlcpy(out->name, normalized.normalized_name, sizeof(out->name));
+    out->kind = kind;
+    out->presentation = available ? SLATE_PRESENT_OK : SLATE_PRESENT_UNAVAILABLE;
+    out->capabilities = normalized.normalized_capabilities;
+    if (kind == SLATE_KIND_LIGHT) {
+        out->state.light = normalized.normalized_light;
+    } else if (kind == SLATE_KIND_COVER) {
+        out->state.cover = normalized.normalized_cover;
+    } else if (kind == SLATE_KIND_SENSOR) {
+        out->state.sensor = normalized.normalized_sensor;
+    }
+    return ESP_OK;
+}
+
 #ifdef SLATE_HA_SELFTEST
 
 esp_err_t slate_ha_entities_selftest(void)
