@@ -27,6 +27,7 @@ typedef struct {
     uint32_t text_hi;
     uint32_t text_lo;
     uint32_t accent;
+    uint32_t on_accent;
     uint32_t warn;
 
     int32_t radius;

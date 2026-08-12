@@ -1,4 +1,4 @@
-/* Slate — Midnight theme registry (DESIGN.md §8, ADR-6). */
+/* Slate — firmware-owned theme registry (DESIGN.md §8, ADR-6). */
 
 #include "slate_theme.h"
 
@@ -18,7 +18,28 @@ static const slate_theme_t MIDNIGHT = {
     .text_hi = 0xF2F5F9,
     .text_lo = 0x8A94A6,
     .accent = 0x6C8CFF,
+    .on_accent = 0xF2F5F9,
     .warn = 0xF5A524,
+    .radius = 18,
+    .gap = 12,
+    .pad = 14,
+    .hero = &slate_font_hero_44,
+    .body = &slate_font_body_20,
+    .caption = &slate_font_caption_15,
+    .icons = &slate_font_icons_28,
+    .icons_large = &slate_font_icons_48,
+};
+
+static const slate_theme_t MINIMAL_LIGHT = {
+    .id = "minimal-light",
+    .bg = 0xF4F6F8,
+    .surface = 0xFFFFFF,
+    .surface_alt = 0xE5EAF0,
+    .text_hi = 0x172033,
+    .text_lo = 0x526176,
+    .accent = 0x315FC6,
+    .on_accent = 0xFFFFFF,
+    .warn = 0xA13C00,
     .radius = 18,
     .gap = 12,
     .pad = 14,
@@ -44,7 +65,7 @@ static const slate_diagnostic_palette_t DIAGNOSTICS = {
     },
 };
 
-static const slate_theme_t *const THEMES[] = {&MIDNIGHT};
+static const slate_theme_t *const THEMES[] = {&MIDNIGHT, &MINIMAL_LIGHT};
 
 typedef struct {
     const char *name;

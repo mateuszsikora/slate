@@ -1192,8 +1192,8 @@ esp_err_t slate_api_selftest(void)
     int failures = 0;
     failures += !selftest_request("GET /info is public", INFO, 200,
                                   "\"model\":\"" MODEL_ID "\"");
-    failures += !selftest_request("GET /info advertises Midnight", INFO, 200,
-                                  "\"themes\":[\"midnight\"]");
+    failures += !selftest_request("GET /info advertises compiled themes", INFO, 200,
+                                  "\"themes\":[\"midnight\",\"minimal-light\"]");
     failures += !selftest_request("GET /status needs a token", STATUS_NO_TOKEN, 401,
                                   "\"error\":\"unauthorized\"");
     failures += !selftest_request("wrong bearer token rejected", STATUS_WRONG_TOKEN, 401,

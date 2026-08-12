@@ -751,12 +751,15 @@ Appearance derives from tokens. Users choose a theme and optionally an accent co
   "text_hi": "0xF2F5F9",
   "text_lo": "0x8A94A6",
   "accent": "0x6C8CFF",
+  "on_accent": "0xF2F5F9",
   "warn": "0xF5A524",
   "radius": 18,
   "gap": 12,
   "pad": 14
 }
 ```
+
+`on_accent` is the foreground colour for text and icons rendered on an accent-filled surface.
 
 Two themes at launch: Midnight (dark) and Minimal Light. Themes live in firmware, not in user configuration; `GET /info` lists the available ids so the editor never hardcodes them.
 
