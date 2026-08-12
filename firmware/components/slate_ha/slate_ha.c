@@ -682,6 +682,15 @@ static const char *catalog_command(slate_ha_catalog_stage_t stage)
     return stage < SLATE_HA_CATALOG_STAGE_COUNT ? COMMANDS[stage] : NULL;
 }
 
+static void connection_cancel_catalog(void)
+{
+    for (slate_ha_catalog_stage_t stage = 0;
+         stage < SLATE_HA_CATALOG_STAGE_COUNT; stage++) {
+        atomic_store(&s_main.catalog_ids[stage], 0);
+    }
+    slate_ha_catalog_cancel();
+}
+
 /** Ask for the four §5.7 payloads once, with ids reserved before any send. */
 static void connection_refresh_catalog(void)
 {
@@ -1092,10 +1101,7 @@ static void connection_destroy(void)
     atomic_store(&s_main.enabled, false);
     atomic_store(&s_main.authenticated, false);
     atomic_store(&s_main.subscription_id, 0);
-    for (slate_ha_catalog_stage_t stage = 0;
-         stage < SLATE_HA_CATALOG_STAGE_COUNT; stage++) {
-        atomic_store(&s_main.catalog_ids[stage], 0);
-    }
+    connection_cancel_catalog();
     if (s_main.client == NULL) {
         if (s_main.event_context != NULL) {
             payload_reset(&s_main.event_context->message);
@@ -1218,6 +1224,7 @@ static void manager_task(void *arg)
         case CMD_WIFI_DOWN:
             s_wifi_up = false;
             atomic_store(&s_main.authenticated, false);
+            connection_cancel_catalog();
             clear_bus_actions("wifi_disconnected");
             if (slate_store_ha_token_is_set() &&
                 !atomic_load(&s_main.auth_rejected)) {
@@ -1294,6 +1301,7 @@ static void manager_task(void *arg)
         case CMD_CLEAR_ACTIONS:
             if (received.generation == s_main.generation) {
                 slate_ha_action_clear();
+                connection_cancel_catalog();
             }
             break;
         }

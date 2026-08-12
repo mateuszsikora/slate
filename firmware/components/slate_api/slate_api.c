@@ -841,15 +841,28 @@ static esp_err_t append_bound_resources(const char *provider, cJSON *array)
 
 static esp_err_t resources_handler(httpd_req_t *req)
 {
-    char query[64];
     char provider[SLATE_PROVIDER_ID_MAX + 1];
     size_t query_len = httpd_req_get_url_query_len(req);
-    bool has_provider = query_len > 0 && query_len < sizeof(query) &&
-                        httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
-                        httpd_query_key_value(query, "provider", provider,
-                                              sizeof(provider)) == ESP_OK &&
-                        provider[0] != '\0';
-    if (!has_provider) {
+    if (query_len == 0) {
+        return slate_api_refuse(req, "400 Bad Request", "provider_required");
+    }
+
+    char *query = malloc(query_len + 1);
+    if (query == NULL) {
+        return slate_api_send_json(req, NULL);
+    }
+    esp_err_t query_err = httpd_req_get_url_query_str(req, query, query_len + 1);
+    esp_err_t provider_err = query_err == ESP_OK
+                                 ? httpd_query_key_value(query, "provider", provider,
+                                                        sizeof(provider))
+                                 : query_err;
+    free(query);
+    if (provider_err == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        /* A present id outside the public provider-id bound is unknown, not
+         * missing. Keep the same answer as any other non-registered id. */
+        return slate_api_refuse(req, "404 Not Found", "provider_not_found");
+    }
+    if (provider_err != ESP_OK || provider[0] == '\0') {
         return slate_api_refuse(req, "400 Bad Request", "provider_required");
     }
 
@@ -1211,6 +1224,10 @@ esp_err_t slate_api_selftest(void)
          "resources require provider"},
         {"/api/v1/resources?provider=does-not-exist", 404,
          "\"error\":\"provider_not_found\"", "resources reject unknown provider"},
+        {"/api/v1/resources?provider=unknown-provider-long", 404,
+         "\"error\":\"provider_not_found\"", "resources reject long unknown provider"},
+        {"/api/v1/resources?provider=direct&padding=1234567890123456789012345678901234567890",
+         200, "\"resources\":[", "resources accept unrelated query fields"},
         {"/api/v1/resources?provider=direct", 200, "\"resources\":[",
          "direct resources use common route"},
     };

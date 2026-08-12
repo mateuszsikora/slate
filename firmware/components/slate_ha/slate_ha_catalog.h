@@ -25,6 +25,9 @@ esp_err_t slate_ha_catalog_accept(slate_ha_catalog_stage_t stage, bool success,
                                   const cJSON *result, bool *complete,
                                   bool *degraded);
 
+/* Abandon only the in-flight refresh; the last complete catalog stays valid. */
+void slate_ha_catalog_cancel(void);
+
 /* `slate_api_resources_append_fn` implementation for the HA provider. */
 esp_err_t slate_ha_catalog_append(void *ctx, cJSON *array);
 

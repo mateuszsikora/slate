@@ -62,9 +62,9 @@ static void *psram_calloc(size_t count, size_t size)
     if (count == 0) {
         return NULL;
     }
-    return heap_caps_calloc_prefer(count, size, 2,
-                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
-                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    /* §5.7 makes this catalog PSRAM-owned. Falling back to internal RAM would
+     * let one large HA instance consume memory reserved for Wi-Fi and DMA. */
+    return heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
 static void refresh_free(refresh_t *refresh)
@@ -273,6 +273,38 @@ static void join_areas(refresh_t *refresh)
     }
 }
 
+static const slate_resource_t *find_cached_resource(const char *resource,
+                                                    slate_kind_t kind)
+{
+    for (size_t i = 0; i < s_resource_count; i++) {
+        if (s_resources[i].kind == kind &&
+            strcmp(s_resources[i].resource, resource) == 0) {
+            return &s_resources[i];
+        }
+    }
+    return NULL;
+}
+
+static void preserve_unavailable_state(refresh_t *refresh)
+{
+    for (size_t i = 0; i < refresh->resource_count; i++) {
+        slate_resource_t *fresh = &refresh->resources[i];
+        if (fresh->presentation != SLATE_PRESENT_UNAVAILABLE) {
+            continue;
+        }
+        const slate_resource_t *cached = find_cached_resource(fresh->resource,
+                                                               fresh->kind);
+        if (cached == NULL) {
+            continue;
+        }
+        fresh->state = cached->state;
+        fresh->capabilities = cached->capabilities;
+        if (fresh->name[0] == '\0') {
+            strlcpy(fresh->name, cached->name, sizeof(fresh->name));
+        }
+    }
+}
+
 esp_err_t slate_ha_catalog_init(void)
 {
     if (s_lock != NULL) {
@@ -353,6 +385,9 @@ esp_err_t slate_ha_catalog_accept(slate_ha_catalog_stage_t stage, bool success,
         if (registries_ok) {
             join_areas(&s_refresh);
         }
+        /* §5.2 keeps the last known value while availability is false. The
+         * registry join remains fresh (or deliberately flat) for this fetch. */
+        preserve_unavailable_state(&s_refresh);
         slate_resource_t *old = s_resources;
         s_resources = s_refresh.resources;
         s_resource_count = s_refresh.resource_count;
@@ -368,6 +403,16 @@ esp_err_t slate_ha_catalog_accept(slate_ha_catalog_stage_t stage, bool success,
     /* Registry failure is the supported flat fallback. State failure cannot
      * produce a fresh picker and deliberately leaves the previous cache. */
     return states_ok ? ESP_OK : ESP_FAIL;
+}
+
+void slate_ha_catalog_cancel(void)
+{
+    if (s_lock == NULL) {
+        return;
+    }
+    LOCK();
+    refresh_free(&s_refresh);
+    UNLOCK();
 }
 
 esp_err_t slate_ha_catalog_append(void *ctx, cJSON *array)
@@ -443,6 +488,12 @@ esp_err_t slate_ha_catalog_selftest(void)
         "\"unit_of_measurement\":\"°C\",\"device_class\":\"temperature\"}},"
         "{\"entity_id\":\"switch.unsupported\",\"state\":\"on\","
         "\"attributes\":{\"friendly_name\":\"Unsupported\"}}]";
+    static const char UNAVAILABLE_STATES[] =
+        "[{\"entity_id\":\"light.kitchen\",\"state\":\"unavailable\","
+        "\"attributes\":{\"friendly_name\":\"Kitchen light\"}},"
+        "{\"entity_id\":\"sensor.office_temperature\",\"state\":\"21.5\","
+        "\"attributes\":{\"friendly_name\":\"Office temperature\","
+        "\"unit_of_measurement\":\"°C\",\"device_class\":\"temperature\"}}]";
 
     unsigned failures = 0;
 #define CHECK(condition, name) do {                                                \
@@ -474,6 +525,37 @@ esp_err_t slate_ha_catalog_selftest(void)
               string_field_is(cJSON_GetArrayItem(area_aware, 1), "area", "Office"),
           "entity area wins and device area supplies the fallback");
     cJSON_Delete(area_aware);
+
+    complete = false;
+    degraded = false;
+    CHECK(slate_ha_catalog_begin() == ESP_OK &&
+              accept_fixture(SLATE_HA_CATALOG_ENTITIES, true, ENTITIES,
+                             &complete, &degraded) && !complete &&
+              accept_fixture(SLATE_HA_CATALOG_DEVICES, true, DEVICES,
+                             &complete, &degraded) && !complete &&
+              accept_fixture(SLATE_HA_CATALOG_AREAS, true, AREAS,
+                             &complete, &degraded) && !complete &&
+              accept_fixture(SLATE_HA_CATALOG_STATES, true, UNAVAILABLE_STATES,
+                             &complete, &degraded) && complete && !degraded,
+          "refresh an unavailable resource against the previous catalog");
+
+    cJSON *unavailable = cJSON_CreateArray();
+    const cJSON *unavailable_light = NULL;
+    const cJSON *unavailable_state = NULL;
+    CHECK(unavailable != NULL && slate_ha_catalog_append(NULL, unavailable) == ESP_OK &&
+              cJSON_GetArraySize(unavailable) == 2 &&
+              (unavailable_light = cJSON_GetArrayItem(unavailable, 0)) != NULL &&
+              cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(
+                  unavailable_light, "available")) &&
+              (unavailable_state = cJSON_GetObjectItemCaseSensitive(
+                  unavailable_light, "state")) != NULL &&
+              string_field_is(unavailable_state, "power", "on") &&
+              cJSON_GetNumberValue(cJSON_GetObjectItemCaseSensitive(
+                  unavailable_state, "brightness")) == 50 &&
+              cJSON_IsObject(cJSON_GetObjectItemCaseSensitive(
+                  unavailable_light, "capabilities")),
+          "unavailable resource retains its last state and capabilities");
+    cJSON_Delete(unavailable);
 
     complete = false;
     degraded = false;
@@ -517,6 +599,21 @@ esp_err_t slate_ha_catalog_selftest(void)
                   cJSON_GetArrayItem(preserved, 0), "area") == NULL,
           "failed get_states refresh preserves the previous catalog");
     cJSON_Delete(preserved);
+
+    complete = false;
+    degraded = false;
+    bool pending = slate_ha_catalog_begin() == ESP_OK &&
+                   accept_fixture(SLATE_HA_CATALOG_ENTITIES, true, ENTITIES,
+                                  &complete, &degraded) && !complete;
+    slate_ha_catalog_cancel();
+    cJSON *after_cancel = cJSON_CreateArray();
+    CHECK(pending && after_cancel != NULL &&
+              slate_ha_catalog_append(NULL, after_cancel) == ESP_OK &&
+              cJSON_GetArraySize(after_cancel) == 2 &&
+              slate_ha_catalog_accept(SLATE_HA_CATALOG_DEVICES, true, NULL,
+                                      &complete, &degraded) == ESP_ERR_INVALID_STATE,
+          "cancelled refresh releases pending data and preserves the catalog");
+    cJSON_Delete(after_cancel);
     slate_ha_catalog_clear();
 
 #undef CHECK
