@@ -21,7 +21,6 @@
 
 #define HA_COVER_FEATURE_OPEN         (1u << 0)
 #define HA_COVER_FEATURE_CLOSE        (1u << 1)
-#define HA_COVER_FEATURE_SET_POSITION (1u << 2)
 #define HA_COVER_FEATURE_STOP         (1u << 3)
 
 static const char *TAG = "slate_ha_entities";
@@ -478,10 +477,6 @@ static bool normalize_entity(ha_entity_t *entity, ha_entity_t *out,
             if ((features & HA_COVER_FEATURE_CLOSE) != 0) {
                 caps.actions |= 1u << SLATE_ACTION_CLOSE;
             }
-            if ((features & HA_COVER_FEATURE_SET_POSITION) != 0) {
-                caps.actions |= 1u << SLATE_ACTION_SET_POSITION;
-                caps.position_max = 100;
-            }
             entity->normalized_capabilities = caps;
         }
         *available = current;
@@ -891,8 +886,8 @@ esp_err_t slate_ha_entities_selftest(void)
                                       SLATE_ACTION_STOP) &&
               slate_capabilities_have(&cover.normalized_capabilities,
                                       SLATE_ACTION_CLOSE) &&
-              slate_capabilities_have(&cover.normalized_capabilities,
-                                      SLATE_ACTION_SET_POSITION),
+              !slate_capabilities_have(&cover.normalized_capabilities,
+                                       SLATE_ACTION_SET_POSITION),
           "map cover position, motion and feature bits");
 
     cJSON *cover_change = cJSON_Parse(

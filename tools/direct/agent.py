@@ -198,7 +198,10 @@ class Cover:
         if params:
             return False
         if action == "toggle":
-            self.motion = "closing" if self.position > 0 else "opening"
+            if self.motion != "idle":
+                self.motion = "idle"
+            else:
+                self.motion = "closing" if self.position > 0 else "opening"
         elif action == "open":
             self.motion = "opening"
         elif action == "stop":

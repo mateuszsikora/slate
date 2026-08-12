@@ -431,6 +431,30 @@ static slate_config_parse_status_t parse_scene_fixture(const char *size,
     return status;
 }
 
+static slate_config_parse_status_t parse_cover_fixture(const char *size,
+                                                       slate_config_report_t *report)
+{
+    static const char PREFIX[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\","
+        "\"pages\":[{\"id\":\"home\",\"tiles\":[{\"id\":\"cover\","
+        "\"type\":\"cover\",\"pos\":[0,0],\"size\":";
+    static const char SUFFIX[] =
+        ",\"binding\":{\"provider\":\"direct\",\"resource\":\"blind\"}}]}]}";
+    size_t len = strlen(PREFIX) + strlen(size) + strlen(SUFFIX);
+    char *json = malloc(len + 1);
+    if (json == NULL) {
+        memset(report, 0, sizeof(*report));
+        report->status = SLATE_CONFIG_PARSE_OUT_OF_MEMORY;
+        return report->status;
+    }
+    snprintf(json, len + 1, "%s%s%s", PREFIX, size, SUFFIX);
+    slate_config_t *config = NULL;
+    slate_config_parse_status_t status = slate_config_parse(json, len, &config, report);
+    slate_config_free(config);
+    free(json);
+    return status;
+}
+
 esp_err_t slate_config_api_selftest(void)
 {
     int failures = 0;
@@ -513,6 +537,28 @@ esp_err_t slate_config_api_selftest(void)
                          config_report_has(&report, "binding_required",
                                            "/pages/0/tiles/0/bindings"),
                      "scene reports size and binding errors together");
+    slate_config_report_free(&report);
+
+    static const char *const COVER_SIZES[] = {"[1,1]", "[1,2]", "[2,1]"};
+    bool cover_sizes_ok = true;
+    for (size_t i = 0; i < sizeof(COVER_SIZES) / sizeof(COVER_SIZES[0]); i++) {
+        slate_config_parse_status_t status =
+            parse_cover_fixture(COVER_SIZES[i], &report);
+        cover_sizes_ok = cover_sizes_ok && status == SLATE_CONFIG_PARSE_OK;
+        slate_config_report_free(&report);
+    }
+    CONFIG_API_CHECK(cover_sizes_ok, "cover accepts its three layouts");
+    CONFIG_API_CHECK(parse_cover_fixture("[2,2]", &report) ==
+                             SLATE_CONFIG_PARSE_INVALID_CONFIG &&
+                         config_report_has(&report, "invalid_size",
+                                           "/pages/0/tiles/0/size"),
+                     "cover refuses 2x2 layout");
+    slate_config_report_free(&report);
+    CONFIG_API_CHECK(parse_cover_fixture("[4,1]", &report) ==
+                             SLATE_CONFIG_PARSE_INVALID_CONFIG &&
+                         config_report_has(&report, "invalid_size",
+                                           "/pages/0/tiles/0/size"),
+                     "cover refuses 4x1 layout");
     slate_config_report_free(&report);
 
     ESP_LOGI(TAG, "selftest: %d failure(s)", failures);

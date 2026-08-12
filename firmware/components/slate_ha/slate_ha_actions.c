@@ -69,8 +69,7 @@ static bool domain_accepts(ha_action_domain_t domain, slate_action_t action)
                action == SLATE_ACTION_SET_COLOR_TEMPERATURE;
     case HA_ACTION_DOMAIN_COVER:
         return action == SLATE_ACTION_TOGGLE || action == SLATE_ACTION_OPEN ||
-               action == SLATE_ACTION_STOP || action == SLATE_ACTION_CLOSE ||
-               action == SLATE_ACTION_SET_POSITION;
+               action == SLATE_ACTION_STOP || action == SLATE_ACTION_CLOSE;
     case HA_ACTION_DOMAIN_SCENE:
         return action == SLATE_ACTION_ACTIVATE;
     case HA_ACTION_DOMAIN_INVALID:
@@ -112,12 +111,6 @@ esp_err_t slate_ha_action_request_copy(slate_ha_action_request_t *out, uint32_t 
     case SLATE_ACTION_SET_COLOR_TEMPERATURE:
         if (request->value_type != SLATE_ACTION_VALUE_NUMBER ||
             request->value.number <= 0 || request->value.number > INT16_MAX) {
-            return ESP_ERR_INVALID_ARG;
-        }
-        break;
-    case SLATE_ACTION_SET_POSITION:
-        if (request->value_type != SLATE_ACTION_VALUE_NUMBER ||
-            request->value.number < 0 || request->value.number > 100) {
             return ESP_ERR_INVALID_ARG;
         }
         break;
@@ -204,15 +197,6 @@ esp_err_t slate_ha_action_frame(uint32_t command_id,
         }
         service = "turn_on";
         value_name = "color_temp_kelvin";
-        value = request->value.number;
-        break;
-    case SLATE_ACTION_SET_POSITION:
-        if (request->value_type != SLATE_ACTION_VALUE_NUMBER ||
-            request->value.number < 0 || request->value.number > 100) {
-            return ESP_ERR_INVALID_ARG;
-        }
-        service = "set_cover_position";
-        value_name = "position";
         value = request->value.number;
         break;
     case SLATE_ACTION_ACTIVATE:
@@ -534,15 +518,8 @@ esp_err_t slate_ha_actions_selftest(void)
     source.action = SLATE_ACTION_SET_POSITION;
     source.value_type = SLATE_ACTION_VALUE_NUMBER;
     source.value.number = 63;
-    CHECK(slate_ha_action_request_copy(&request, 52, &source) == ESP_OK &&
-              slate_ha_action_frame(110, &request, &frame) == ESP_OK &&
-              string_field(frame, "domain", "cover") &&
-              string_field(frame, "service", "set_cover_position") &&
-              number_field(cJSON_GetObjectItemCaseSensitive(frame, "service_data"),
-                           "position", 63),
-          "cover position maps to native position service");
-    cJSON_Delete(frame);
-    frame = NULL;
+    CHECK(slate_ha_action_request_copy(&request, 52, &source) == ESP_ERR_NOT_SUPPORTED,
+          "reject cover position outside normalized v1 actions");
 
     source.action = SLATE_ACTION_SET_BRIGHTNESS;
     source.value_type = SLATE_ACTION_VALUE_NUMBER;
