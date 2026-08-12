@@ -102,7 +102,7 @@ static void *s_lvgl_pool;
 static esp_err_t s_init_result = ESP_ERR_INVALID_STATE;
 static bool s_lvgl_initialized;
 static bool s_ready;
-static bool s_backlight_on;
+static atomic_uchar s_backlight_level = ATOMIC_VAR_INIT(0);
 static bool s_first_frame_shown;
 static slate_display_heap_metrics_t s_heap_metrics;
 static int64_t s_heap_metrics_at_us;
@@ -437,7 +437,7 @@ static void display_resources_deinit(void)
     /* The expander must still have its bus while the glass is made dark. */
     if (s_expander) {
         cleanup_error("backlight", slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, false));
-        s_backlight_on = false;
+        atomic_store_explicit(&s_backlight_level, 0, memory_order_release);
         s_first_frame_shown = false;
     }
 
@@ -1156,23 +1156,47 @@ bool slate_display_ready(void)
 
 esp_err_t slate_display_backlight_set(bool on)
 {
-    if (!on && atomic_load_explicit(&s_setup_presentation_active, memory_order_acquire)) {
-        return ESP_ERR_INVALID_STATE;
+    return slate_display_brightness_set(on ? 100 : 0);
+}
+
+esp_err_t slate_display_brightness_set(uint8_t percent)
+{
+    if (percent > 100) {
+        return ESP_ERR_INVALID_ARG;
     }
     if (!s_expander) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t err = slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, on);
+    if (percent < 100 &&
+        atomic_load_explicit(&s_setup_presentation_active, memory_order_acquire)) {
+        percent = 100;
+    }
+
+    /* S-2 confirmed the installed path is a binary CH422G output. Keep the
+     * percentage contract here so #41's configured LEDC variant does not leak
+     * into the scheduler or its callers. */
+    uint8_t actual = percent == 0 ? 0 : 100;
+    esp_err_t err = slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, actual > 0);
     if (err == ESP_OK) {
-        s_backlight_on = on;
+        atomic_store_explicit(&s_backlight_level, actual, memory_order_release);
     }
     return err;
 }
 
 bool slate_display_backlight_is_on(void)
 {
-    return s_backlight_on;
+    return atomic_load_explicit(&s_backlight_level, memory_order_acquire) > 0;
+}
+
+uint8_t slate_display_brightness_level(void)
+{
+    return atomic_load_explicit(&s_backlight_level, memory_order_acquire);
+}
+
+bool slate_display_setup_active(void)
+{
+    return atomic_load_explicit(&s_setup_presentation_active, memory_order_acquire);
 }
 
 slate_display_backlight_mode_t slate_display_backlight_mode(void)

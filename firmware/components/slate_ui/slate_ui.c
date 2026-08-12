@@ -19,6 +19,7 @@
 #include "lvgl.h"
 
 #include "slate_action.h"
+#include "slate_brightness.h"
 #include "slate_component.h"
 #include "slate_cover.h"
 #include "slate_display.h"
@@ -801,6 +802,13 @@ static esp_err_t rebuild_on_task(const slate_config_t *config)
 
     if (config->settings.timezone != NULL) {
         (void) slate_time_set_timezone(config->settings.timezone);
+    }
+    esp_err_t brightness_err = slate_brightness_configure(&config->settings);
+    if (brightness_err != ESP_OK) {
+        /* A headless or otherwise degraded display must not make a valid
+         * dashboard configuration impossible to activate through the API. */
+        ESP_LOGW(TAG, "brightness settings unavailable: %s",
+                 esp_err_to_name(brightness_err));
     }
     activate_tree(fresh);
     slate_state_drain(discard_changed, NULL);

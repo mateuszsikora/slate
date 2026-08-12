@@ -27,6 +27,7 @@
 
 #include "slate_api.h"
 #include "slate_action.h"
+#include "slate_brightness.h"
 #include "slate_coredump.h"
 #include "slate_config_api.h"
 #include "slate_direct.h"
@@ -402,12 +403,6 @@ static void start_network(void)
         ESP_LOGE(TAG, "clock degraded: %s — continuing", esp_err_to_name(err));
         return;
     }
-
-#ifdef SLATE_TIMEZONE
-    /* §3.3 puts this in the configuration document, which #19 parses. The knob
-     * stands in until it does, and goes away with it. */
-    slate_time_set_timezone(SLATE_TIMEZONE);
-#endif
 }
 
 static void start_api(void)
@@ -516,6 +511,15 @@ static void start_display(void)
     esp_err_t err = slate_display_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "display degraded: %s — continuing headless", esp_err_to_name(err));
+    }
+}
+
+static void start_brightness(void)
+{
+    esp_err_t err = slate_brightness_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "brightness policy degraded: %s — continuing",
+                 esp_err_to_name(err));
     }
 }
 
@@ -650,6 +654,7 @@ void app_main(void)
      * S-2's done-when load is still real: the test pattern keeps animating
      * while the station or setup access point runs underneath it. */
     start_display();
+    start_brightness();
 
     /* The API and the setup portal come up before the radio, so that the setup
      * access point has a page to serve and a subscriber in place by the time the
@@ -657,6 +662,14 @@ void app_main(void)
     start_api();
     start_ui();
     start_network();
+
+#ifdef SLATE_BRIGHTNESS_SELFTEST
+    esp_err_t brightness_test_err = slate_brightness_selftest();
+    if (brightness_test_err != ESP_OK) {
+        ESP_LOGE(TAG, "brightness selftest failed: %s",
+                 esp_err_to_name(brightness_test_err));
+    }
+#endif
 
     /* Before the health check is armed, not after: the panic is supposed to
      * happen while the image is still unverified, and the health task runs at a
