@@ -1,14 +1,19 @@
 /*
- * The editor shell (design.md §10, issue #31).
- *
- * What lives here is everything the editor needs before there is anything to
- * edit: pairing with the token from §4.3's QR, the connection to the device
- * and the frame the grid, inspector and library of #32 mount into.
+ * The editor shell and visual dashboard editor (design.md §10).
+ * Pairing and connection state stay here beside #32's draft, preview and
+ * publication lifecycle so a reconnect cannot silently publish stale work.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { ApiError, DeviceClient, type Config, type DeviceInfo, type DeviceStatus } from './lib/api'
+import {
+  ApiError,
+  DeviceClient,
+  type Config,
+  type DeviceInfo,
+  type DeviceStatus,
+  type Resource,
+} from './lib/api'
 import { deviceAnswersAt, mdnsOrigin, servedByDevice } from './lib/discovery'
 import { DeviceSocket, type ConnectionState, type LogFrame, type StatusFrame } from './lib/socket'
 import { claimTokenFromUrl, forgetToken, readStoredToken, storeToken } from './lib/token'
@@ -34,7 +39,15 @@ export function App() {
   const [info, setInfo] = useState<DeviceInfo | null>(null)
   const [status, setStatus] = useState<DeviceStatus | null>(null)
   const [heartbeat, setHeartbeat] = useState<StatusFrame | null>(null)
-  const [config, setConfig] = useState<Config | null>(null)
+  const [draft, setDraft] = useState<Config | null>(null)
+  const [persistedConfig, setPersistedConfig] = useState<Config | null>(null)
+  const [activePageId, setActivePageId] = useState<string | null>(null)
+  const [dirty, setDirty] = useState(false)
+  const [previewState, setPreviewState] = useState<
+    'idle' | 'waiting' | 'sending' | 'live' | 'error'
+  >('idle')
+  const [previewMessage, setPreviewMessage] = useState<string | null>(null)
+  const [publishing, setPublishing] = useState(false)
   const [connection, setConnection] = useState<ConnectionState>('connecting')
   const [mode, setMode] = useState<'normal' | 'edit'>('normal')
   const [logs, setLogs] = useState<LogLine[]>([])
@@ -42,8 +55,27 @@ export function App() {
 
   const socketRef = useRef<DeviceSocket | null>(null)
   const logSequence = useRef(0)
+  const modeRef = useRef<'normal' | 'edit'>('normal')
+  const dirtyRef = useRef(false)
+  const previewSequence = useRef(0)
 
   const client = useCallback((withToken: string | null) => new DeviceClient({ token: withToken }), [])
+
+  const acceptDeviceConfig = useCallback((fetched: Config | null) => {
+    previewSequence.current += 1
+    setDraft(fetched)
+    setPersistedConfig(fetched)
+    setDirty(false)
+    dirtyRef.current = false
+    setPreviewState('idle')
+    setPreviewMessage(null)
+    setActivePageId((current) => {
+      if (fetched?.pages.some((page) => page.id === current)) {
+        return current
+      }
+      return fetched?.home_page ?? fetched?.pages[0]?.id ?? null
+    })
+  }, [])
 
   /* --- Pairing ---------------------------------------------------------- */
 
@@ -96,13 +128,25 @@ export function App() {
   )
 
   const unpair = useCallback(() => {
+    if (dirtyRef.current && !window.confirm('Discard unpublished changes and unpair this browser?')) {
+      return
+    }
+    previewSequence.current += 1
+    socketRef.current?.setMode('normal')
     socketRef.current?.stop()
     socketRef.current = null
     forgetToken()
     setToken(null)
     setStatus(null)
     setHeartbeat(null)
-    setConfig(null)
+    setDraft(null)
+    setPersistedConfig(null)
+    setDirty(false)
+    dirtyRef.current = false
+    setPreviewState('idle')
+    setPreviewMessage(null)
+    setMode('normal')
+    modeRef.current = 'normal'
     setLogs([])
     setPhase('pairing')
   }, [])
@@ -155,6 +199,14 @@ export function App() {
           /* The panel returns to normal 60 s after the pings stop (§4.2), so
            * the badge must not keep claiming edit mode through an outage. */
           setMode('normal')
+          modeRef.current = 'normal'
+          /* setMode also updates DeviceSocket.desiredMode, preventing a later
+           * reconnect from silently restoring edit mode behind the UI. */
+          socketRef.current?.setMode('normal')
+          if (dirtyRef.current) {
+            setPreviewState('waiting')
+            setPreviewMessage('Connection lost; the draft remains in this browser.')
+          }
         }
       },
       onStatus: setHeartbeat,
@@ -168,10 +220,14 @@ export function App() {
       },
       onReloaded: () => {
         /* §4.1 publishes this after every activated replacement, including one
-         * somebody else made. The document on screen is stale from here. */
+         * somebody else made. A local transient replacement is already the
+         * draft on screen; fetching it back would race the next drag sample. */
+        if (dirtyRef.current) {
+          return
+        }
         void client(token)
           .config()
-          .then(setConfig)
+          .then(acceptDeviceConfig)
           .catch(() => undefined)
       },
     })
@@ -188,7 +244,7 @@ export function App() {
       socket.stop()
       socketRef.current = null
     }
-  }, [phase, token, client])
+  }, [phase, token, client, acceptDeviceConfig])
 
   /* --- What the heartbeat does not carry -------------------------------- */
 
@@ -223,9 +279,9 @@ export function App() {
     }
     client(token)
       .config()
-      .then(setConfig)
+      .then(acceptDeviceConfig)
       .catch(() => undefined)
-  }, [phase, token, client])
+  }, [phase, token, client, acceptDeviceConfig])
 
   /* --- §4.3's fallback to the mDNS name --------------------------------- */
 
@@ -237,7 +293,7 @@ export function App() {
    */
   useEffect(() => {
     const name = info?.name
-    if (name === undefined || movingTo !== null || !servedByDevice()) {
+    if (name === undefined || movingTo !== null || dirty || !servedByDevice()) {
       return
     }
     const offline = phase === 'unreachable' || (phase === 'ready' && connection === 'offline')
@@ -268,15 +324,82 @@ export function App() {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [phase, connection, info, token, movingTo])
+  }, [phase, connection, dirty, info, token, movingTo])
 
   /* --- Edit mode (§6.5) -------------------------------------------------- */
 
   const toggleMode = useCallback(() => {
     const next = mode === 'edit' ? 'normal' : 'edit'
+    if (next === 'normal') {
+      previewSequence.current += 1
+    }
     socketRef.current?.setMode(next)
+    modeRef.current = next
     setMode(next)
+    if (dirtyRef.current) {
+      setPreviewState('waiting')
+      setPreviewMessage(next === 'edit' ? 'Waiting to update the panel.' : 'Preview is paused.')
+    }
   }, [mode])
+
+  const changeDraft = useCallback((next: Config) => {
+    setDraft(next)
+    setDirty(true)
+    dirtyRef.current = true
+    setPreviewState(modeRef.current === 'edit' ? 'sending' : 'waiting')
+    setPreviewMessage(
+      modeRef.current === 'edit' ? null : 'Preview is paused. Enter preview mode to update the panel.',
+    )
+  }, [])
+
+  useEffect(() => {
+    if (!dirty || draft === null) {
+      return
+    }
+    if (mode !== 'edit' || connection !== 'online' || token === null) {
+      previewSequence.current += 1
+      setPreviewState('waiting')
+      setPreviewMessage(
+        mode !== 'edit'
+          ? 'Preview is paused. Enter preview mode to update the panel.'
+          : 'The panel is offline; the draft remains in this browser.',
+      )
+      return
+    }
+
+    const sequence = ++previewSequence.current
+    setPreviewState('sending')
+    const timer = window.setTimeout(() => {
+      const document = JSON.stringify(draft)
+      void client(token)
+        .previewConfig(document)
+        .then(() => {
+          if (previewSequence.current === sequence) {
+            setPreviewState('live')
+            setPreviewMessage(null)
+          }
+        })
+        .catch((error: unknown) => {
+          if (previewSequence.current === sequence) {
+            setPreviewState('error')
+            setPreviewMessage(previewError(error))
+          }
+        })
+    }, 300)
+    return () => window.clearTimeout(timer)
+  }, [client, connection, dirty, draft, mode, token])
+
+  useEffect(() => {
+    if (!dirty) {
+      return
+    }
+    const protectDraft = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    window.addEventListener('beforeunload', protectDraft)
+    return () => window.removeEventListener('beforeunload', protectDraft)
+  }, [dirty])
 
   /* --- Configuration files (§10) --------------------------------------- */
 
@@ -296,15 +419,103 @@ export function App() {
         throw new ApiError(401, 'unauthorized')
       }
       await client(token).publishConfig(document)
-      setConfig(imported)
+      acceptDeviceConfig(imported)
+    },
+    [acceptDeviceConfig, client, token],
+  )
+
+  const publishDraft = useCallback(async () => {
+    if (token === null || draft === null || publishing) {
+      return
+    }
+    setPublishing(true)
+    setPreviewMessage(null)
+    try {
+      await client(token).publishConfig(JSON.stringify(draft))
+      acceptDeviceConfig(draft)
+    } catch (error) {
+      setPreviewState('error')
+      setPreviewMessage(previewError(error))
+    } finally {
+      setPublishing(false)
+    }
+  }, [acceptDeviceConfig, client, draft, publishing, token])
+
+  const discardDraft = useCallback(() => {
+    if (!dirtyRef.current || !window.confirm('Discard all unpublished changes?')) {
+      return
+    }
+    previewSequence.current += 1
+    socketRef.current?.setMode('normal')
+    modeRef.current = 'normal'
+    setMode('normal')
+    acceptDeviceConfig(persistedConfig)
+  }, [acceptDeviceConfig, persistedConfig])
+
+  const loadResources = useCallback(
+    async (provider: string): Promise<Resource[]> => {
+      if (token === null) {
+        throw new ApiError(401, 'unauthorized')
+      }
+      return client(token).resources(provider)
     },
     [client, token],
   )
+
+  const createDashboard = useCallback(() => {
+    const firstTheme = info?.themes[0] ?? 'midnight'
+    const next: Config = {
+      schema: 1,
+      theme: firstTheme,
+      home_page: 'home',
+      pages: [{ id: 'home', title: 'Home', tiles: [] }],
+    }
+    setActivePageId('home')
+    changeDraft(next)
+  }, [changeDraft, info])
+
+  const addPage = useCallback(() => {
+    if (draft === null) {
+      createDashboard()
+      return
+    }
+    const used = new Set(draft.pages.map((page) => page.id))
+    let suffix = draft.pages.length + 1
+    while (used.has(`page-${suffix}`)) suffix += 1
+    const id = `page-${suffix}`
+    changeDraft({
+      ...draft,
+      home_page: draft.home_page ?? draft.pages[0]?.id ?? id,
+      pages: [...draft.pages, { id, title: `Page ${suffix}`, tiles: [] }],
+    })
+    setActivePageId(id)
+  }, [changeDraft, createDashboard, draft])
+
+  useEffect(() => {
+    if (draft === null || draft.pages.length === 0) {
+      setActivePageId(null)
+      return
+    }
+    if (!draft.pages.some((page) => page.id === activePageId)) {
+      setActivePageId(draft.home_page ?? draft.pages[0]?.id ?? null)
+    }
+  }, [activePageId, draft])
 
   const retry = useCallback(() => {
     setPhase('starting')
     void open()
   }, [open])
+
+  const providers =
+    heartbeat !== null
+      ? Object.entries(heartbeat.providers).map(([id, providerStatus]) => ({
+          id,
+          status: providerStatus,
+        }))
+      : (status?.providers.map((providerStatus) => ({
+          id: providerStatus.id,
+          status: providerStatus.status,
+        })) ?? [])
 
   /* --- Views ------------------------------------------------------------- */
 
@@ -333,16 +544,35 @@ export function App() {
     <div className="shell">
       <TopBar
         info={info}
-        config={config}
+        config={draft}
+        providers={providers}
         connection={connection}
         mode={mode}
+        activePageId={activePageId}
+        dirty={dirty}
+        publishing={publishing}
+        onSelectPage={setActivePageId}
+        onAddPage={addPage}
+        onThemeChange={(theme) => {
+          if (draft !== null) changeDraft({ ...draft, theme })
+        }}
+        onPublish={() => void publishDraft()}
+        onDiscard={discardDraft}
         onToggleMode={toggleMode}
         onUnpair={unpair}
       />
       <div className="shell__body">
         <Workspace
-          config={config}
+          config={draft}
+          activePageId={activePageId}
+          providers={providers}
+          previewState={previewState}
+          previewMessage={previewMessage}
+          dirty={dirty}
           deviceName={info?.name ?? 'slate'}
+          onCreate={createDashboard}
+          onChange={changeDraft}
+          onLoadResources={loadResources}
           onValidateConfig={validateImportedConfig}
           onPublishConfig={publishImportedConfig}
         />
@@ -353,4 +583,33 @@ export function App() {
       </div>
     </div>
   )
+}
+
+function previewError(error: unknown): string {
+  if (!(error instanceof ApiError)) {
+    return 'The panel could not apply the preview.'
+  }
+  if (error.code === 'unreachable') {
+    return 'The panel did not answer; the draft remains in this browser.'
+  }
+  if (error.code === 'edit_mode_required') {
+    return 'Enter preview mode before sending live changes.'
+  }
+  if (error.code === 'invalid_config' && typeof error.body === 'object' && error.body !== null) {
+    const body = error.body as {
+      config_errors?: { code?: string }[]
+      tile_errors?: Record<string, { code?: string }[]>
+    }
+    const first = body.config_errors?.[0]?.code
+    if (first !== undefined) return `The draft is not valid yet (${first}).`
+    const tileEntry = Object.entries(body.tile_errors ?? {})[0]
+    if (tileEntry !== undefined) {
+      const [tileId, errors] = tileEntry
+      const code = errors[0]?.code
+      return code === undefined
+        ? `Tile ${tileId} is not valid yet.`
+        : `Tile ${tileId} is not valid yet (${code}).`
+    }
+  }
+  return `The panel rejected the preview (${error.code}).`
 }
