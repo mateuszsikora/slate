@@ -20,4 +20,12 @@ firmware/components/slate_theme/assets/slate_icons.h
 # Font generation scratch — upstream TTFs are fetched, not vendored
 tools/fonts/.work/
 
+# The editor's dependencies and its build output. The bundle is a ~200 KB
+# single-file document generated from editor/src; the firmware build compresses
+# whatever is in dist/ into the image (design.md §10), so it is generated
+# before a build the way the fonts above are.
+# Run tools/editor/build.sh before building the firmware.
+editor/node_modules/
+editor/dist/
+
 .DS_Store

@@ -19,12 +19,14 @@ idf_component_register(
 # bad OTA or a first flash is most likely to leave empty).
 #
 # Generated rather than committed: a .gz in the repository is a second copy of
-# the page that reviews as binary and goes stale silently. portal/gzip.cmake is
-# also where §9.2's 24 KB budget is enforced, so the number is measured by the
-# build on every change to the page rather than by somebody remembering.
+# the page that reviews as binary and goes stale silently. ../../cmake/gzip.cmake
+# is also where §9.2's 24 KB budget is enforced, so the number is measured by the
+# build on every change to the page rather than by somebody remembering. The
+# script is shared with #31's editor bundle, which §10 caps the same way.
 #
 set(portal_source "${COMPONENT_DIR}/portal/portal.html")
 set(portal_gzipped "${CMAKE_CURRENT_BINARY_DIR}/portal.html.gz")
+set(gzip_script "${CMAKE_SOURCE_DIR}/cmake/gzip.cmake")
 
 add_custom_command(
     OUTPUT "${portal_gzipped}"
@@ -32,9 +34,10 @@ add_custom_command(
             -D "SOURCE=${portal_source}"
             -D "OUTPUT=${portal_gzipped}"
             -D "BUDGET=24576"
-            -P "${COMPONENT_DIR}/portal/gzip.cmake"
+            -D "LABEL=setup page"
+            -P "${gzip_script}"
     MAIN_DEPENDENCY "${portal_source}"
-    DEPENDS "${COMPONENT_DIR}/portal/gzip.cmake"
+    DEPENDS "${gzip_script}"
     COMMENT "Compressing the setup page"
     VERBATIM)
 

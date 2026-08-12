@@ -81,10 +81,53 @@ jobs:
           path: firmware/components/slate_theme/assets/*
           retention-days: 14
 
+  # §10's editor bundle. The firmware compresses it into the image, so the firmware
+  # job below cannot build without it — the same arrangement as the fonts above,
+  # and for the same reason: generated assets are not committed, and the container
+  # that builds the firmware has no Node in it.
+  #
+  # `tsc --noEmit` runs as part of `npm run build`, so a type error is a failed
+  # check rather than a bundle that ships and breaks in a browser nobody opened.
+  editor:
+    name: editor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: editor/package-lock.json
+
+      - name: Build
+        run: tools/editor/build.sh
+
+      # The number §10 budgets is the gzipped one, and firmware/cmake/gzip.cmake
+      # fails the firmware build when it is over 400 KB. Reported here as well so
+      # growth is visible in the pull request that causes it rather than in the
+      # build that finally refuses it.
+      - name: Report size
+        run: |
+          plain=$(stat -c %s editor/dist/index.html)
+          packed=$(gzip -9 -n -c editor/dist/index.html | wc -c)
+          {
+            echo '### Editor'
+            echo
+            echo "\`index.html\` — **$packed B** gzipped from $plain B, "\
+                 "$(python3 -c "print(f'{$packed / 409600 * 100:.1f}')") % of §10's 400 KB budget"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: editor
+          path: editor/dist/*
+          retention-days: 14
+
   firmware:
     name: firmware (${{ matrix.variant }})
     runs-on: ubuntu-latest
-    needs: fonts
+    needs: [fonts, editor]
     # Pinned to the toolchain docs/spikes/s3.md measured every number on and
     # firmware/dependencies.lock records, so a size reported here is comparable with
     # the spike rather than only with itself.
@@ -116,6 +159,13 @@ jobs:
         with:
           name: fonts
           path: firmware/components/slate_theme/assets
+
+      # slate_editor compresses this into the image and refuses to configure
+      # without it, so it arrives before the build for the same reason the fonts do.
+      - uses: actions/download-artifact@v8
+        with:
+          name: editor
+          path: editor/dist
 
       - uses: actions/cache@v6
         with:
@@ -260,7 +310,7 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
-    needs: [fonts, firmware]
+    needs: [fonts, editor, firmware]
     if: always()
     steps:
       - name: Gate

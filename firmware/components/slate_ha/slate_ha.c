@@ -31,6 +31,8 @@
 #include "freertos/task.h"
 #include "http_parser.h"
 #include "mdns.h"
+
+#include "slate_mdns.h"
 #include "slate_action.h"
 #include "slate_api.h"
 #include "slate_ha_actions.h"
@@ -153,7 +155,6 @@ static TaskHandle_t s_manager_task;
 static TaskHandle_t s_config_task;
 static main_connection_t s_main;
 static bool s_wifi_up;
-static atomic_bool s_mdns_ready;
 static bool s_auth_blocked;
 static atomic_bool s_resubscribe_queued;
 static bool s_initialized;
@@ -432,7 +433,7 @@ static esp_err_t discover_instances(discovered_instance_t *instances, size_t cap
                                     size_t *out_count)
 {
     *out_count = 0;
-    if (!atomic_load(&s_mdns_ready)) {
+    if (!slate_mdns_ready()) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1611,15 +1612,11 @@ esp_err_t slate_ha_start(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t err = mdns_init();
-    if (err == ESP_OK) {
-        atomic_store(&s_mdns_ready, true);
-        err = mdns_hostname_set(slate_store_device_name());
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "setting mDNS hostname: %s", esp_err_to_name(err));
-        }
-    } else {
-        ESP_LOGW(TAG, "Home Assistant discovery unavailable: %s", esp_err_to_name(err));
+    /* The responder belongs to slate_mdns (§4.3): the panel's own name is not
+     * this adapter's to claim, and starting it here made discovery depend on a
+     * component that has nothing to do with it. */
+    if (!slate_mdns_ready()) {
+        ESP_LOGW(TAG, "Home Assistant discovery unavailable: the mDNS responder is not running");
     }
 
     esp_err_t event_err = esp_event_handler_instance_register(

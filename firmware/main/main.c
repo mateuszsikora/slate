@@ -32,7 +32,9 @@
 #include "slate_config_api.h"
 #include "slate_direct.h"
 #include "slate_display.h"
+#include "slate_editor.h"
 #include "slate_ha.h"
+#include "slate_mdns.h"
 #include "slate_ota.h"
 #include "slate_setup.h"
 #include "slate_state.h"
@@ -387,6 +389,19 @@ static void start_network(void)
                  esp_err_to_name(err));
     }
 
+    /*
+     * §4.3's `slate-<mac>.local`, before the adapter below queries the
+     * responder it starts. Here rather than in start_api() because mDNS needs
+     * the default event loop and the interfaces, and both are this function's.
+     * The responder attaches to the station and to the setup access point, so
+     * the name works before the panel has ever joined a network.
+     */
+    err = slate_mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mDNS degraded: %s — the panel answers at its address only",
+                 esp_err_to_name(err));
+    }
+
     /* The adapter registers its API routes before the radio starts, then joins
      * the Wi-Fi lifecycle here once the event loop and station exist. Reading
      * the current station snapshot inside slate_ha_start() closes the small
@@ -501,6 +516,21 @@ static void start_api(void)
         ESP_LOGE(TAG, "setup access point unavailable: %s — a panel that cannot join a network "
                       "will need a cable",
                  esp_err_to_name(err));
+    }
+
+    /*
+     * §10's editor, and after the setup page rather than before it: the two
+     * share `GET /` and slate_api decides between them by interface, so this
+     * order only decides which of them is registered first — but a boot that
+     * failed halfway should have left the panel with the page that puts it on
+     * a network, not the one that arranges tiles on it.
+     *
+     * It also writes flash on the boots where the bundle changed, which is one
+     * more reason for it to come after everything that has to be reachable.
+     */
+    err = slate_editor_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "editor unavailable: %s — the API is unaffected", esp_err_to_name(err));
     }
 }
 

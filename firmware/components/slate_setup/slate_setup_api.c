@@ -592,11 +592,6 @@ esp_err_t slate_setup_api_init(void)
      * register function enforces the list — SLATE_API_AUTH_SETUP_AP is refused
      * for any other route — so this cannot grow by a component adding a handler.
      */
-    static const httpd_uri_t page = {
-        .uri = "/",
-        .method = HTTP_GET,
-        .handler = page_handler,
-    };
     static const httpd_uri_t scan = {
         .uri = SLATE_API_BASE_PATH "/wifi/scan",
         .method = HTTP_GET,
@@ -613,7 +608,10 @@ esp_err_t slate_setup_api_init(void)
         .handler = wifi_forget_handler,
     };
 
-    esp_err_t err = slate_api_register_uri(&page, SLATE_API_AUTH_SETUP_AP);
+    /* The page is the access point's half of `GET /`; #31's editor is the
+     * other half, and slate_api decides between them by the interface a
+     * request arrived on rather than by which of the two registered first. */
+    esp_err_t err = slate_api_register_root(SLATE_API_ROOT_SETUP_AP, page_handler, NULL);
     if (err == ESP_OK) {
         err = slate_api_register_uri(&scan, SLATE_API_AUTH_SETUP_AP);
     }

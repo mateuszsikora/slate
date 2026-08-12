@@ -25,6 +25,10 @@ extern "C" {
 #define SLATE_SETUP_AP_ADDRESS     "192.168.4.1"
 #define SLATE_API_MAX_URI_HANDLERS 24
 
+/* §4.1's `model`, and the same string §10's editor and mDNS advertise. One
+ * board model per binary (ADR-1), so it is a constant rather than a lookup. */
+#define SLATE_API_MODEL_ID "waveshare-s3-touch-7"
+
 typedef enum {
     /** No device token. Intended only for GET /info and CORS preflight. */
     SLATE_API_AUTH_PUBLIC = 0,
@@ -47,8 +51,49 @@ typedef enum {
     SLATE_API_AUTH_WS_FIRST_FRAME,
 } slate_api_auth_t;
 
+/**
+ * @brief Which page `GET /` answers with, and on which interface.
+ *
+ * Two documents put a page at the root and they are both right. §9.2 serves
+ * the setup page on the access point, where a phone that has just joined
+ * `slate-<mac6>` opens `http://192.168.4.1` and a captive portal probe is
+ * redirected to the same place. §10 serves the editor, which is what the
+ * pairing QR of §4.3 points a browser at once the panel is on a network.
+ *
+ * One URI can carry one handler, so the choice is made here rather than by
+ * whichever component registered last: this file already has to know which
+ * interface a request arrived on for §4.3's token exception, and that is the
+ * same question.
+ */
+typedef enum {
+    /** §9.2's setup page. Answers only on the access point's own address. */
+    SLATE_API_ROOT_SETUP_AP = 0,
+
+    /** §10's editor. Answers on every other interface. */
+    SLATE_API_ROOT_EDITOR,
+} slate_api_root_t;
+
 /** @brief Start the HTTP server and register GET /info and GET /status. */
 esp_err_t slate_api_init(void);
+
+/**
+ * @brief Register the page `GET /` serves on one interface.
+ *
+ * Both root pages are served **without a device token**, and the reason is
+ * §4.3's own: a browser cannot put an `Authorization` header on a navigation,
+ * and a page it must be told a token to load is a page nobody can open. What
+ * that exposes is bounded and unchanged by this — neither document carries
+ * device data, and every API route either of them then calls authenticates
+ * exactly as it does today.
+ *
+ * The first registration installs the route; the second fills the other
+ * interface. `handler` and `user_ctx` must outlive the server, as
+ * esp_http_server requires. A root that nobody registered answers §4's
+ * `404 not_found`.
+ */
+esp_err_t slate_api_register_root(slate_api_root_t which,
+                                  esp_err_t (*handler)(httpd_req_t *req),
+                                  void *user_ctx);
 
 /**
  * @brief Register an API handler behind the shared auth and CORS layer.

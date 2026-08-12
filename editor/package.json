@@ -1,0 +1,24 @@
+{
+  "name": "slate-editor",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "The dashboard editor Slate serves from the device (design.md §10).",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.14",
+    "vite-plugin-singlefile": "^2.3.0"
+  }
+}

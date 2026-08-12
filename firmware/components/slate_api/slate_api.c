@@ -28,7 +28,10 @@
 
 static const char *TAG = "api";
 
-#define MODEL_ID   "waveshare-s3-touch-7"
+/* Spelled in the header now: §10's editor advertises the same string over
+ * mDNS, and one board model per binary (ADR-1) makes it a constant both can
+ * name rather than a value one of them copies. */
+#define MODEL_ID SLATE_API_MODEL_ID
 typedef struct {
     bool used;
     slate_api_auth_t auth;
@@ -44,9 +47,16 @@ typedef struct {
     void *ctx;
 } resource_catalog_t;
 
+/** The two pages of slate_api_root_t, indexed by it. */
+typedef struct {
+    esp_err_t (*handler)(httpd_req_t *req);
+    void *ctx;
+} root_page_t;
+
 static httpd_handle_t s_server;
 static route_t s_routes[SLATE_API_MAX_URI_HANDLERS];
 static resource_catalog_t s_resource_catalogs[SLATE_STATE_MAX_PROVIDERS];
+static root_page_t s_roots[SLATE_API_ROOT_EDITOR + 1];
 
 /* --- Shared response policy -------------------------------------------- */
 
@@ -210,42 +220,16 @@ static esp_err_t dispatch(httpd_req_t *req)
     return err;
 }
 
-esp_err_t slate_api_register_uri(const httpd_uri_t *uri, slate_api_auth_t auth)
+/**
+ * Install a route behind dispatch(), with no policy of its own.
+ *
+ * Separate from slate_api_register_uri() so that the closed public surface
+ * below is a check on *callers* rather than a check this file has to evade for
+ * the two routes it owns itself — `GET /` among them, which no component may
+ * register and which has no single auth policy to declare (see root_dispatch).
+ */
+static esp_err_t register_route(const httpd_uri_t *uri, slate_api_auth_t auth)
 {
-    if (uri == NULL || uri->uri == NULL || uri->handler == NULL ||
-        auth > SLATE_API_AUTH_WS_FIRST_FRAME) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    if (s_server == NULL) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    /* §4.3's public surface is closed, not a convention for callers to
-     * remember. Preflight carries no application data; GET /info is the one
-     * public resource. A later component cannot expose a write merely by
-     * selecting the wrong enum value. */
-    bool public_route = uri->method == HTTP_OPTIONS ||
-                        (uri->method == HTTP_GET &&
-                         strcmp(uri->uri, SLATE_API_BASE_PATH "/info") == 0);
-    if (auth == SLATE_API_AUTH_PUBLIC && !public_route) {
-        return ESP_ERR_NOT_ALLOWED;
-    }
-
-    bool setup_ap_route =
-        (uri->method == HTTP_GET && strcmp(uri->uri, "/") == 0) ||
-        (uri->method == HTTP_GET &&
-         strcmp(uri->uri, SLATE_API_BASE_PATH "/wifi/scan") == 0) ||
-        (uri->method == HTTP_POST && strcmp(uri->uri, SLATE_API_BASE_PATH "/wifi") == 0);
-    if (auth == SLATE_API_AUTH_SETUP_AP && !setup_ap_route) {
-        return ESP_ERR_NOT_ALLOWED;
-    }
-
-    bool first_frame_ws_route = uri->method == HTTP_GET && uri->is_websocket &&
-                                strcmp(uri->uri, SLATE_API_BASE_PATH "/ws") == 0;
-    if (auth == SLATE_API_AUTH_WS_FIRST_FRAME && !first_frame_ws_route) {
-        return ESP_ERR_NOT_ALLOWED;
-    }
-
     route_t *route = NULL;
     for (size_t i = 0; i < SLATE_API_MAX_URI_HANDLERS; i++) {
         if (!s_routes[i].used) {
@@ -270,6 +254,112 @@ esp_err_t slate_api_register_uri(const httpd_uri_t *uri, slate_api_auth_t auth)
         memset(route, 0, sizeof(*route));
     }
     return err;
+}
+
+/*
+ * `GET /`, resolved by the interface the request arrived on rather than by
+ * which component registered a handler last. §9.2 puts the setup page on the
+ * access point — where a captive portal probe is redirected to it and a phone
+ * types the address off the screen — and §10 puts the editor everywhere else.
+ *
+ * Neither page carries a token. The shared response policy still applies to
+ * both, `Cache-Control: no-store` included: the editor bundle is a single
+ * gzipped document on a LAN, and an exception to the one place that decides
+ * caching would cost more than re-sending it.
+ */
+static esp_err_t root_dispatch(httpd_req_t *req)
+{
+    const root_page_t *page = request_is_on_setup_ap(req)
+                                  ? &s_roots[SLATE_API_ROOT_SETUP_AP]
+                                  : &s_roots[SLATE_API_ROOT_EDITOR];
+    if (page->handler == NULL) {
+        return slate_api_refuse(req, "404 Not Found", "not_found");
+    }
+
+    req->user_ctx = page->ctx;
+    return page->handler(req);
+}
+
+esp_err_t slate_api_register_root(slate_api_root_t which,
+                                  esp_err_t (*handler)(httpd_req_t *req),
+                                  void *user_ctx)
+{
+    if (handler == NULL || which > SLATE_API_ROOT_EDITOR) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_roots[which].handler != NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    bool first = s_roots[SLATE_API_ROOT_SETUP_AP].handler == NULL &&
+                 s_roots[SLATE_API_ROOT_EDITOR].handler == NULL;
+    s_roots[which].handler = handler;
+    s_roots[which].ctx = user_ctx;
+    if (!first) {
+        return ESP_OK;
+    }
+
+    static const httpd_uri_t root = {
+        .uri = "/",
+        .method = HTTP_GET,
+        .handler = root_dispatch,
+    };
+    esp_err_t err = register_route(&root, SLATE_API_AUTH_PUBLIC);
+    if (err != ESP_OK) {
+        s_roots[which].handler = NULL;
+        s_roots[which].ctx = NULL;
+    }
+    return err;
+}
+
+esp_err_t slate_api_register_uri(const httpd_uri_t *uri, slate_api_auth_t auth)
+{
+    if (uri == NULL || uri->uri == NULL || uri->handler == NULL ||
+        auth > SLATE_API_AUTH_WS_FIRST_FRAME) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_server == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* §4.3's public surface is closed, not a convention for callers to
+     * remember. Preflight carries no application data; GET /info is the one
+     * public resource. A later component cannot expose a write merely by
+     * selecting the wrong enum value. */
+    bool public_route = uri->method == HTTP_OPTIONS ||
+                        (uri->method == HTTP_GET &&
+                         strcmp(uri->uri, SLATE_API_BASE_PATH "/info") == 0);
+    if (auth == SLATE_API_AUTH_PUBLIC && !public_route) {
+        return ESP_ERR_NOT_ALLOWED;
+    }
+
+    /* The setup page itself is no longer in this list: `/` is the one route
+     * both §9.2 and §10 claim, so it belongs to slate_api_register_root() and
+     * cannot be registered as an ordinary route by anyone. What remains is the
+     * two endpoints the page needs. */
+    bool setup_ap_route =
+        (uri->method == HTTP_GET &&
+         strcmp(uri->uri, SLATE_API_BASE_PATH "/wifi/scan") == 0) ||
+        (uri->method == HTTP_POST && strcmp(uri->uri, SLATE_API_BASE_PATH "/wifi") == 0);
+    if (auth == SLATE_API_AUTH_SETUP_AP && !setup_ap_route) {
+        return ESP_ERR_NOT_ALLOWED;
+    }
+
+    bool first_frame_ws_route = uri->method == HTTP_GET && uri->is_websocket &&
+                                strcmp(uri->uri, SLATE_API_BASE_PATH "/ws") == 0;
+    if (auth == SLATE_API_AUTH_WS_FIRST_FRAME && !first_frame_ws_route) {
+        return ESP_ERR_NOT_ALLOWED;
+    }
+
+    /* No component gets to install `/`, whichever policy it names for it. */
+    if (strcmp(uri->uri, "/") == 0) {
+        return ESP_ERR_NOT_ALLOWED;
+    }
+
+    return register_route(uri, auth);
 }
 
 esp_err_t slate_api_resources_register(const char *provider,
@@ -1007,6 +1097,7 @@ esp_err_t slate_api_init(void)
         httpd_stop(s_server);
         s_server = NULL;
         memset(s_routes, 0, sizeof(s_routes));
+        memset(s_roots, 0, sizeof(s_roots));
         return err;
     }
 
