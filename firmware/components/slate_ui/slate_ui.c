@@ -30,6 +30,7 @@
 #include "slate_store.h"
 #include "slate_theme.h"
 #include "slate_time.h"
+#include "slate_wifi.h"
 
 static const char *TAG = "slate_ui";
 
@@ -48,6 +49,8 @@ static const char *TAG = "slate_ui";
 #define UI_REBUILD_POST_TIMEOUT_MS 1000
 #define UI_LABEL_LIMIT             64
 #define UI_PROVIDER_SUMMARY_MAX    128
+#define UI_PAIRING_URL_MAX         80
+#define UI_PAIRING_QR_SIZE         220
 
 typedef struct {
     char provider[SLATE_PROVIDER_ID_MAX + 1];
@@ -90,6 +93,8 @@ typedef struct {
 static ui_tree_t *s_tree;
 static bool s_ready;
 static atomic_bool s_update_posted = ATOMIC_VAR_INIT(false);
+static atomic_bool s_edit_mode = ATOMIC_VAR_INIT(false);
+static atomic_bool s_message_active = ATOMIC_VAR_INIT(false);
 
 static void tree_destroy(ui_tree_t *tree);
 
@@ -249,8 +254,14 @@ static void update_bar(ui_tree_t *tree)
     lv_label_set_text(tree->clock, clock);
 
     char text[UI_PROVIDER_SUMMARY_MAX];
-    uint32_t color = tree->theme->accent;
-    provider_summary(text, sizeof(text), &color, tree->theme);
+    uint32_t color;
+    if (atomic_load_explicit(&s_edit_mode, memory_order_acquire)) {
+        strlcpy(text, "EDIT MODE", sizeof(text));
+        color = tree->theme->warn;
+    } else {
+        color = tree->theme->accent;
+        provider_summary(text, sizeof(text), &color, tree->theme);
+    }
     lv_label_set_text(tree->provider, text);
     lv_obj_set_style_text_color(tree->provider, lv_color_hex(color), LV_PART_MAIN);
 }
@@ -816,6 +827,7 @@ static esp_err_t rebuild_on_task(const slate_config_t *config)
                  esp_err_to_name(brightness_err));
     }
     activate_tree(fresh);
+    atomic_store_explicit(&s_message_active, false, memory_order_release);
     slate_state_drain(discard_changed, NULL);
     update_all();
     ESP_LOGI(TAG, "activated page \"%s\": %u tile(s), %u binding(s)",
@@ -861,6 +873,27 @@ esp_err_t slate_ui_rebuild(const slate_config_t *config)
     return err;
 }
 
+static bool pairing_url(char *out, size_t out_len, char *address, size_t address_len)
+{
+    slate_wifi_status_t status;
+    slate_wifi_status(&status);
+    if (!status.connected || status.ip[0] == '\0') {
+        return false;
+    }
+
+    char token[SLATE_DEVICE_TOKEN_LEN + 1] = {0};
+    if (slate_store_device_token_copy(token, sizeof(token)) != ESP_OK) {
+        return false;
+    }
+    int written = snprintf(out, out_len, "http://%s/?t=%s", status.ip, token);
+    explicit_bzero(token, sizeof(token));
+    if (written < 0 || (size_t) written >= out_len) {
+        return false;
+    }
+    strlcpy(address, status.ip, address_len);
+    return true;
+}
+
 static ui_tree_t *build_message_tree(const char *title, const char *message)
 {
     const slate_theme_t *theme = slate_theme_default();
@@ -875,27 +908,71 @@ static ui_tree_t *build_message_tree(const char *title, const char *message)
         return NULL;
     }
     style_plain(card);
-    lv_obj_set_size(card, 650, 250);
+    char url[UI_PAIRING_URL_MAX] = {0};
+    char address[16] = {0};
+    bool can_pair = pairing_url(url, sizeof(url), address, sizeof(address));
+
+    lv_obj_set_size(card, can_pair ? 720 : 650, can_pair ? 330 : 250);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_hex(theme->surface), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, theme->radius, LV_PART_MAIN);
     lv_obj_set_style_pad_all(card, 30, LV_PART_MAIN);
 
+    int32_t text_x = can_pair ? UI_PAIRING_QR_SIZE + 36 : 0;
+    int32_t text_width = can_pair ? 404 : 590;
     lv_obj_t *heading = make_label(card, title, theme->body, theme->warn);
     if (heading == NULL) {
         tree_destroy(tree);
         return NULL;
     }
-    lv_obj_align(heading, LV_ALIGN_TOP_LEFT, 0, 0);
+    lv_obj_align(heading, LV_ALIGN_TOP_LEFT, text_x, 0);
     lv_obj_t *body = make_label(card, message, theme->caption, theme->text_lo);
     if (body == NULL) {
         tree_destroy(tree);
         return NULL;
     }
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(body, 590);
-    lv_obj_align(body, LV_ALIGN_TOP_LEFT, 0, 55);
+    lv_obj_set_width(body, text_width);
+    lv_obj_align(body, LV_ALIGN_TOP_LEFT, text_x, can_pair ? 104 : 55);
+
+    if (can_pair) {
+        lv_obj_t *qr = lv_qrcode_create(card);
+        if (qr == NULL) {
+            explicit_bzero(url, sizeof(url));
+            tree_destroy(tree);
+            return NULL;
+        }
+        lv_qrcode_set_size(qr, UI_PAIRING_QR_SIZE);
+        /* Machine-readable contrast is not a theme token. In particular, the
+         * default dark theme's text/surface pair would invert the symbol, which
+         * some camera decoders do not support. */
+        lv_qrcode_set_dark_color(qr, lv_color_hex(0x000000));
+        lv_qrcode_set_light_color(qr, lv_color_hex(0xFFFFFF));
+        lv_qrcode_set_quiet_zone(qr, true);
+        if (lv_qrcode_update(qr, url, strlen(url)) != LV_RESULT_OK) {
+            explicit_bzero(url, sizeof(url));
+            tree_destroy(tree);
+            return NULL;
+        }
+        lv_obj_align(qr, LV_ALIGN_LEFT_MID, 0, 0);
+
+        char open[64];
+        snprintf(open, sizeof(open), "Open http://%s", address);
+        lv_obj_t *address_label = make_label(card, open, theme->body, theme->text_hi);
+        lv_obj_t *hint = make_label(card, "Scan to pair this browser", theme->caption,
+                                    theme->accent);
+        if (address_label == NULL || hint == NULL) {
+            explicit_bzero(url, sizeof(url));
+            tree_destroy(tree);
+            return NULL;
+        }
+        lv_label_set_long_mode(address_label, LV_LABEL_LONG_DOT);
+        lv_obj_set_width(address_label, text_width);
+        lv_obj_align(address_label, LV_ALIGN_TOP_LEFT, text_x, 44);
+        lv_obj_align(hint, LV_ALIGN_TOP_LEFT, text_x, 76);
+    }
+    explicit_bzero(url, sizeof(url));
     return tree;
 }
 
@@ -909,6 +986,7 @@ static void message_work(void *ctx)
         request->result = request->clear_bindings ? slate_state_bind(NULL, 0) : ESP_OK;
         if (request->result == ESP_OK) {
             activate_tree(fresh);
+            atomic_store_explicit(&s_message_active, true, memory_order_release);
         } else {
             tree_destroy(fresh);
         }
@@ -959,7 +1037,9 @@ static esp_err_t restore_stored(slate_ui_config_info_t *out)
     esp_err_t read_err = slate_store_config_read(&json, &len);
     if (read_err == ESP_ERR_NOT_FOUND) {
         ESP_LOGW(TAG, "no stored dashboard configuration");
-        return show_message("NO DASHBOARD", "Push a schema-1 configuration to this panel.", true);
+        return show_message("NO DASHBOARD",
+                            "Open the editor, create a dashboard, and publish it to this panel.",
+                            true);
     }
     if (read_err != ESP_OK) {
         ESP_LOGE(TAG, "stored configuration unreadable: %s", esp_err_to_name(read_err));
@@ -979,8 +1059,8 @@ static esp_err_t restore_stored(slate_ui_config_info_t *out)
                  future ? " (newer schema)" : "");
         slate_config_report_free(&report);
         return show_message(future ? "FIRMWARE UPDATE REQUIRED" : "CONFIGURATION ERROR",
-                            future ? "This dashboard was created for newer Slate firmware."
-                                   : "The stored dashboard is invalid. The device API remains available.",
+                            future ? "Update Slate firmware, then reopen the editor."
+                                   : "Open the editor to repair or replace the stored dashboard.",
                             true);
     }
     slate_config_report_free(&report);
@@ -1029,6 +1109,31 @@ esp_err_t slate_ui_restore_stored(slate_ui_config_info_t *out)
 bool slate_ui_ready(void)
 {
     return s_ready;
+}
+
+void slate_ui_mode_set(bool edit)
+{
+    atomic_store_explicit(&s_edit_mode, edit, memory_order_release);
+    slate_component_actions_mode_set(edit);
+    if (s_ready) {
+        schedule_update(NULL);
+    }
+}
+
+void slate_ui_mode_restore_complete(void)
+{
+    slate_component_actions_restore_complete();
+}
+
+void slate_ui_network_connected(void)
+{
+    if (!s_ready || !atomic_load_explicit(&s_message_active, memory_order_acquire)) {
+        return;
+    }
+    esp_err_t err = restore_stored(NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "refreshing pairing address: %s", esp_err_to_name(err));
+    }
 }
 
 #ifdef SLATE_UI_SELFTEST

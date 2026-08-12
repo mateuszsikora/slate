@@ -234,15 +234,28 @@ document. It returns `404 not_found` when neither exists.
 validates the complete document, then atomically replaces the LVGL tree and all
 provider subscriptions. A regular replacement is persisted only after that
 activation succeeds; a transient replacement requires edit mode and never
-writes flash. Leaving edit mode discards a RAM-only transient replacement
-and restores the persisted presentation and subscription set. When persistence
-fails after activation, the submitted document remains the active in-memory
-configuration and the previous persisted document is preserved for the next
-boot. Every activated replacement publishes a `reloaded` WebSocket event, even
-when its subsequent persistence fails. Transient requests outside edit mode
-return `409 edit_mode_required`; any query other than the exact
+writes flash. Leaving edit mode discards a RAM-only transient replacement and
+restores the persisted presentation and subscription set. Semantic touch
+actions remain suppressed until that restoration completes, so a tile that
+exists only in the outgoing preview cannot act during the transition. When
+persistence fails after activation, the submitted document remains the active
+in-memory configuration and the previous persisted document is preserved for
+the next boot. Every activated replacement publishes a `reloaded` WebSocket
+event, even when its subsequent persistence fails. Transient requests outside
+edit mode return `409 edit_mode_required`; any query other than the exact
 `?transient=1` returns `400 invalid_query`; activation and persistence failures
 return `500 apply_failed` and `500 store_failed`, respectively.
+
+The three device controls return `204 No Content` on success. `POST /mode`
+accepts a JSON object whose `mode` is `"normal"` or `"edit"`; edit mode has the
+same 60-second inactivity fallback as a WebSocket-owned edit session. Its
+refusals are `empty_body`, `invalid_json`,
+`too_large` (`413`), `invalid_mode` and `mode_unavailable` (`503`).
+`POST /identify` and `POST /factory_reset` have no request body and refuse one
+with `unexpected_body`. Identify can also return `503 display_unavailable`.
+A successful factory reset erases NVS and LittleFS, issues a new device token,
+answers, and then reboots; an incomplete best-effort reset returns
+`500 reset_failed` and still reboots into the only supported post-reset state.
 
 Document-wide errors and errors belonging to an identifiable tile are kept
 separate. `tile_errors` is keyed by `tile.id`, and each value is an array because

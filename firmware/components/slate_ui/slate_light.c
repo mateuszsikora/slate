@@ -94,6 +94,9 @@ static void set_pending_animation(slate_light_view_t *view, bool pending)
 static void dispatch_action(slate_light_view_t *view, slate_action_t action,
                             slate_action_value_type_t value_type, int32_t value)
 {
+    if (!slate_component_actions_enabled()) {
+        return;
+    }
     const slate_action_request_t request = {
         .provider = view->provider,
         .resource = view->resource,

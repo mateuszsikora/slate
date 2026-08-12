@@ -137,6 +137,11 @@ export interface ClientOptions {
  */
 const DEFAULT_TIMEOUT_MS = 5000
 
+/* Formatting the 3.75 MB LittleFS partition is intentionally synchronous: a
+ * 204 means the destructive work finished. It can legitimately take longer
+ * than an ordinary LAN request without meaning the panel is unreachable. */
+const FACTORY_RESET_TIMEOUT_MS = 30000
+
 export class DeviceClient {
   private readonly origin: string
   private readonly token: string | null
@@ -188,6 +193,23 @@ export class DeviceClient {
     return this.request<void>('PUT', '/config?transient=1', { body: document })
   }
 
+  /** Device-wide mode control for scripts and clients that do not own a WebSocket. */
+  setMode(mode: 'normal' | 'edit'): Promise<void> {
+    return this.request<void>('POST', '/mode', { body: JSON.stringify({ mode }) })
+  }
+
+  /** Flash the panel so several devices can be told apart. */
+  identify(): Promise<void> {
+    return this.request<void>('POST', '/identify')
+  }
+
+  /** Wipe NVS and LittleFS. A successful response is followed by a reboot. */
+  factoryReset(): Promise<void> {
+    return this.request<void>('POST', '/factory_reset', {
+      timeoutMs: FACTORY_RESET_TIMEOUT_MS,
+    })
+  }
+
   resources(provider: string): Promise<Resource[]> {
     return this.request<{ resources: Resource[] }>(
       'GET',
@@ -198,7 +220,7 @@ export class DeviceClient {
   private async request<T>(
     method: string,
     path: string,
-    options: { authenticated?: boolean; body?: string } = {},
+    options: { authenticated?: boolean; body?: string; timeoutMs?: number } = {},
   ): Promise<T> {
     const headers: Record<string, string> = {}
     if (options.authenticated !== false && this.token !== null) {
@@ -209,7 +231,7 @@ export class DeviceClient {
     }
 
     const controller = new AbortController()
-    const timer = window.setTimeout(() => controller.abort(), this.timeoutMs)
+    const timer = window.setTimeout(() => controller.abort(), options.timeoutMs ?? this.timeoutMs)
     let response: Response
     try {
       response = await fetch(this.url(path), {

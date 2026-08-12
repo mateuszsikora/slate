@@ -30,6 +30,7 @@
 #include "slate_brightness.h"
 #include "slate_coredump.h"
 #include "slate_config_api.h"
+#include "slate_control_api.h"
 #include "slate_direct.h"
 #include "slate_display.h"
 #include "slate_editor.h"
@@ -292,6 +293,7 @@ static void network_event(void *arg, esp_event_base_t base, int32_t id, void *da
         const slate_wifi_status_t *status = data;
         ESP_LOGI(TAG, "network: on \"%s\" at %s, rssi %d dBm", status->sta_ssid, status->ip,
                  status->rssi);
+        slate_ui_network_connected();
         break;
     }
 
@@ -442,6 +444,11 @@ static void start_api(void)
     if (ws_err != ESP_OK) {
         ESP_LOGE(TAG, "WebSocket diagnostics unavailable: %s — continuing",
                  esp_err_to_name(ws_err));
+    }
+
+    err = slate_control_api_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "device controls unavailable: %s — continuing", esp_err_to_name(err));
     }
 
     /*

@@ -76,6 +76,8 @@ static const char *TAG = "slate_display";
 #define SLATE_DISPLAY_INIT_TIMEOUT_MS 10000
 #define SLATE_DISPLAY_VSYNC_TIMEOUT_MS 100
 #define SLATE_DISPLAY_HEAP_METRICS_PERIOD_US (15LL * 1000000)
+#define SLATE_IDENTIFY_PHASE_MS               180
+#define SLATE_IDENTIFY_PHASES                 6
 
 static const int SLATE_DATA_GPIOS[16] = {
     14, /* B3 */ 38, /* B4 */ 18, /* B5 */ 17, /* B6 */ 10, /* B7 */
@@ -107,6 +109,9 @@ static bool s_first_frame_shown;
 static slate_display_heap_metrics_t s_heap_metrics;
 static int64_t s_heap_metrics_at_us;
 static lv_obj_t *s_setup_overlay;
+static lv_obj_t *s_identify_overlay;
+static lv_timer_t *s_identify_timer;
+static unsigned s_identify_phase;
 static atomic_bool s_setup_presentation_active = ATOMIC_VAR_INIT(false);
 static atomic_bool s_setup_hide_pending = ATOMIC_VAR_INIT(false);
 
@@ -955,6 +960,57 @@ static void show_setup_overlay(void *ctx)
     free(setup);
 }
 
+/* --- §4.1 panel identification ---------------------------------------- */
+
+static void identify_cleanup(void)
+{
+    if (s_identify_timer != NULL) {
+        lv_timer_delete(s_identify_timer);
+        s_identify_timer = NULL;
+    }
+    if (s_identify_overlay != NULL) {
+        lv_obj_delete(s_identify_overlay);
+        s_identify_overlay = NULL;
+    }
+}
+
+static void identify_tick(lv_timer_t *timer)
+{
+    (void) timer;
+    s_identify_phase++;
+    if (s_identify_phase >= SLATE_IDENTIFY_PHASES) {
+        identify_cleanup();
+        return;
+    }
+    lv_obj_set_style_bg_opa(s_identify_overlay,
+                            (s_identify_phase & 1u) == 0 ? LV_OPA_80 : LV_OPA_TRANSP,
+                            LV_PART_MAIN);
+}
+
+static void identify_start(void *ctx)
+{
+    (void) ctx;
+    identify_cleanup();
+
+    const slate_theme_t *theme = slate_theme_default();
+    s_identify_overlay = lv_obj_create(lv_layer_top());
+    if (s_identify_overlay == NULL) {
+        return;
+    }
+    lv_obj_remove_style_all(s_identify_overlay);
+    lv_obj_set_size(s_identify_overlay, SLATE_LCD_H_RES, SLATE_LCD_V_RES);
+    lv_obj_set_pos(s_identify_overlay, 0, 0);
+    lv_obj_set_style_bg_color(s_identify_overlay, lv_color_hex(theme->accent), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(s_identify_overlay, LV_OPA_80, LV_PART_MAIN);
+    lv_obj_add_flag(s_identify_overlay, LV_OBJ_FLAG_CLICKABLE);
+
+    s_identify_phase = 0;
+    s_identify_timer = lv_timer_create(identify_tick, SLATE_IDENTIFY_PHASE_MS, NULL);
+    if (s_identify_timer == NULL) {
+        identify_cleanup();
+    }
+}
+
 static void log_vsync_once(void)
 {
     static bool logged;
@@ -1147,6 +1203,11 @@ esp_err_t slate_display_setup_hide(void)
 
     atomic_store_explicit(&s_setup_hide_pending, true, memory_order_release);
     return ESP_OK;
+}
+
+esp_err_t slate_display_identify(void)
+{
+    return slate_display_post(identify_start, NULL, 100);
 }
 
 bool slate_display_ready(void)

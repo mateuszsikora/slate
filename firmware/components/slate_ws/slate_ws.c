@@ -399,9 +399,9 @@ static void set_mode(slate_ws_mode_t mode, ws_client_t *owner, int64_t now)
     portENTER_CRITICAL(&s_state_lock);
     changed = s_mode != mode;
     s_mode = mode;
-    if (mode == SLATE_WS_MODE_EDIT && owner) {
+    if (mode == SLATE_WS_MODE_EDIT) {
         s_edit_owner = owner;
-        s_edit_owner_generation = owner->generation;
+        s_edit_owner_generation = owner != NULL ? owner->generation : 0;
         s_edit_last_ping_us = now;
     } else {
         s_edit_owner = NULL;
@@ -1326,6 +1326,18 @@ slate_ws_mode_t slate_ws_mode(void)
     slate_ws_mode_t mode = s_mode;
     portEXIT_CRITICAL(&s_state_lock);
     return mode;
+}
+
+esp_err_t slate_ws_mode_set(slate_ws_mode_t mode)
+{
+    if (!s_task) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (mode != SLATE_WS_MODE_NORMAL && mode != SLATE_WS_MODE_EDIT) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    set_mode(mode, NULL, esp_timer_get_time());
+    return ESP_OK;
 }
 
 esp_err_t slate_ws_mode_observer_set(slate_ws_mode_observer_fn observer, void *ctx)

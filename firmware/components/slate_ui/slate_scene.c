@@ -43,6 +43,9 @@ static void activate_event(lv_event_t *event)
     if (lv_event_get_code(event) != LV_EVENT_CLICKED) {
         return;
     }
+    if (!slate_component_actions_enabled()) {
+        return;
+    }
     slate_scene_view_t *view = lv_event_get_user_data(event);
     const slate_action_request_t request = {
         .provider = view->provider,

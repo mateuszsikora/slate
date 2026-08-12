@@ -3,6 +3,8 @@
  * heartbeat of §4.2 and `GET /status` for the fields the heartbeat leaves out.
  */
 
+import { useState } from 'react'
+
 import type { DeviceInfo, DeviceStatus } from '../lib/api'
 import type { StatusFrame } from '../lib/socket'
 
@@ -10,6 +12,8 @@ interface Props {
   info: DeviceInfo | null
   status: DeviceStatus | null
   heartbeat: StatusFrame | null
+  onIdentify: () => Promise<void>
+  onFactoryReset: () => Promise<void>
 }
 
 function uptime(seconds: number): string {
@@ -29,7 +33,10 @@ function kilobytes(bytes: number): string {
   return `${Math.round(bytes / 1024).toLocaleString()} KB`
 }
 
-export function DevicePanel({ info, status, heartbeat }: Props) {
+export function DevicePanel({ info, status, heartbeat, onIdentify, onFactoryReset }: Props) {
+  const [identifying, setIdentifying] = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
   /* The heartbeat is the fresher of the two for everything it carries. */
   const providers =
     heartbeat !== null
@@ -81,6 +88,49 @@ export function DevicePanel({ info, status, heartbeat }: Props) {
       {status?.storage_reset === true ? (
         <p className="warning">
           Storage was reset during boot: the stored configuration and credentials are gone.
+        </p>
+      ) : null}
+
+      <div className="device-actions">
+        <button
+          type="button"
+          className="button button--secondary"
+          disabled={identifying || resetting}
+          onClick={() => {
+            setIdentifying(true)
+            setActionError(null)
+            void onIdentify()
+              .catch(() => setActionError('The panel could not start the identify flash.'))
+              .finally(() => setIdentifying(false))
+          }}
+        >
+          {identifying ? 'Identifying…' : 'Identify panel'}
+        </button>
+        <button
+          type="button"
+          className="button button--danger"
+          disabled={identifying || resetting}
+          onClick={() => {
+            const confirmed = window.confirm(
+              'Factory reset this panel? This permanently erases the dashboard, Wi-Fi settings, Home Assistant credentials, and device token.',
+            )
+            if (!confirmed) return
+            setResetting(true)
+            setActionError(null)
+            void onFactoryReset()
+              .catch(() => {
+                setActionError('Factory reset did not complete. The panel may still reboot.')
+                setResetting(false)
+              })
+          }}
+        >
+          {resetting ? 'Resetting…' : 'Factory reset'}
+        </button>
+      </div>
+
+      {actionError !== null ? (
+        <p className="error" role="alert">
+          {actionError}
         </p>
       ) : null}
     </section>

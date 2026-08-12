@@ -44,6 +44,16 @@ esp_err_t slate_ws_init(void);
 slate_ws_mode_t slate_ws_mode(void);
 
 /**
+ * @brief Change editor mode outside a WebSocket session.
+ *
+ * `POST /mode` uses the same state and observer path as the WebSocket frame,
+ * so transient configuration and touch suppression cannot disagree about the
+ * active mode. An HTTP-created edit session has no ping owner and therefore
+ * falls back to normal after the same 60-second safety deadline.
+ */
+esp_err_t slate_ws_mode_set(slate_ws_mode_t mode);
+
+/**
  * @brief Install the one observer that owns mode-dependent application state.
  *
  * Passing NULL removes the observer. A second non-NULL observer is refused.
