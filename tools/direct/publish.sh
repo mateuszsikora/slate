@@ -30,7 +30,8 @@
 #
 # The token comes from $SLATE_TOKEN and is handed to curl through a config file
 # on stdin rather than as an argument, so it does not appear in the process list
-# of a shared machine. §4.3 delivers it through the pairing QR on the panel.
+# of a shared machine. The browser obtains it through §4.3's session bootstrap;
+# development automation reads it from a trusted local secret store.
 
 set -euo pipefail
 

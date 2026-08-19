@@ -9,8 +9,8 @@
  * It exists to answer the questions the landed issues are judged on — is the
  * device token the same one as before the reboot, did the station come back on
  * its own — and it answers the first with a fingerprint rather than the token.
- * The token itself belongs in exactly one place, §4.3's pairing QR on the
- * screen; a serial log is a thing people paste into issues.
+ * The token itself stays inside the API/session boundary; a serial log is a
+ * thing people paste into issues.
  */
 
 #include <inttypes.h>

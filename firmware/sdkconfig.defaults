@@ -139,7 +139,7 @@ CONFIG_LV_DEF_REFR_PERIOD=10
 # widgets exist.
 CONFIG_LV_FONT_MONTSERRAT_14=y
 
-# §4.3's pairing code is rendered by LVGL on the panel, so it uses the
+# The setup and editor-address codes are rendered by LVGL on the panel, so they use the
 # library's canvas-backed QR widget instead of introducing a second image
 # renderer or storing a generated bitmap in flash.
 CONFIG_LV_USE_QRCODE=y
