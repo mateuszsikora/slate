@@ -79,10 +79,10 @@ void slate_ui_mode_set(bool edit);
 void slate_ui_mode_restore_complete(void);
 
 /**
- * @brief Refresh an error/pairing presentation after the station gets an IP.
+ * @brief Refresh an error/editor-link presentation after the station gets an IP.
  *
  * Dashboards do not rebuild for a lease renewal. An unconfigured or invalid
- * dashboard does, because §4.3's QR and plain-text recovery address have just
+ * dashboard does, because the QR and plain-text recovery address have just
  * become available.
  */
 void slate_ui_network_connected(void);

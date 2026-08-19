@@ -14,7 +14,7 @@ export type ConnectionState =
   | 'online'
   /** The panel is not answering. §9.4's outage, seen from the other end. */
   | 'offline'
-  /** The panel answered and refused the token: pairing again is the only fix. */
+  /** The panel answered and refused the internal session credential. */
   | 'unauthorized'
 
 export interface StatusFrame {

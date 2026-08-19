@@ -48,6 +48,20 @@ extern const uint8_t _binary_portal_html_gz_end[];
 #define BODY_MAX 512
 #define SETUP_AP_PASSWORD_MIN 8
 
+static bool admin_pin_is_valid(const char *pin)
+{
+    size_t len = strlen(pin);
+    if (len < SLATE_ADMIN_PIN_MIN_LEN || len > SLATE_ADMIN_PIN_MAX_LEN) {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (pin[i] < '0' || pin[i] > '9') {
+            return false;
+        }
+    }
+    return true;
+}
+
 /* lwIP resolves against three servers and ignores the rest, so accepting a
  * fourth would be accepting a value that is silently dropped. Spelled as the
  * store's number rather than as three, because the parsed servers go straight
@@ -482,6 +496,7 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
     const char *ssid = string_field(root, "ssid");
     const char *password = NULL;
     const char *setup_password = NULL;
+    const char *admin_pin = NULL;
     const char *error = NULL;
     slate_ipv4_config_t ipv4 = {0};
 
@@ -501,6 +516,11 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
     } else if (setup_password != NULL &&
                strlen(setup_password) >= SLATE_WIFI_PASSWORD_BUF_LEN) {
         error = "setup_password_too_long";
+    } else if (!optional_string_field(root, "admin_pin", &admin_pin)) {
+        error = "invalid_json";
+    } else if (admin_pin != NULL && admin_pin[0] != '\0' &&
+               !admin_pin_is_valid(admin_pin)) {
+        error = "admin_pin_invalid";
     }
 
     if (error == NULL) {
@@ -509,9 +529,14 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
 
     char next_setup_password[SLATE_WIFI_PASSWORD_BUF_LEN] = {0};
     char previous_setup_password[SLATE_WIFI_PASSWORD_BUF_LEN] = {0};
+    char next_admin_pin[SLATE_ADMIN_PIN_MAX_LEN + 1] = {0};
     const bool update_setup_password = error == NULL && setup_password != NULL;
+    const bool update_admin_pin = error == NULL && admin_pin != NULL;
     if (update_setup_password) {
         strlcpy(next_setup_password, setup_password, sizeof(next_setup_password));
+    }
+    if (update_admin_pin) {
+        strlcpy(next_admin_pin, admin_pin, sizeof(next_admin_pin));
     }
 
     esp_err_t err = ESP_OK;
@@ -564,6 +589,22 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
                 }
             }
         }
+
+        if (err == ESP_OK && update_admin_pin) {
+            err = next_admin_pin[0] == '\0' ? slate_store_admin_pin_clear()
+                                               : slate_store_admin_pin_set(next_admin_pin);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "storing web editor PIN: %s", esp_err_to_name(err));
+            } else {
+                /* Invalidate credentials exposed by firmware versions whose QR
+                 * contained the token, and any already-open editor sessions. */
+                err = slate_store_device_token_reissue();
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "rotating the internal session credential: %s",
+                             esp_err_to_name(err));
+                }
+            }
+        }
     }
 
     /* cJSON parses strings into separate heap allocations. Clearing only `body`
@@ -574,6 +615,7 @@ static esp_err_t wifi_set_handler(httpd_req_t *req)
     cJSON_Delete(root);
     explicit_bzero(next_setup_password, sizeof(next_setup_password));
     explicit_bzero(previous_setup_password, sizeof(previous_setup_password));
+    explicit_bzero(next_admin_pin, sizeof(next_admin_pin));
 
     if (error != NULL) {
         ESP_LOGW(TAG, "refused: %s", error);
@@ -628,7 +670,7 @@ static esp_err_t wifi_forget_handler(httpd_req_t *req)
      *
      * It carries the device token (§4.3 does not extend the access point's
      * exception to it): the panel is on a network and reachable, so whoever is
-     * asking has had the chance to be paired, and moving somebody's panel off
+     * asking has had the chance to open an editor session, and moving somebody's panel off
      * their WiFi is not something an unauthenticated request gets to do.
      */
     esp_err_t err = slate_wifi_forget();
@@ -884,6 +926,10 @@ esp_err_t slate_setup_selftest(void)
         "{\"ssid\":\"selftest\",\"setup_password\":false}";
     static const char SHORT_SETUP_PASSWORD[] =
         "{\"ssid\":\"selftest\",\"setup_password\":\"short\"}";
+    static const char BAD_ADMIN_PIN_TYPE[] =
+        "{\"ssid\":\"selftest\",\"admin_pin\":1234}";
+    static const char BAD_ADMIN_PIN[] =
+        "{\"ssid\":\"selftest\",\"admin_pin\":\"12ab\"}";
     static const char BAD_ADDRESS_TYPE[] =
         "{\"ssid\":\"selftest\",\"ipv4\":{\"mode\":\"dhcp\",\"address\":42}}";
     static const char BAD_GATEWAY_TYPE[] =
@@ -922,6 +968,12 @@ esp_err_t slate_setup_selftest(void)
     failures += !expect_post("a short setup password is refused",
                              SLATE_SETUP_AP_ADDRESS, SHORT_SETUP_PASSWORD, 400,
                              "\"error\":\"setup_password_too_short\"");
+    failures += !expect_post("a non-string administrator PIN is refused",
+                             SLATE_SETUP_AP_ADDRESS, BAD_ADMIN_PIN_TYPE, 400,
+                             "\"error\":\"invalid_json\"");
+    failures += !expect_post("an administrator PIN contains only 4-12 digits",
+                             SLATE_SETUP_AP_ADDRESS, BAD_ADMIN_PIN, 400,
+                             "\"error\":\"admin_pin_invalid\"");
     failures += !expect_post("a non-string address is refused", SLATE_SETUP_AP_ADDRESS,
                              BAD_ADDRESS_TYPE, 400, "\"error\":\"bad_address\"");
     failures += !expect_post("a non-string gateway is refused", SLATE_SETUP_AP_ADDRESS,

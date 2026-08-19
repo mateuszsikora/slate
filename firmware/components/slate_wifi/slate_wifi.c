@@ -1114,7 +1114,7 @@ esp_err_t slate_wifi_init(void)
 
     /* §4.3 wants one panel called one thing everywhere, and the DHCP lease is
      * the first place that name appears — in the router's client list, before
-     * mDNS or the pairing QR exist. */
+     * mDNS or the editor URL QR exist. */
     err = esp_netif_set_hostname(s_netif, slate_store_device_name());
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "setting the hostname: %s", esp_err_to_name(err));

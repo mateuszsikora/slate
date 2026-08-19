@@ -1078,9 +1078,9 @@ summary:focus-visible,
   color: var(--text-lo);
 }
 
-/* --- Pairing and errors --------------------------------------------------- */
+/* --- Session unlock and errors ------------------------------------------- */
 
-.pairing {
+.access-view {
   min-height: 100vh;
   display: grid;
   place-items: center;
@@ -1105,7 +1105,7 @@ summary:focus-visible,
   margin: 16px 0;
 }
 
-.pair-form {
+.unlock-form {
   display: flex;
   gap: 10px;
 }

@@ -74,6 +74,10 @@ extern "C" {
 /* §4.3: a 32-character random device token. */
 #define SLATE_DEVICE_TOKEN_LEN 32
 
+/* Optional numeric administrator PIN used to unlock the web editor. */
+#define SLATE_ADMIN_PIN_MIN_LEN 4
+#define SLATE_ADMIN_PIN_MAX_LEN 12
+
 /* A non-secret stand-in for the token in logs and diagnostics — see
  * slate_store_device_token_fingerprint(). */
 #define SLATE_TOKEN_FINGERPRINT_LEN 8
@@ -231,9 +235,8 @@ const char *slate_store_device_name(void);
  *
  * This copies rather than returning a pointer into the store on purpose. A
  * reissue rewrites the token in place, and a caller holding a borrowed pointer
- * — §4.3's pairing QR renderer is the obvious one, and it holds it for as long
- * as the QR is on screen — would read a spliced old/new token and publish a
- * URL the device never accepts.
+ * — the browser session response is the obvious one — could otherwise read a
+ * spliced old/new token and publish a credential the device never accepts.
  */
 esp_err_t slate_store_device_token_copy(char *out, size_t out_len);
 
@@ -261,6 +264,24 @@ bool slate_store_device_token_matches(const char *candidate);
 
 /** @brief Mint and persist a new device token (§4.3: "on explicit request"). */
 esp_err_t slate_store_device_token_reissue(void);
+
+/* --- Web editor access -------------------------------------------------- */
+
+/** @brief Whether an administrator PIN protects new web-editor sessions. */
+bool slate_store_admin_pin_is_set(void);
+
+/**
+ * @brief Persist a numeric administrator PIN as a salted PBKDF2 hash.
+ *
+ * The PIN must contain 4–12 ASCII digits. The plaintext is never persisted.
+ */
+esp_err_t slate_store_admin_pin_set(const char *pin);
+
+/** @brief Remove web-editor PIN protection. */
+esp_err_t slate_store_admin_pin_clear(void);
+
+/** @brief Verify a candidate PIN in constant time. */
+bool slate_store_admin_pin_matches(const char *candidate);
 
 /* --- Home Assistant credentials (§12) ----------------------------------- */
 

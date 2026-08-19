@@ -7,7 +7,7 @@ const CONNECTION_LABEL: Record<ConnectionState, string> = {
   connecting: 'Connecting',
   online: 'Connected',
   offline: 'Offline',
-  unauthorized: 'Not paired',
+  unauthorized: 'Session ended',
 }
 
 interface Props {
@@ -25,7 +25,7 @@ interface Props {
   onPublish: () => void
   onDiscard: () => void
   onToggleMode: () => void
-  onUnpair: () => void
+  onLock?: () => void
 }
 
 export function TopBar({
@@ -43,7 +43,7 @@ export function TopBar({
   onPublish,
   onDiscard,
   onToggleMode,
-  onUnpair,
+  onLock,
 }: Props) {
   const pages = config?.pages ?? []
   const themes = info?.themes ?? []
@@ -138,9 +138,11 @@ export function TopBar({
           <span className="visually-hidden">{CONNECTION_LABEL[connection]}</span>
         </span>
 
-        <button type="button" className="link" onClick={onUnpair} title="Forget the device token">
-          Unpair
-        </button>
+        {onLock === undefined ? null : (
+          <button type="button" className="link" onClick={onLock} title="End this browser session">
+            Lock
+          </button>
+        )}
       </div>
     </header>
   )

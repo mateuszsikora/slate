@@ -1,10 +1,10 @@
 /*
  * Finding the panel again after its address changed (design.md §4.3).
  *
- * The token outlives a DHCP lease, so the address in a bookmark does not have
- * to be the address the panel has today. The device advertises itself as
- * `slate-<mac>.local`, and that name is what this editor falls back to when
- * the origin it was served from stops answering.
+ * The address in a bookmark does not have to be the address the panel has
+ * today. The device advertises itself as `slate-<mac>.local`, and that name is
+ * what this editor falls back to when the origin it was served from stops
+ * answering.
  */
 
 import { API_BASE, type DeviceInfo } from './api'

@@ -17,7 +17,7 @@
   2. It does not sweep the band per view. `GET /wifi/scan` serves a cache and the
      refresh button says what it costs before it is pressed.
 
-  §9.1 grows this into the editor's pairing view rather than replacing it.
+  The editor replaces this document once the panel is on the station network.
   Addressing (§9.6) sits behind a disclosure triangle, closed and set to DHCP,
   because it is the setting almost nobody needs and the one that can make a panel
   unreachable. It opens by itself in exactly one case: a stored static
@@ -174,6 +174,22 @@ button.link {
           </div>
         </details>
 
+        <details open>
+          <summary>Web editor access</summary>
+          <p class="hint">
+            Optionally protect the editor with a numeric PIN. When enabled, Slate asks for it
+            every time the editor is opened. Without a PIN, anyone on this network can open it.
+          </p>
+          <label for="adminPin">New administrator PIN</label>
+          <input id="adminPin" type="password" inputmode="numeric" pattern="[0-9]*"
+                 minlength="4" maxlength="12" autocomplete="new-password">
+          <p class="hint">Use 4–12 digits. A forgotten PIN requires a physical factory reset.</p>
+          <label class="check" for="openEditor">
+            <input id="openEditor" type="checkbox">
+            <span>Do not require a PIN</span>
+          </label>
+        </details>
+
         <details>
           <summary>Recovery network security</summary>
           <p class="hint">
@@ -265,6 +281,7 @@ var REFUSALS = {
   password_too_long: "That password is longer than WPA2 allows.",
   setup_password_too_short: "A setup network password needs at least 8 characters.",
   setup_password_too_long: "That setup network password is longer than WPA2 allows.",
+  admin_pin_invalid: "Use 4–12 digits for the administrator PIN.",
   bad_ipv4: "The addressing in that request is not valid.",
   bad_ipv4_mode: "The addressing in that request is not valid.",
   bad_address: "That address is not a host address on its own subnet.",
@@ -463,6 +480,14 @@ function submit(event) {
     body.setup_password = "";
   } else if (el("setupPassword").value) {
     body.setup_password = el("setupPassword").value;
+  }
+  if (el("openEditor").checked) {
+    body.admin_pin = "";
+  } else if (el("adminPin").value) {
+    if (!/^[0-9]{4,12}$/.test(el("adminPin").value)) {
+      return fail("admin_pin_invalid");
+    }
+    body.admin_pin = el("adminPin").value;
   }
 
   el("submit").disabled = true;

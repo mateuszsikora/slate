@@ -30,8 +30,12 @@ export interface DeviceInfo {
   schema_max: number
   name: string
   themes: string[]
-  pairing: string
+  authentication: 'open' | 'pin'
   network: NetworkState
+}
+
+export interface DeviceSession {
+  token: string
 }
 
 export interface ProviderStatus {
@@ -116,7 +120,7 @@ export class ApiError extends Error {
     this.body = body
   }
 
-  /** Whether the device refused the token rather than the request. */
+  /** Whether the device refused the current session credential. */
   get isUnauthorized(): boolean {
     return this.status === 401
   }
@@ -157,9 +161,17 @@ export class DeviceClient {
     return `${this.origin}${API_BASE}${path}`
   }
 
-  /** `GET /info` — the one route §4.1 serves without a token. */
+  /** `GET /info` — public metadata used before a browser session exists. */
   info(): Promise<DeviceInfo> {
     return this.request<DeviceInfo>('GET', '/info', { authenticated: false })
+  }
+
+  /** Start a browser session. The device token stays an internal transport credential. */
+  session(pin?: string): Promise<DeviceSession> {
+    return this.request<DeviceSession>('POST', '/session', {
+      authenticated: false,
+      body: pin === undefined ? undefined : JSON.stringify({ pin }),
+    })
   }
 
   status(): Promise<DeviceStatus> {

@@ -58,6 +58,13 @@ static route_t s_routes[SLATE_API_MAX_URI_HANDLERS];
 static resource_catalog_t s_resource_catalogs[SLATE_STATE_MAX_PROVIDERS];
 static root_page_t s_roots[SLATE_API_ROOT_EDITOR + 1];
 
+#define SESSION_BODY_MAX 64
+#define PIN_FAILURE_LIMIT 5
+#define PIN_BLOCK_SECONDS 30
+
+static unsigned s_pin_failures;
+static int64_t s_pin_block_until_us;
+
 /* --- Shared response policy -------------------------------------------- */
 
 static void set_common_headers(httpd_req_t *req)
@@ -331,7 +338,9 @@ esp_err_t slate_api_register_uri(const httpd_uri_t *uri, slate_api_auth_t auth)
      * selecting the wrong enum value. */
     bool public_route = uri->method == HTTP_OPTIONS ||
                         (uri->method == HTTP_GET &&
-                         strcmp(uri->uri, SLATE_API_BASE_PATH "/info") == 0);
+                         strcmp(uri->uri, SLATE_API_BASE_PATH "/info") == 0) ||
+                        (uri->method == HTTP_POST &&
+                         strcmp(uri->uri, SLATE_API_BASE_PATH "/session") == 0);
     if (auth == SLATE_API_AUTH_PUBLIC && !public_route) {
         return ESP_ERR_NOT_ALLOWED;
     }
@@ -815,10 +824,6 @@ static esp_err_t info_handler(httpd_req_t *req)
     slate_wifi_status_t wifi;
     slate_wifi_status(&wifi);
 
-    char token[SLATE_DEVICE_TOKEN_LEN + 1];
-    bool pairing_ready = slate_store_device_token_copy(token, sizeof(token)) == ESP_OK;
-    memset(token, 0, sizeof(token));
-
     const esp_app_desc_t *app = esp_app_get_description();
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
@@ -830,14 +835,91 @@ static esp_err_t info_handler(httpd_req_t *req)
               cJSON_AddNumberToObject(root, "schema_max", SLATE_CONFIG_SCHEMA_MAX) != NULL &&
               cJSON_AddStringToObject(root, "name", slate_store_device_name()) != NULL &&
               add_item(root, "themes", themes_json()) &&
-              cJSON_AddStringToObject(root, "pairing",
-                                      pairing_ready ? "ready" : "degraded") != NULL &&
+              cJSON_AddStringToObject(root, "authentication",
+                                      slate_store_admin_pin_is_set() ? "pin" : "open") != NULL &&
               add_item(root, "network", network_json(&wifi));
     if (!ok) {
         cJSON_Delete(root);
         return slate_api_send_json(req, NULL);
     }
     return slate_api_send_json(req, root);
+}
+
+static esp_err_t session_handler(httpd_req_t *req)
+{
+    /* The setup AP deliberately exposes only network provisioning. An open
+     * editor must not turn that radio-range exception into full API access. */
+    if (request_is_on_setup_ap(req)) {
+        return slate_api_refuse(req, "401 Unauthorized", "unauthorized");
+    }
+
+    const bool pin_required = slate_store_admin_pin_is_set();
+    const int64_t now = esp_timer_get_time();
+    if (pin_required && now < s_pin_block_until_us) {
+        int64_t seconds = (s_pin_block_until_us - now + 999999) / 1000000;
+        char retry_after[24];
+        snprintf(retry_after, sizeof(retry_after), "%lld", (long long) seconds);
+        httpd_resp_set_hdr(req, "Retry-After", retry_after);
+        return slate_api_refuse(req, "429 Too Many Requests", "try_later");
+    }
+
+    char body[SESSION_BODY_MAX] = {0};
+    char pin[SLATE_ADMIN_PIN_MAX_LEN + 1] = {0};
+    bool parsed = !pin_required;
+
+    if (pin_required && req->content_len > 0 && req->content_len < sizeof(body)) {
+        size_t received = 0;
+        while (received < req->content_len) {
+            int chunk = httpd_req_recv(req, body + received, req->content_len - received);
+            if (chunk <= 0) {
+                explicit_bzero(body, sizeof(body));
+                return slate_api_refuse_and_close(req, "400 Bad Request", "truncated");
+            }
+            received += (size_t) chunk;
+        }
+
+        cJSON *root = cJSON_Parse(body);
+        cJSON *value = cJSON_GetObjectItemCaseSensitive(root, "pin");
+        if (cJSON_IsString(value) && value->valuestring != NULL &&
+            strlen(value->valuestring) <= SLATE_ADMIN_PIN_MAX_LEN) {
+            strlcpy(pin, value->valuestring, sizeof(pin));
+            parsed = true;
+        }
+        if (cJSON_IsString(value) && value->valuestring != NULL) {
+            explicit_bzero(value->valuestring, strlen(value->valuestring));
+        }
+        cJSON_Delete(root);
+    }
+    explicit_bzero(body, sizeof(body));
+
+    bool accepted = parsed && (!pin_required || slate_store_admin_pin_matches(pin));
+    explicit_bzero(pin, sizeof(pin));
+    if (!accepted) {
+        s_pin_failures++;
+        if (s_pin_failures >= PIN_FAILURE_LIMIT) {
+            s_pin_failures = 0;
+            s_pin_block_until_us = now + PIN_BLOCK_SECONDS * 1000000LL;
+            httpd_resp_set_hdr(req, "Retry-After", "30");
+            return slate_api_refuse(req, "429 Too Many Requests", "try_later");
+        }
+        return slate_api_refuse(req, "401 Unauthorized", "invalid_pin");
+    }
+
+    s_pin_failures = 0;
+    s_pin_block_until_us = 0;
+    char token[SLATE_DEVICE_TOKEN_LEN + 1] = {0};
+    if (slate_store_device_token_copy(token, sizeof(token)) != ESP_OK) {
+        return slate_api_refuse(req, "500 Internal Server Error", "session_failed");
+    }
+
+    cJSON *response = cJSON_CreateObject();
+    bool ok = response != NULL && cJSON_AddStringToObject(response, "token", token) != NULL;
+    explicit_bzero(token, sizeof(token));
+    if (!ok) {
+        cJSON_Delete(response);
+        return slate_api_send_json(req, NULL);
+    }
+    return slate_api_send_json(req, response);
 }
 
 static esp_err_t status_handler(httpd_req_t *req)
@@ -1069,6 +1151,11 @@ esp_err_t slate_api_init(void)
         .method = HTTP_GET,
         .handler = status_handler,
     };
+    const httpd_uri_t session = {
+        .uri = SLATE_API_BASE_PATH "/session",
+        .method = HTTP_POST,
+        .handler = session_handler,
+    };
     const httpd_uri_t resources = {
         .uri = SLATE_API_BASE_PATH "/resources",
         .method = HTTP_GET,
@@ -1081,6 +1168,9 @@ esp_err_t slate_api_init(void)
     };
 
     err = slate_api_register_uri(&info, SLATE_API_AUTH_PUBLIC);
+    if (err == ESP_OK) {
+        err = slate_api_register_uri(&session, SLATE_API_AUTH_PUBLIC);
+    }
     if (err == ESP_OK) {
         err = slate_api_register_uri(&status, SLATE_API_AUTH_DEVICE_TOKEN);
     }

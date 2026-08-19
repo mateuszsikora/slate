@@ -196,13 +196,14 @@ Upgrading older configurations (an in-firmware migrator that rewrites and persis
 
 ## 4. Device API (contract v1)
 
-Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: Bearer <device_token>`.
+Base: `http://<ip>/api/v1`. `/info` and `/session` are the public browser bootstrap; every other route requires `Authorization: Bearer <device_token>`.
 
 ### 4.1 HTTP
 
 | Method | Path               | Description |
 |--------|--------------------|-------------|
-| GET    | `/info`            | model, firmware version, `schema_max`, name, available themes, pairing state, current network state. No auth. |
+| GET    | `/info`            | model, firmware version, `schema_max`, name, available themes, authentication mode, current network state. No auth. |
+| POST   | `/session`         | open an editor session with the optional administrator PIN; returns the internal bearer credential to the current page only |
 | GET    | `/config`          | current UI configuration |
 | PUT    | `/config`          | replace configuration; validates, rebuilds the UI, persists. With `?transient=1` (edit mode only) the rebuild happens in RAM and nothing is written to flash — this is what live preview uses, so a drag session does not wear the flash. |
 | POST   | `/config/validate` | validate without saving — `204` when valid, detailed `400` when invalid |
@@ -212,7 +213,7 @@ Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: B
 | POST   | `/ha`              | configure the HA provider; connection is tested before saving |
 | GET    | `/ha/discover`     | discover local HA instances over mDNS; manual URL entry remains available |
 | GET    | `/wifi/scan`       | nearby networks: `ssid`, `rssi`, `channel`, `auth`. Cached — see section 9.2 |
-| POST   | `/wifi`            | set station credentials and, optionally, IPv4 addressing and the setup-access-point password; persist, then apply. Answers before the result is known (section 9.3) |
+| POST   | `/wifi`            | set station credentials and, optionally, IPv4 addressing, setup-access-point password and administrator PIN; persist, then apply. Answers before the result is known (section 9.3) |
 | DELETE | `/wifi`            | forget the credentials and raise the setup access point |
 | GET    | `/status`          | network and provider states, RSSI, uptime, free heap, reset reason, reboot counter, resource count |
 | POST   | `/mode`            | `{"mode": "normal"\|"edit"}` |
@@ -368,13 +369,13 @@ The complete M1 response shapes are:
   "schema_max": 1,
   "name": "slate-a1b2c3",
   "themes": [],
-  "pairing": "ready",
+  "authentication": "pin",
   "network": {"mode": "sta", "ssid": "home", "ip": "192.168.1.42", "sta_ssid": "home",
               "ipv4": {"mode": "dhcp"}, "last_error": null}
 }
 ```
 
-`themes` lists capabilities present in this firmware rather than work planned for a later milestone. The first capability is `midnight`; later theme ids appear only in firmware that actually contains their tokens and assets. `pairing` is `ready` when a usable device token is available and `degraded` when one is not. It does not mean that a particular browser has stored the token — the device cannot observe browser `localStorage` and does not invent a second pairing database to pretend otherwise.
+`themes` lists capabilities present in this firmware rather than work planned for a later milestone. The first capability is `midnight`; later theme ids appear only in firmware that actually contains their tokens and assets. `authentication` is `pin` when a new editor session needs the administrator PIN and `open` when anyone on the LAN may open one.
 
 ```json
 {
@@ -453,17 +454,13 @@ integration is not necessarily a physical state change.
 
 ### 4.3 Authentication
 
-A 32-character random device token is generated on first boot and stored in NVS. It reaches the browser through a QR code rendered on screen:
+The person configuring WiFi may set an optional 4–12 digit administrator PIN. With a PIN, every newly opened or refreshed editor asks for it; without one, anyone on the same LAN can open the editor. The PIN is stored only as a randomly salted PBKDF2-SHA256 hash. Five failed attempts block new attempts for 30 seconds. Changing the PIN setting rotates the internal credential and ends existing sessions. A forgotten PIN is recovered by the panel's physical factory-reset gesture.
 
-```
-http://192.168.1.42/?t=Xk7p...
-```
+Internally, a 32-character random device token still protects the HTTP API and WebSocket. `POST /session` checks the PIN, or accepts an empty request in open mode, and returns that token to the current page. The editor keeps it only in memory: it is never shown to the user, put in a URL or stored in `localStorage`. A new token is issued after `factory_reset`.
 
-The editor persists it in `localStorage`. Requests without it receive 401. A new token is issued after `factory_reset` or on explicit request from the device screen.
+The QR on the panel contains only `http://<ip>/`. The device also advertises itself over mDNS as `slate-<mac>.local`; the editor falls back to it when the remembered IP stops answering, and the new origin starts a new session. mDNS is advertised on the setup access point too, so the same name works before the panel has ever joined a network.
 
-This handles device discovery and authorization in a single step. Because the stored token outlives a DHCP lease, the device also advertises itself over mDNS as `slate-<mac>.local`; the editor falls back to it when the remembered IP stops answering, and the error screen always shows the current address. mDNS is advertised on the setup access point too, so the same name works before the panel has ever joined a network.
-
-There is one exception to the token, and it is narrow. While the setup access point is up, the setup page itself and the three endpoints it needs — `GET /wifi/scan`, `POST /wifi`, `GET /info` — are served **without a token, on the access point interface only**. Everything else answers 401 there exactly as it does on the station interface. The reasoning is that a token the browser must be told, when the browser has just joined an open network whose name is printed on the same screen as the token, is a step that buys nothing and costs the one flow that must not have steps. The exposure this accepts is bounded and worth stating plainly: someone within radio range can move the panel to a different network. They cannot read provider credentials, publish direct-provider state, write a configuration or upload firmware. Section 12 carries the same point from the security side.
+While the setup access point is up, the setup page and the endpoints it needs — `GET /wifi/scan`, `POST /wifi`, `GET /info` — are served **without a token, on the access point interface only**. Everything else answers 401 there. Someone within radio range can therefore move the panel to a different network and choose its future PIN; they cannot read provider credentials, publish direct-provider state, write a dashboard or upload firmware. Setting the optional WPA2 setup-network password narrows that exposure in shared buildings.
 
 ## 5. Provider integrations
 
@@ -698,7 +695,7 @@ Rebuilds must be memory-idempotent. After 500 cycles the free LVGL heap returns 
 
 | Mode    | Behaviour |
 |---------|-----------|
-| setup   | the device runs its own access point and serves the setup page. The screen shows the SSID, the password if one is set, the address and a pairing QR — section 9 |
+| setup   | the device runs its own access point and serves the setup page. The screen shows the SSID, the password if one is set, the address and a WiFi QR — section 9 |
 | normal  | dashboard; touch emits semantic actions for bound resources |
 | edit    | top bar reads "edit mode", touch emits no provider actions, live preview of changes |
 | offline | one or more providers unreachable: only their tiles are dimmed, indicators identify them, last known values remain visible but clearly stale |
@@ -796,15 +793,15 @@ This replaces the on-screen WiFi wizard the design originally called for. A phon
 ### 9.1 The flow
 
 1. Flash from the browser using ESP Web Tools (Chromium-based browsers).
-2. The device boots, finds no credentials in NVS, and comes up in setup mode. The screen shows the access point's SSID, its password if one is set, the address to open, and a `WIFI:` QR that joins the network in one scan. This is a different QR from the pairing one of §4.3 — that one carries a URL and a token, and there is nothing to pair with until there is a network.
+2. The device boots, finds no credentials in NVS, and comes up in setup mode. The screen shows the access point's SSID, its password if one is set, the address to open, and a `WIFI:` QR that joins the network in one scan.
 3. Join `slate-<mac6>` from a phone or laptop and open `http://192.168.4.1`.
-4. The setup page lists nearby networks. Pick one, type the password, submit.
-5. The panel reports the outcome **on its own screen** — see §9.3 for why the browser cannot. On success it shows the station address and the pairing QR with the device token; on failure the access point comes back with the reason.
-6. Scanning the pairing QR, or typing the address, opens the editor.
+4. The setup page lists nearby networks. Pick one, type its password, optionally choose an administrator PIN, and submit.
+5. The panel reports the outcome **on its own screen** — see §9.3 for why the browser cannot. On success it shows the station address and a QR containing only that URL; on failure the access point comes back with the reason.
+6. Scanning the URL QR, or typing the address, opens the editor. It asks for the PIN when one was configured and opens immediately otherwise.
 7. The editor asks which provider to use. `direct` needs no setup; choosing Home Assistant asks for its URL and long-lived token, and `POST /ha` verifies the connection before persisting.
 8. The provider's resource picker populates and the first page can be arranged.
 
-Steps 6–8 are M6 and later. From M1 the setup page carries the WiFi form and nothing else; it grows into the editor's pairing view rather than being replaced by it.
+Steps 6–8 are M6 and later. From M1 the setup page carries the WiFi form and nothing else; the editor replaces it on the station interface.
 
 ### 9.2 The access point
 
@@ -990,14 +987,15 @@ Configuration and tokens must survive updates. They live in NVS and LittleFS, ou
 Minimal by design — the device sits on a LAN, not on the internet.
 
 - Provider credentials live only in NVS and are never returned by the API. The Home Assistant token is the first such credential and carries the account's authority.
-- The device token guards write endpoints, direct-provider state publication and provider attachment on the WebSocket. Possessing it grants configuration and control access to the panel; it is a secret, not merely a pairing convenience.
+- The device token guards write endpoints, direct-provider state publication and provider attachment on the WebSocket. It is an internal transport credential obtained by the current editor page through `/session`, never a user-facing recovery secret.
+- The optional administrator PIN is stored only as a salted PBKDF2-SHA256 hash. Open mode is explicit: anyone who can reach the panel on the LAN can control it. PIN mode rate-limits failed attempts, asks again for every new page session, and uses physical factory reset as recovery.
 - Documentation states plainly that a long-lived HA token carries full account privileges, and recommends a dedicated account in Home Assistant's **`system-users`** group. Not `system-admin`, which grants more than Slate needs, and explicitly **not `system-read-only`**, which does not work: S-4 measured that group reading every registry Slate needs while being refused `call_service`, so the panel renders a perfect dashboard on which nothing responds to a tap. The group has to be named, because "restricted" reads like "read-only" to anyone skimming. The failure is also quiet: a denied service call comes back as `home_assistant_error`, not `unauthorized`, so the HA adapter must classify it before the common optimistic update (§5.3) reverts, or every tap fails forever with no hint that the account is the cause.
 - The WiFi passphrase written by `POST /wifi` lives in NVS and is never returned by the API, and it never enters the configuration JSON — §10 makes that file something people export, import and share, and a credential does not belong in a document with those properties.
-- **The setup access point is open by default**, and the setup page on it is served without a token (§4.3). This is the one place the token rule is relaxed, and the trade is worth naming rather than discovering. What an attacker in radio range gets is the ability to move the panel to a different network. What they do not get is provider credentials, direct-provider publication/attachment, the configuration, or `/ota/upload` — those answer 401 on the access point exactly as they do on the station, and a panel moved to a hostile network still holds every secret behind a token that only the screen has shown. The threat model is a room, and the mitigation is the same one the whole pairing scheme rests on: the screen is in that room and the attacker is not. A WPA2 passphrase can be set for anyone whose radio range is a shared building rather than a house; it is then displayed on the setup screen, which is the same trade one layer down.
+- **The setup access point is open by default**, and its setup page can change WiFi and administrator-PIN settings. The threat model is a room: a WPA2 passphrase can be set when radio range extends into a shared building, and is then displayed on the setup screen beside the SSID.
 - No HTTPS on the device. A deliberate trade-off: a self-signed certificate on an ESP32 is a worse experience than its absence on a local network.
 - **`GET /coredump` (§11.3) returns memory, so it is the one endpoint whose body is not a curated document.** An ELF core dump carries task stacks, which is where a secret is on its way to or from NVS. Three things keep the two rules above true rather than approximately true. The dump is token-gated like every write, with no setup-access-point exception. `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` stays off, so `.bss`, `.data` and the heap are not in the dump — and the device token, which lives in `.bss`, is therefore not in it either. And the code paths that hold a passphrase or any provider credential on a stack zero it as soon as they are done, for this reason and with this section named at the call site; that is a habit the firmware has to keep, not a property of the endpoint. Enabling `CAPTURE_DRAM` would break the arrangement, which is a second reason it is off.
 
-Rate limiting and origin allow-lists will be added if a concrete scenario requires them.
+Origin allow-lists will be added if a concrete scenario requires them.
 
 ## 13. Spikes
 
@@ -1066,7 +1064,7 @@ M5 outranks the editor because a wall panel without a brightness schedule gets u
 | | Scope | Done when |
 |--|-------|-----------|
 | M6 | Web editor, provider/resource picker, second theme | someone unfamiliar builds a page without reading the JSON format |
-| M7 | Setup screen and portal polish, pairing QR, error mode, factory reset from the panel, static addressing (9.6) | the section 9 flow works with no cable and no ESP-IDF, for someone who has not read this document |
+| M7 | Setup screen and portal polish, editor URL QR, optional administrator PIN, error mode, factory reset from the panel, static addressing (9.6) | the section 9 flow works with no cable and no ESP-IDF, for someone who has not read this document |
 | M8 | Release OTA with manifest, prebuilt binary, browser flasher, README, enclosure files | someone without ESP-IDF gets a running panel and receives updates |
 
 M0 is a weekend. M1–M3 carry the technical risk. M4–M5 are the bulk of the hours at the lowest risk. M6–M8 are conditional — they determine whether anyone else can use this.
