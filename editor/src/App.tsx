@@ -4,7 +4,7 @@
  * publication lifecycle so a reconnect cannot silently publish stale work.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   ApiError,
@@ -17,6 +17,7 @@ import {
 import { deviceAnswersAt, mdnsOrigin, servedByDevice } from './lib/discovery'
 import { DeviceSocket, type ConnectionState, type LogFrame, type StatusFrame } from './lib/socket'
 import { DevicePanel } from './ui/DevicePanel'
+import { IntegrationsDialog } from './ui/IntegrationsDialog'
 import { LogPanel, type LogLine } from './ui/LogPanel'
 import { TopBar } from './ui/TopBar'
 import { Unlock } from './ui/Unlock'
@@ -51,6 +52,7 @@ export function App() {
   const [mode, setMode] = useState<'normal' | 'edit'>('normal')
   const [logs, setLogs] = useState<LogLine[]>([])
   const [movingTo, setMovingTo] = useState<string | null>(null)
+  const [integrationsOpen, setIntegrationsOpen] = useState(false)
 
   const socketRef = useRef<DeviceSocket | null>(null)
   const logSequence = useRef(0)
@@ -146,6 +148,7 @@ export function App() {
     modeRef.current = 'normal'
     setLogs([])
     setUnlockError(null)
+    setIntegrationsOpen(false)
     setPhase('unlock')
   }, [])
 
@@ -362,6 +365,7 @@ export function App() {
     modeRef.current = 'normal'
     setLogs([])
     setUnlockError(null)
+    setIntegrationsOpen(false)
     setPhase('unreachable')
   }, [client, token])
 
@@ -539,6 +543,21 @@ export function App() {
           id: providerStatus.id,
           status: providerStatus.status,
         })) ?? [])
+  const integrationClient = useMemo(
+    () => (token === null ? null : client(token)),
+    [client, token],
+  )
+
+  const integrationChanged = useCallback(() => {
+    if (token === null) return
+    /* The heartbeat may still contain the provider state from before the
+     * integration changed. Fall back to a fresh status response immediately. */
+    setHeartbeat(null)
+    void client(token)
+      .status()
+      .then(setStatus)
+      .catch(() => undefined)
+  }, [client, token])
 
   /* --- Views ------------------------------------------------------------- */
 
@@ -582,6 +601,7 @@ export function App() {
         onPublish={() => void publishDraft()}
         onDiscard={discardDraft}
         onToggleMode={toggleMode}
+        onOpenIntegrations={() => setIntegrationsOpen(true)}
         onLock={info?.authentication === 'pin' ? lock : undefined}
       />
       <div className="shell__body">
@@ -610,6 +630,14 @@ export function App() {
           <LogPanel lines={logs} connection={connection} />
         </aside>
       </div>
+      {integrationsOpen && integrationClient !== null ? (
+        <IntegrationsDialog
+          client={integrationClient}
+          providers={providers}
+          onChanged={integrationChanged}
+          onClose={() => setIntegrationsOpen(false)}
+        />
+      ) : null}
     </div>
   )
 }

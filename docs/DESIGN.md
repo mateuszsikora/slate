@@ -196,7 +196,7 @@ Upgrading older configurations (an in-firmware migrator that rewrites and persis
 
 ## 4. Device API (contract v1)
 
-Base: `http://<ip>/api/v1`. `/info` and `/session` are the public browser bootstrap; every other route requires `Authorization: Bearer <device_token>`.
+Base: `http://<ip>/api/v1`. `/info` and `/session` are the public browser bootstrap; every other route requires the in-memory device-session credential unless the route explicitly accepts a scoped External API key.
 
 ### 4.1 HTTP
 
@@ -209,9 +209,14 @@ Base: `http://<ip>/api/v1`. `/info` and `/session` are the public browser bootst
 | POST   | `/config/validate` | validate without saving — `204` when valid, detailed `400` when invalid |
 | GET    | `/providers`       | available providers: id, status and resource count |
 | GET    | `/resources?provider=<id>` | normalized resources available from one provider; used by the picker |
-| POST   | `/direct/state`    | publish one normalized resource snapshot through the direct provider |
+| POST   | `/direct/state`    | publish one normalized resource snapshot through the External API (`direct`) provider; accepts a scoped integration key |
+| GET    | `/ha`              | whether HA is configured and its URL; never returns the token |
 | POST   | `/ha`              | configure the HA provider; connection is tested before saving |
+| DELETE | `/ha`              | disconnect HA and erase its URL and token |
 | GET    | `/ha/discover`     | discover local HA instances over mDNS; manual URL entry remains available |
+| GET    | `/integration-keys` | list non-secret External API key metadata |
+| POST   | `/integration-keys` | create a named External API key; the plaintext is returned once |
+| DELETE | `/integration-keys?id=<id>` | revoke one External API key and close active integration WebSockets |
 | GET    | `/wifi/scan`       | nearby networks: `ssid`, `rssi`, `channel`, `auth`. Cached — see section 9.2 |
 | POST   | `/wifi`            | set station credentials and, optionally, IPv4 addressing, setup-access-point password and administrator PIN; persist, then apply. Answers before the result is known (section 9.3) |
 | DELETE | `/wifi`            | forget the credentials and raise the setup access point |
@@ -408,21 +413,20 @@ A transfer that stops part-way is the one outcome with no error document, becaus
 
 ### 4.2 WebSocket `/api/v1/ws`
 
-Event channel for the editor, remote diagnostics and direct-provider actions. The HTTP upgrade does not carry a
+Event channel for the editor, remote diagnostics and External API actions. The HTTP upgrade does not carry a
 credential: putting the device token in the URL would leave it in browser history and access
 logs, while requiring an `Authorization` header would exclude the browser WebSocket API. The
 client therefore authenticates with its first text frame, within five seconds of the upgrade:
 
 ```json
-{"type": "auth", "token": "<32-character device token>"}
+{"type": "auth", "token": "<32-character session or External API credential>"}
 ```
 
-Success is `{"type":"auth_ok"}` followed by the retained log backlog and a current `status`
-frame. A malformed first frame or a wrong token receives `{"type":"auth_invalid"}` and a
+Success is `{"type":"auth_ok"}`. A device-session credential is followed by the retained log backlog and a current `status` frame and may use editor controls. A scoped External API key receives only direct-provider actions and may send `ping`, `provider_attach` for `direct`, and `action_result`; it cannot receive logs or status, enter edit mode, or attach another provider. A malformed first frame or a wrong token receives `{"type":"auth_invalid"}` and a
 WebSocket policy-violation close (1008). The same close is sent if no first frame arrives within
 five seconds. No other application frame is accepted before `auth_ok`.
 
-An integration client that wants to receive direct-provider actions attaches after authentication;
+An External API client that wants to receive direct-provider actions attaches after authentication;
 only one such client may be attached at a time, so two processes cannot both operate the same light.
 
 Device → client:
@@ -457,6 +461,8 @@ integration is not necessarily a physical state change.
 The person configuring WiFi may set an optional 4–12 digit administrator PIN. With a PIN, every newly opened or refreshed editor asks for it; without one, anyone on the same LAN can open the editor. The PIN is stored only as a randomly salted PBKDF2-SHA256 hash. Five failed attempts block new attempts for 30 seconds. Changing the PIN setting rotates the internal credential and ends existing sessions. A forgotten PIN is recovered by the panel's physical factory-reset gesture.
 
 Internally, a 32-character random device token still protects the HTTP API and WebSocket. `POST /session` checks the PIN, or accepts an empty request in open mode, and returns that token to the current page. The editor keeps it only in memory: it is never shown to the user, put in a URL or stored in `localStorage`. A new token is issued after `factory_reset`.
+
+Scripts and Node-RED never receive that administrator credential. The editor can create up to four named External API keys. Their 32-character plaintext is returned once; NVS stores only a SHA-256 digest and non-secret id/name metadata. Each key is individually revocable and is accepted only for `POST /direct/state` and the direct action-consumer WebSocket role. Revocation closes active External API WebSockets immediately. Existing device-session credentials remain accepted on those two paths for backwards compatibility and development tools.
 
 The QR on the panel contains only `http://<ip>/`. The device also advertises itself over mDNS as `slate-<mac>.local`; the editor falls back to it when the remembered IP stops answering, and the new origin starts a new session. mDNS is advertised on the setup access point too, so the same name works before the panel has ever joined a network.
 
@@ -534,13 +540,13 @@ The action bus validates the action against the resource capabilities and routes
 
 Optimistic updates are mandatory. A valid action immediately applies its expected normalized state and marks the tile pending with a subtle pulse. A matching real state update confirms it. Explicit failure or no confirmation within 3 s reverts to the last confirmed state and shows a brief error. A provider reporting success means only that it accepted the request; it does not confirm physical state. Late confirmations become ordinary state updates, duplicate results are ignored, and a real update that disagrees with the optimistic value wins immediately.
 
-### 5.4 Direct provider
+### 5.4 External API (`direct`) provider
 
-The direct provider makes the neutral contract usable without Home Assistant and proves that provider neutrality is more than a mock. A script or Node-RED flow first pushes the configuration, then publishes complete snapshots for its bound resource ids:
+The stable provider id is `direct`; the user-facing editor calls it **External API** so its transport direction is not mistaken for a generic HTTP polling engine. It makes the neutral contract usable without Home Assistant and proves that provider neutrality is more than a mock. A script or Node-RED flow binds a resource in the editor, publishes the dashboard, then publishes complete snapshots for that resource id:
 
 ```http
 POST /api/v1/direct/state
-Authorization: Bearer <device_token>
+Authorization: Bearer <external_api_key>
 Content-Type: application/json
 ```
 
@@ -556,7 +562,7 @@ After validation and enqueueing, the endpoint returns `202 {"resource":"living-r
 
 To receive actions, one authenticated device-WebSocket client sends `{"type":"provider_attach","provider":"direct"}`. A second attachment receives `{"type":"error","error":"provider_busy"}`. An attachment that names no provider, or one this firmware does not implement, is refused in the same shape with §5.2's `provider_required` and `provider_not_found` — the question is the same one `GET /resources` asks, so the answer keeps the same name rather than growing a second vocabulary for the WebSocket. Re-attaching is not an error for the client that already holds the attachment; the rule is that two processes cannot both operate the same light, and a repeat from the one that holds it is not a second process. There is deliberately no acknowledgement frame: attaching moves the provider from `degraded` to `online`, so the `status` frame that follows carries the fact a consumer was asking about. The device then sends the `action` event from §4.2. `action_result` with `success:false` and an optional stable `error` string reverts immediately; `success:true` acknowledges delivery, and the next published snapshot confirms state. If the attached client disconnects, the provider becomes `degraded`: published state remains valid, while new actions fail immediately rather than waiting three seconds.
 
-This path deliberately has no broker, callback URL, persistence or discovery protocol. It is sufficient for scripts, test fixtures and Node-RED, and is the reference adapter for M2. A richer standard such as MQTT is added only when a real integration needs it.
+This path deliberately has no broker, callback URL, persistence, arbitrary HTTP polling or discovery protocol. The Integrations view explains the direction, creates/revokes scoped keys and gives a concrete publish example. A future REST polling source is a separate provider because intervals, HTTP credentials, JSON selection and transformation are a different contract rather than options on this one. MQTT is likewise added only when a real integration needs it.
 
 ### 5.5 Home Assistant connection
 
@@ -586,6 +592,10 @@ redirect is refused before Slate sends the token; the configured URL is the
 credential boundary, not merely the first hop toward one.
 A full configuration-work queue returns `503 ha_busy`, and an unexpected
 manager handoff failure after persistence returns `500 reload_failed`.
+
+`GET /ha` returns `{"configured":true,"url":"..."}` or the same shape with
+`configured:false` and a null URL. It never returns the token. `DELETE /ha`
+erases both values, tears down the live connection and returns `204`.
 
 Reconnect with exponential backoff: 1 s → 2 → 4 → 8 → 15 → 30 s (ceiling). `auth_invalid` is not retried forever: it moves the provider to `error` until credentials change. A network or HA restart moves it through `offline` and `connecting` while the last confirmed states remain visible as stale.
 
@@ -798,7 +808,7 @@ This replaces the on-screen WiFi wizard the design originally called for. A phon
 4. The setup page lists nearby networks. Pick one, type its password, optionally choose an administrator PIN, and submit.
 5. The panel reports the outcome **on its own screen** — see §9.3 for why the browser cannot. On success it shows the station address and a QR containing only that URL; on failure the access point comes back with the reason.
 6. Scanning the URL QR, or typing the address, opens the editor. It asks for the PIN when one was configured and opens immediately otherwise.
-7. The editor asks which provider to use. `direct` needs no setup; choosing Home Assistant asks for its URL and long-lived token, and `POST /ha` verifies the connection before persisting.
+7. The editor opens Integrations. Home Assistant offers discovery, manual URL and long-lived-token entry and verifies the connection before persisting. External API explains its push-state/action-return direction and creates a named, scoped key.
 8. The provider's resource picker populates and the first page can be arranged.
 
 Steps 6–8 are M6 and later. From M1 the setup page carries the WiFi form and nothing else; the editor replaces it on the station interface.
@@ -987,7 +997,8 @@ Configuration and tokens must survive updates. They live in NVS and LittleFS, ou
 Minimal by design — the device sits on a LAN, not on the internet.
 
 - Provider credentials live only in NVS and are never returned by the API. The Home Assistant token is the first such credential and carries the account's authority.
-- The device token guards write endpoints, direct-provider state publication and provider attachment on the WebSocket. It is an internal transport credential obtained by the current editor page through `/session`, never a user-facing recovery secret.
+- The device token guards administrative endpoints and the full editor WebSocket. It is an internal transport credential obtained by the current editor page through `/session`, never a user-facing recovery secret.
+- Named External API keys are stored only as SHA-256 digests, shown once, individually revocable and accepted only for direct-provider state publication and its action-consumer WebSocket role. They cannot read or replace a dashboard, configure HA, receive logs, upload firmware or factory-reset the panel.
 - The optional administrator PIN is stored only as a salted PBKDF2-SHA256 hash. Open mode is explicit: anyone who can reach the panel on the LAN can control it. PIN mode rate-limits failed attempts, asks again for every new page session, and uses physical factory reset as recovery.
 - Documentation states plainly that a long-lived HA token carries full account privileges, and recommends a dedicated account in Home Assistant's **`system-users`** group. Not `system-admin`, which grants more than Slate needs, and explicitly **not `system-read-only`**, which does not work: S-4 measured that group reading every registry Slate needs while being refused `call_service`, so the panel renders a perfect dashboard on which nothing responds to a tap. The group has to be named, because "restricted" reads like "read-only" to anyone skimming. The failure is also quiet: a denied service call comes back as `home_assistant_error`, not `unauthorized`, so the HA adapter must classify it before the common optimistic update (§5.3) reverts, or every tap fails forever with no hint that the account is the cause.
 - The WiFi passphrase written by `POST /wifi` lives in NVS and is never returned by the API, and it never enters the configuration JSON — §10 makes that file something people export, import and share, and a credential does not belong in a document with those properties.

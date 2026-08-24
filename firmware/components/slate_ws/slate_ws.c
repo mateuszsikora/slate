@@ -71,6 +71,7 @@ static const char *TAG = "ws";
 typedef struct {
     bool used;
     bool authenticated;
+    bool external_api;
     bool closing;
     bool send_pending;
     bool initial_status_pending;
@@ -503,6 +504,11 @@ static void handle_provider_attach(httpd_req_t *req, ws_client_t *client, int fd
         return;
     }
 
+    if (client->external_api && strcmp(name->valuestring, "direct") != 0) {
+        send_text(req, "{\"type\":\"error\",\"error\":\"scope_forbidden\"}");
+        return;
+    }
+
     ws_provider_t *provider = provider_find(name->valuestring);
     if (!provider) {
         send_text(req, "{\"type\":\"error\",\"error\":\"provider_not_found\"}");
@@ -651,6 +657,27 @@ esp_err_t slate_ws_provider_send(const char *id, const char *text, size_t len)
     return err;
 }
 
+void slate_ws_external_keys_changed(void)
+{
+    int fds[SLATE_WS_MAX_CLIENTS];
+    size_t count = 0;
+
+    portENTER_CRITICAL(&s_state_lock);
+    for (size_t i = 0; i < SLATE_WS_MAX_CLIENTS; i++) {
+        if (s_clients[i].used && s_clients[i].authenticated &&
+            s_clients[i].external_api) {
+            s_clients[i].closing = true;
+            s_clients[i].authenticated = false;
+            fds[count++] = s_clients[i].fd;
+        }
+    }
+    portEXIT_CRITICAL(&s_state_lock);
+
+    for (size_t i = 0; i < count; i++) {
+        httpd_sess_trigger_close(s_server, fds[i]);
+    }
+}
+
 /** Copy this client's next queued frame, if it is a consumer with one waiting. */
 static ws_provider_t *provider_peek(const ws_client_t *client, uint32_t generation, char *out,
                                     size_t *len)
@@ -710,6 +737,15 @@ static esp_err_t handle_authenticated(httpd_req_t *req, ws_client_t *client, int
         return ESP_OK;
     }
 
+    if (client->external_api) {
+        if (strcmp(type->valuestring, "provider_attach") == 0) {
+            handle_provider_attach(req, client, fd, root);
+        } else if (strcmp(type->valuestring, "action_result") == 0) {
+            handle_action_result(client, root);
+        }
+        return ESP_OK;
+    }
+
     if (strcmp(type->valuestring, "mode") == 0) {
         cJSON *mode = cJSON_GetObjectItemCaseSensitive(root, "mode");
         if (cJSON_IsString(mode) && strcmp(mode->valuestring, "edit") == 0) {
@@ -737,8 +773,12 @@ static esp_err_t handle_first_frame(httpd_req_t *req, ws_client_t *client, int f
     cJSON *type = cJSON_GetObjectItemCaseSensitive(root, "type");
     cJSON *token = cJSON_GetObjectItemCaseSensitive(root, "token");
     bool token_is_string = cJSON_IsString(token);
-    bool valid = cJSON_IsString(type) && strcmp(type->valuestring, "auth") == 0 &&
-                 token_is_string && slate_store_device_token_matches(token->valuestring);
+    bool frame_is_auth = cJSON_IsString(type) && strcmp(type->valuestring, "auth") == 0;
+    bool device_token = frame_is_auth && token_is_string &&
+                        slate_store_device_token_matches(token->valuestring);
+    bool integration_token = frame_is_auth && token_is_string && !device_token &&
+                             slate_store_integration_key_matches(token->valuestring);
+    bool valid = device_token || integration_token;
     if (token_is_string) {
         explicit_bzero(token->valuestring, strlen(token->valuestring));
     }
@@ -748,9 +788,11 @@ static esp_err_t handle_first_frame(httpd_req_t *req, ws_client_t *client, int f
         return ESP_FAIL;
     }
 
-    uint64_t oldest;
-    uint64_t next;
-    log_ring_bounds(&oldest, &next);
+    uint64_t oldest = 0;
+    uint64_t next = 0;
+    if (device_token) {
+        log_ring_bounds(&oldest, &next);
+    }
     const int64_t now = esp_timer_get_time();
 
     portENTER_CRITICAL(&s_state_lock);
@@ -758,9 +800,12 @@ static esp_err_t handle_first_frame(httpd_req_t *req, ws_client_t *client, int f
                    now - client->connected_at_us < SLATE_WS_AUTH_TIMEOUT_US;
     if (current) {
         client->authenticated = true;
-        client->log_cursor = oldest;
-        client->backlog_end = next;
-        client->initial_status_pending = true;
+        client->external_api = integration_token;
+        if (device_token) {
+            client->log_cursor = oldest;
+            client->backlog_end = next;
+            client->initial_status_pending = true;
+        }
     }
     portEXIT_CRITICAL(&s_state_lock);
 
@@ -1071,7 +1116,7 @@ static size_t format_status_json(char *out, size_t out_size)
                        "\"ha\":\"%s\"},\"wifi\":%s,"
                        "\"heap_free\":%u,\"lvgl_heap_free\":%s,\"lvgl_frag_pct\":%s}",
                        slate_provider_status_str(slate_state_provider_status("direct")),
-                       slate_store_ha_token_is_set() ? "offline" : "unconfigured",
+                       slate_provider_status_str(slate_state_provider_status("ha")),
                        wifi_value, (unsigned) esp_get_free_heap_size(), lvgl_free, lvgl_frag);
     return len > 0 && (size_t) len < out_size ? (size_t) len : 0;
 }
@@ -1087,6 +1132,7 @@ static void mark_status_due(int64_t now)
 
     for (size_t i = 0; i < SLATE_WS_MAX_CLIENTS; i++) {
         if (s_clients[i].used && s_clients[i].authenticated &&
+            !s_clients[i].external_api &&
             !s_clients[i].initial_status_pending) {
             s_clients[i].status_pending = true;
         }
@@ -1111,6 +1157,7 @@ static void mark_status_immediately(void)
     portENTER_CRITICAL(&s_state_lock);
     for (size_t i = 0; i < SLATE_WS_MAX_CLIENTS; i++) {
         if (s_clients[i].used && s_clients[i].authenticated &&
+            !s_clients[i].external_api &&
             !s_clients[i].initial_status_pending) {
             s_clients[i].status_pending = true;
         }
@@ -1141,6 +1188,7 @@ static void service_client(ws_client_t *client, int64_t now, char *line, char *j
     bool initial;
     bool status;
     bool reloaded;
+    bool external_api;
     int64_t connected;
     uint64_t cursor;
     uint64_t backlog_end;
@@ -1160,6 +1208,7 @@ static void service_client(ws_client_t *client, int64_t now, char *line, char *j
     initial = client->initial_status_pending;
     status = client->status_pending;
     reloaded = client->reloaded_pending;
+    external_api = client->external_api;
     connected = client->connected_at_us;
     cursor = client->log_cursor;
     backlog_end = client->backlog_end;
@@ -1192,6 +1241,14 @@ static void service_client(ws_client_t *client, int64_t now, char *line, char *j
         if (queue_send(client, generation, SEND_ACTION, 0, json, action_len) == ESP_OK) {
             provider_drop(provider);
         }
+        return;
+    }
+
+    /* External API sessions consume only direct-provider actions. In
+     * particular, do not let their zero log cursor fall through to the live
+     * log stream below: integration keys are deliberately not administrator
+     * credentials. */
+    if (external_api) {
         return;
     }
 
@@ -1365,7 +1422,8 @@ esp_err_t slate_ws_publish_reloaded(unsigned schema, size_t tiles)
 
     portENTER_CRITICAL(&s_state_lock);
     for (size_t i = 0; i < SLATE_WS_MAX_CLIENTS; i++) {
-        if (s_clients[i].used && s_clients[i].authenticated) {
+        if (s_clients[i].used && s_clients[i].authenticated &&
+            !s_clients[i].external_api) {
             s_clients[i].reloaded_schema = schema;
             s_clients[i].reloaded_tiles = tiles;
             s_clients[i].reloaded_pending = true;

@@ -48,6 +48,7 @@ static const char *TAG = "store";
 #define KEY_WIFI_REV  "wifi_rev"
 #define KEY_FS_READY  "fs_ready"
 #define KEY_ADMIN_AUTH "admin_auth"
+#define KEY_INTEGRATION_KEYS "int_keys"
 
 #define ADMIN_AUTH_VERSION 1
 #define ADMIN_PIN_SALT_LEN 16
@@ -59,6 +60,21 @@ typedef struct {
     uint8_t salt[ADMIN_PIN_SALT_LEN];
     uint8_t hash[ADMIN_PIN_HASH_LEN];
 } admin_auth_record_t;
+
+#define INTEGRATION_KEYS_VERSION 1
+#define INTEGRATION_KEY_HASH_LEN 32
+
+typedef struct {
+    uint8_t used;
+    char id[SLATE_INTEGRATION_KEY_ID_LEN + 1];
+    char name[SLATE_INTEGRATION_KEY_NAME_MAX_LEN + 1];
+    uint8_t hash[INTEGRATION_KEY_HASH_LEN];
+} integration_key_record_t;
+
+typedef struct {
+    uint8_t version;
+    integration_key_record_t keys[SLATE_INTEGRATION_KEY_MAX];
+} integration_keys_record_t;
 
 /*
  * §9.6's addressing, as one blob rather than a key per field.
@@ -119,6 +135,9 @@ static bool s_wifi_configured;
 static bool s_storage_was_reset;
 static bool s_fs_mounted;
 static bool s_admin_pin_set;
+static integration_keys_record_t s_integration_keys = {
+    .version = INTEGRATION_KEYS_VERSION,
+};
 
 /* See slate_store_set_rf_active(). False is the safe default and is true at
  * boot, which is when the token is minted. */
@@ -173,7 +192,7 @@ static esp_err_t from_nvs(esp_err_t err)
 static bool key_is_secret(const char *key)
 {
     return strcmp(key, KEY_HA_TOKEN) == 0 || strcmp(key, KEY_WIFI_PASS) == 0 ||
-           strcmp(key, KEY_ADMIN_AUTH) == 0;
+           strcmp(key, KEY_ADMIN_AUTH) == 0 || strcmp(key, KEY_INTEGRATION_KEYS) == 0;
 }
 
 /* -------------------------------------------------------------------------
@@ -216,19 +235,28 @@ void slate_store_set_rf_active(bool active)
 }
 
 /* Caller holds the lock. */
-static void mint_token(void)
+static void fill_random_token(char *out, size_t len)
 {
     uint8_t raw[SLATE_DEVICE_TOKEN_LEN];
 
-    fill_random_strong(raw, sizeof(raw));
-    for (size_t i = 0; i < SLATE_DEVICE_TOKEN_LEN; i++) {
-        s_device_token[i] = TOKEN_ALPHABET[raw[i] & 0x3F];
+    if (len > sizeof(raw)) {
+        len = sizeof(raw);
     }
-    s_device_token[SLATE_DEVICE_TOKEN_LEN] = '\0';
+
+    fill_random_strong(raw, len);
+    for (size_t i = 0; i < len; i++) {
+        out[i] = TOKEN_ALPHABET[raw[i] & 0x3F];
+    }
+    out[len] = '\0';
 
     /* The token is a secret; the raw draw it came from is the same secret in a
      * different encoding, and it is on the stack of whatever task called us. */
     memset(raw, 0, sizeof(raw));
+}
+
+static void mint_token(void)
+{
+    fill_random_token(s_device_token, SLATE_DEVICE_TOKEN_LEN);
 }
 
 /* -------------------------------------------------------------------------
@@ -327,6 +355,50 @@ static esp_err_t admin_auth_read(admin_auth_record_t *record)
         return ESP_ERR_INVALID_SIZE;
     }
     return err;
+}
+
+static esp_err_t integration_keys_read(integration_keys_record_t *record)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open_ns(NVS_READONLY, &nvs);
+    if (err != ESP_OK) {
+        return from_nvs(err);
+    }
+
+    size_t len = sizeof(*record);
+    err = nvs_get_blob(nvs, KEY_INTEGRATION_KEYS, record, &len);
+    nvs_close(nvs);
+    err = from_nvs(err);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (len != sizeof(*record) || record->version != INTEGRATION_KEYS_VERSION) {
+        explicit_bzero(record, sizeof(*record));
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    for (size_t i = 0; i < SLATE_INTEGRATION_KEY_MAX; i++) {
+        const integration_key_record_t *key = &record->keys[i];
+        if (key->used > 1 || key->id[SLATE_INTEGRATION_KEY_ID_LEN] != '\0' ||
+            key->name[SLATE_INTEGRATION_KEY_NAME_MAX_LEN] != '\0' ||
+            (key->used &&
+             (strnlen(key->id, sizeof(key->id)) != SLATE_INTEGRATION_KEY_ID_LEN ||
+              key->name[0] == '\0'))) {
+            explicit_bzero(record, sizeof(*record));
+            return ESP_ERR_INVALID_SIZE;
+        }
+    }
+    return ESP_OK;
+}
+
+static esp_err_t integration_keys_write(const integration_keys_record_t *record)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open_ns(NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return nvs_finish(nvs, nvs_set_blob(nvs, KEY_INTEGRATION_KEYS, record, sizeof(*record)));
 }
 
 static bool admin_pin_valid(const char *pin)
@@ -685,6 +757,193 @@ bool slate_store_admin_pin_matches(const char *candidate)
     explicit_bzero(candidate_hash, sizeof(candidate_hash));
     explicit_bzero(&record, sizeof(record));
     return diff == 0;
+}
+
+/* -------------------------------------------------------------------------
+ * External API credentials
+ * ------------------------------------------------------------------------- */
+
+static bool integration_key_name_valid(const char *name)
+{
+    if (name == NULL) {
+        return false;
+    }
+    size_t len = strnlen(name, SLATE_INTEGRATION_KEY_NAME_MAX_LEN + 1);
+    if (len == 0 || len > SLATE_INTEGRATION_KEY_NAME_MAX_LEN) {
+        return false;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if ((unsigned char) name[i] < 0x20 || name[i] == 0x7F) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static esp_err_t integration_key_hash(const char *token,
+                                      uint8_t hash[INTEGRATION_KEY_HASH_LEN])
+{
+    int rc = mbedtls_sha256((const unsigned char *) token,
+                            SLATE_INTEGRATION_KEY_TOKEN_LEN, hash, 0);
+    return rc == 0 ? ESP_OK : ESP_FAIL;
+}
+
+size_t slate_store_integration_key_count(void)
+{
+    size_t count = 0;
+    LOCK();
+    for (size_t i = 0; i < SLATE_INTEGRATION_KEY_MAX; i++) {
+        count += s_integration_keys.keys[i].used ? 1 : 0;
+    }
+    UNLOCK();
+    return count;
+}
+
+esp_err_t slate_store_integration_key_at(size_t index,
+                                         slate_integration_key_info_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    esp_err_t err = ESP_ERR_NOT_FOUND;
+    LOCK();
+    for (size_t i = 0, seen = 0; i < SLATE_INTEGRATION_KEY_MAX; i++) {
+        const integration_key_record_t *key = &s_integration_keys.keys[i];
+        if (!key->used) {
+            continue;
+        }
+        if (seen++ == index) {
+            strlcpy(out->id, key->id, sizeof(out->id));
+            strlcpy(out->name, key->name, sizeof(out->name));
+            err = ESP_OK;
+            break;
+        }
+    }
+    UNLOCK();
+    return err;
+}
+
+esp_err_t slate_store_integration_key_create(const char *name,
+                                              slate_integration_key_info_t *info_out,
+                                              char *token_out,
+                                              size_t token_out_len)
+{
+    if (!integration_key_name_valid(name) || info_out == NULL || token_out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (token_out_len < SLATE_INTEGRATION_KEY_TOKEN_LEN + 1) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    memset(token_out, 0, token_out_len);
+    LOCK();
+
+    size_t slot = SLATE_INTEGRATION_KEY_MAX;
+    for (size_t i = 0; i < SLATE_INTEGRATION_KEY_MAX; i++) {
+        if (!s_integration_keys.keys[i].used) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == SLATE_INTEGRATION_KEY_MAX) {
+        UNLOCK();
+        return ESP_ERR_NO_MEM;
+    }
+
+    integration_keys_record_t next = s_integration_keys;
+    integration_key_record_t *key = &next.keys[slot];
+    memset(key, 0, sizeof(*key));
+    key->used = 1;
+    strlcpy(key->name, name, sizeof(key->name));
+    fill_random_token(token_out, SLATE_INTEGRATION_KEY_TOKEN_LEN);
+
+    bool unique_id = false;
+    for (unsigned attempt = 0; attempt < 8 && !unique_id; attempt++) {
+        fill_random_token(key->id, SLATE_INTEGRATION_KEY_ID_LEN);
+        unique_id = true;
+        for (size_t i = 0; i < SLATE_INTEGRATION_KEY_MAX; i++) {
+            if (s_integration_keys.keys[i].used &&
+                strcmp(s_integration_keys.keys[i].id, key->id) == 0) {
+                unique_id = false;
+                break;
+            }
+        }
+    }
+
+    esp_err_t err = unique_id ? integration_key_hash(token_out, key->hash) : ESP_FAIL;
+    if (err == ESP_OK) {
+        err = integration_keys_write(&next);
+    }
+    if (err == ESP_OK) {
+        s_integration_keys = next;
+        strlcpy(info_out->id, key->id, sizeof(info_out->id));
+        strlcpy(info_out->name, key->name, sizeof(info_out->name));
+    } else {
+        explicit_bzero(token_out, token_out_len);
+    }
+
+    explicit_bzero(&next, sizeof(next));
+    UNLOCK();
+    return err;
+}
+
+esp_err_t slate_store_integration_key_revoke(const char *id)
+{
+    if (id == NULL || strnlen(id, SLATE_INTEGRATION_KEY_ID_LEN + 1) !=
+                          SLATE_INTEGRATION_KEY_ID_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK();
+    integration_keys_record_t next = s_integration_keys;
+    integration_key_record_t *found = NULL;
+    for (size_t i = 0; i < SLATE_INTEGRATION_KEY_MAX; i++) {
+        if (next.keys[i].used && strcmp(next.keys[i].id, id) == 0) {
+            found = &next.keys[i];
+            break;
+        }
+    }
+    if (found == NULL) {
+        explicit_bzero(&next, sizeof(next));
+        UNLOCK();
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    explicit_bzero(found, sizeof(*found));
+    esp_err_t err = integration_keys_write(&next);
+    if (err == ESP_OK) {
+        s_integration_keys = next;
+    }
+    explicit_bzero(&next, sizeof(next));
+    UNLOCK();
+    return err;
+}
+
+bool slate_store_integration_key_matches(const char *candidate)
+{
+    if (candidate == NULL ||
+        strnlen(candidate, SLATE_INTEGRATION_KEY_TOKEN_LEN + 1) !=
+            SLATE_INTEGRATION_KEY_TOKEN_LEN) {
+        return false;
+    }
+
+    uint8_t candidate_hash[INTEGRATION_KEY_HASH_LEN] = {0};
+    if (integration_key_hash(candidate, candidate_hash) != ESP_OK) {
+        return false;
+    }
+
+    bool matches = false;
+    LOCK();
+    for (size_t i = 0; i < SLATE_INTEGRATION_KEY_MAX; i++) {
+        const integration_key_record_t *key = &s_integration_keys.keys[i];
+        int diff = mbedtls_ct_memcmp(candidate_hash, key->hash,
+                                     sizeof(candidate_hash));
+        matches = matches || (key->used && diff == 0);
+    }
+    UNLOCK();
+    explicit_bzero(candidate_hash, sizeof(candidate_hash));
+    return matches;
 }
 
 /* -------------------------------------------------------------------------
@@ -1351,6 +1610,20 @@ esp_err_t slate_store_init(void)
     s_admin_pin_set = admin_auth_read(&admin_auth) == ESP_OK;
     explicit_bzero(&admin_auth, sizeof(admin_auth));
 
+    integration_keys_record_t integration_keys = {0};
+    esp_err_t integration_keys_err = integration_keys_read(&integration_keys);
+    if (integration_keys_err == ESP_OK) {
+        s_integration_keys = integration_keys;
+    } else {
+        memset(&s_integration_keys, 0, sizeof(s_integration_keys));
+        s_integration_keys.version = INTEGRATION_KEYS_VERSION;
+        if (integration_keys_err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "reading External API keys: %s — treating them as absent",
+                     esp_err_to_name(integration_keys_err));
+        }
+    }
+    explicit_bzero(&integration_keys, sizeof(integration_keys));
+
     bump_boot_count();
 
     esp_err_t fs_err = mount_fs();
@@ -1402,6 +1675,8 @@ esp_err_t slate_store_factory_reset(void)
     s_ha_token_set = false;
     s_wifi_configured = false;
     s_admin_pin_set = false;
+    memset(&s_integration_keys, 0, sizeof(s_integration_keys));
+    s_integration_keys.version = INTEGRATION_KEYS_VERSION;
     s_boot_count = 0;
 
     /* Then the filesystem. */

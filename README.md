@@ -20,5 +20,20 @@ A long-lived token carries the full authority of its account. Slate stores it
 only in device NVS, never returns it from the API, and tests authentication
 before replacing working credentials.
 
+Open **Integrations** in the panel's embedded editor to discover an instance or
+enter its URL manually, test the token, reconnect, or remove the integration.
+
+## External API
+
+The provider id `direct` is presented as **External API** in the editor. It is
+the push integration for scripts, Node-RED and local applications: the client
+publishes normalized resource snapshots to Slate and may keep a WebSocket open
+to receive semantic panel actions. It does not poll arbitrary HTTP endpoints.
+
+Create a named key under **Integrations → External API**. A key is shown once,
+stored only as a SHA-256 digest, individually revocable, and scoped to
+`POST /api/v1/direct/state` plus the direct action WebSocket flow. The editor
+also provides a ready-to-copy publish example.
+
 Licenses and attribution for font software embedded in firmware images are in
 [the third-party notices](THIRD_PARTY_NOTICES.md).

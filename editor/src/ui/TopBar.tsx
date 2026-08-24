@@ -1,6 +1,7 @@
 /* The page, theme, publish and connection controls from design.md §10. */
 
 import type { Config, DeviceInfo, ProviderStatus } from '../lib/api'
+import { providerLabel } from '../lib/providers'
 import type { ConnectionState } from '../lib/socket'
 
 const CONNECTION_LABEL: Record<ConnectionState, string> = {
@@ -25,6 +26,7 @@ interface Props {
   onPublish: () => void
   onDiscard: () => void
   onToggleMode: () => void
+  onOpenIntegrations: () => void
   onLock?: () => void
 }
 
@@ -43,6 +45,7 @@ export function TopBar({
   onPublish,
   onDiscard,
   onToggleMode,
+  onOpenIntegrations,
   onLock,
 }: Props) {
   const pages = config?.pages ?? []
@@ -75,6 +78,9 @@ export function TopBar({
       </nav>
 
       <div className="topbar__controls">
+        <button type="button" className="button button--secondary" onClick={onOpenIntegrations}>
+          Integrations
+        </button>
         <label className="topbar__field">
           <span>Theme</span>
           <select
@@ -96,11 +102,11 @@ export function TopBar({
               key={provider.id}
               className={`provider-dot provider-dot--${provider.status}`}
               role="img"
-              aria-label={`${provider.id} provider: ${provider.status}`}
-              title={`${provider.id}: ${provider.status}`}
+              aria-label={`${providerLabel(provider.id)} provider: ${provider.status}`}
+              title={`${providerLabel(provider.id)}: ${provider.status}`}
             >
               <span aria-hidden="true" />
-              {provider.id}
+              {providerLabel(provider.id)}
             </span>
           ))}
         </div>

@@ -2,8 +2,9 @@ idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
     REQUIRES slate_action slate_api slate_brightness slate_config_api slate_control_api
-             slate_coredump slate_direct slate_display slate_editor slate_ha slate_mdns slate_ota
-             slate_setup slate_state slate_store slate_ui slate_wifi slate_time slate_ws app_update
+             slate_coredump slate_direct slate_display slate_editor slate_ha slate_integrations
+             slate_mdns slate_ota slate_setup slate_state slate_store slate_ui slate_wifi slate_time
+             slate_ws app_update
              esp_system esp_event
 )
 

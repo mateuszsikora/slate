@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Publish one normalized resource snapshot through the direct provider
+# Publish one normalized resource snapshot through External API
 # (design.md §5.2, §5.4).
 #
-#   SLATE_TOKEN=... tools/direct/publish.sh <host> [snapshot.json]
+#   SLATE_API_KEY=... tools/direct/publish.sh <host> [snapshot.json]
 #
 # The snapshot is read from a file or from stdin and is §5.2's document without
 # `provider`, which the endpoint fixes to `direct` — a body that could name its
@@ -11,7 +11,7 @@
 # store. With no argument the example below is sent, which is the shortest way
 # to see a panel accept state:
 #
-#   SLATE_TOKEN=... tools/direct/publish.sh 192.168.1.42
+#   SLATE_API_KEY=... tools/direct/publish.sh 192.168.1.42
 #
 #   {"resource":"living-room","kind":"light","name":"Living room",
 #    "available":true,"state":{"power":"on","brightness":62},
@@ -28,18 +28,19 @@
 # bound that stops a LAN client filling PSRAM, which is why it is a refusal and
 # not a silent accept.
 #
-# The token comes from $SLATE_TOKEN and is handed to curl through a config file
-# on stdin rather than as an argument, so it does not appear in the process list
-# of a shared machine. The browser obtains it through §4.3's session bootstrap;
-# development automation reads it from a trusted local secret store.
+# The scoped credential comes from $SLATE_API_KEY and is handed to curl through
+# a config file on stdin rather than as an argument, so it does not appear in
+# the process list of a shared machine. The editor creates named keys and shows
+# each plaintext once. $SLATE_TOKEN remains a backwards-compatible development
+# fallback for panels or scripts predating named integration keys.
 
 set -euo pipefail
 
 usage() {
     cat >&2 <<'EOF'
-Publish a normalized resource snapshot through the direct provider (design.md §5.4).
+Publish a normalized resource snapshot through External API (design.md §5.4).
 
-  SLATE_TOKEN=... tools/direct/publish.sh <host> [snapshot.json]
+  SLATE_API_KEY=... tools/direct/publish.sh <host> [snapshot.json]
 
   host       an address, a name, or a full URL: 192.168.1.42,
              slate-a1b2c3.local, http://192.168.1.42
@@ -53,7 +54,11 @@ EOF
 
 HOST="$1"
 SOURCE="${2:-}"
-: "${SLATE_TOKEN:?set SLATE_TOKEN to the device token (design.md §4.3)}"
+AUTH_TOKEN="${SLATE_API_KEY:-${SLATE_TOKEN:-}}"
+[[ -n "${AUTH_TOKEN}" ]] || {
+    echo "set SLATE_API_KEY to a named External API key" >&2
+    exit 2
+}
 
 case "${HOST}" in
     http://*|https://*) BASE="${HOST}" ;;
@@ -76,7 +81,7 @@ esac
 response="$(mktemp)"
 trap 'rm -f "${response}"' EXIT
 
-status="$(printf 'header = "Authorization: Bearer %s"\n' "${SLATE_TOKEN}" |
+status="$(printf 'header = "Authorization: Bearer %s"\n' "${AUTH_TOKEN}" |
     curl --config - \
         --silent \
         --request POST \

@@ -1508,6 +1508,43 @@ static esp_err_t discovery_handler(httpd_req_t *req)
     return slate_api_send_json(req, root);
 }
 
+static esp_err_t configuration_handler(httpd_req_t *req)
+{
+    char url[SLATE_HA_URL_MAX_LEN] = {0};
+    bool configured = slate_store_ha_token_is_set();
+    esp_err_t url_err = configured
+                            ? slate_store_ha_url_get(url, sizeof(url))
+                            : ESP_ERR_NOT_FOUND;
+
+    cJSON *root = cJSON_CreateObject();
+    bool ok = root != NULL &&
+              cJSON_AddBoolToObject(root, "configured", configured) != NULL;
+    if (ok) {
+        ok = url_err == ESP_OK
+                 ? cJSON_AddStringToObject(root, "url", url) != NULL
+                 : cJSON_AddNullToObject(root, "url") != NULL;
+    }
+    if (!ok) {
+        cJSON_Delete(root);
+        return slate_api_send_json(req, NULL);
+    }
+    return slate_api_send_json(req, root);
+}
+
+static esp_err_t disconnect_handler(httpd_req_t *req)
+{
+    esp_err_t err = slate_store_ha_clear();
+    if (err != ESP_OK) {
+        return slate_api_refuse(req, "500 Internal Server Error", "store_failed");
+    }
+    if (!command_send(CMD_RELOAD, 0, NULL, pdMS_TO_TICKS(100))) {
+        return slate_api_refuse(req, "503 Service Unavailable", "ha_busy");
+    }
+
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, NULL, 0);
+}
+
 /* --- Public lifecycle -------------------------------------------------- */
 
 esp_err_t slate_ha_init(void)
@@ -1584,12 +1621,28 @@ esp_err_t slate_ha_init(void)
         .method = HTTP_POST,
         .handler = configure_handler,
     };
+    const httpd_uri_t configuration = {
+        .uri = SLATE_API_BASE_PATH "/ha",
+        .method = HTTP_GET,
+        .handler = configuration_handler,
+    };
+    const httpd_uri_t disconnect = {
+        .uri = SLATE_API_BASE_PATH "/ha",
+        .method = HTTP_DELETE,
+        .handler = disconnect_handler,
+    };
     const httpd_uri_t discover = {
         .uri = SLATE_API_BASE_PATH "/ha/discover",
         .method = HTTP_GET,
         .handler = discovery_handler,
     };
     esp_err_t route_err = slate_api_register_uri(&configure, SLATE_API_AUTH_DEVICE_TOKEN);
+    if (route_err == ESP_OK) {
+        route_err = slate_api_register_uri(&configuration, SLATE_API_AUTH_DEVICE_TOKEN);
+    }
+    if (route_err == ESP_OK) {
+        route_err = slate_api_register_uri(&disconnect, SLATE_API_AUTH_DEVICE_TOKEN);
+    }
     if (route_err == ESP_OK) {
         route_err = slate_api_register_uri(&discover, SLATE_API_AUTH_DEVICE_TOKEN);
     }

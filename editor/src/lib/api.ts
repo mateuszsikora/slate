@@ -44,6 +44,26 @@ export interface ProviderStatus {
   resource_count: number
 }
 
+export interface HaConfiguration {
+  configured: boolean
+  url: string | null
+}
+
+export interface HaDiscoveredInstance {
+  name: string
+  uuid: string
+  url: string
+}
+
+export interface IntegrationKey {
+  id: string
+  name: string
+}
+
+export interface CreatedIntegrationKey extends IntegrationKey {
+  token: string
+}
+
 export interface Binding {
   provider: string
   resource: string
@@ -146,6 +166,9 @@ const DEFAULT_TIMEOUT_MS = 5000
  * than an ordinary LAN request without meaning the panel is unreachable. */
 const FACTORY_RESET_TIMEOUT_MS = 30000
 
+/* Credential testing includes a WebSocket connection to Home Assistant. */
+const HA_CONFIGURATION_TIMEOUT_MS = 20000
+
 export class DeviceClient {
   private readonly origin: string
   private readonly token: string | null
@@ -227,6 +250,46 @@ export class DeviceClient {
       'GET',
       `/resources?provider=${encodeURIComponent(provider)}`,
     ).then((response) => response.resources)
+  }
+
+  haConfiguration(): Promise<HaConfiguration> {
+    return this.request<HaConfiguration>('GET', '/ha')
+  }
+
+  discoverHomeAssistant(): Promise<HaDiscoveredInstance[]> {
+    return this.request<{ instances: HaDiscoveredInstance[] }>('GET', '/ha/discover').then(
+      (response) => response.instances,
+    )
+  }
+
+  configureHomeAssistant(url: string, token: string): Promise<void> {
+    return this.request<void>('POST', '/ha', {
+      body: JSON.stringify({ url, token }),
+      timeoutMs: HA_CONFIGURATION_TIMEOUT_MS,
+    })
+  }
+
+  disconnectHomeAssistant(): Promise<void> {
+    return this.request<void>('DELETE', '/ha')
+  }
+
+  integrationKeys(): Promise<IntegrationKey[]> {
+    return this.request<{ keys: IntegrationKey[] }>('GET', '/integration-keys').then(
+      (response) => response.keys,
+    )
+  }
+
+  createIntegrationKey(name: string): Promise<CreatedIntegrationKey> {
+    return this.request<CreatedIntegrationKey>('POST', '/integration-keys', {
+      body: JSON.stringify({ name }),
+    })
+  }
+
+  revokeIntegrationKey(id: string): Promise<void> {
+    return this.request<void>(
+      'DELETE',
+      `/integration-keys?id=${encodeURIComponent(id)}`,
+    )
   }
 
   private async request<T>(

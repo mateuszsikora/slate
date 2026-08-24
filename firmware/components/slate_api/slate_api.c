@@ -182,7 +182,7 @@ static bool request_is_on_setup_ap(httpd_req_t *req)
     return address == esp_ip4addr_aton(SLATE_SETUP_AP_ADDRESS);
 }
 
-static bool bearer_token_matches(httpd_req_t *req)
+static bool bearer_token_matches(httpd_req_t *req, bool allow_integration)
 {
     static const char PREFIX[] = "Bearer ";
     enum {
@@ -198,8 +198,10 @@ static bool bearer_token_matches(httpd_req_t *req)
     bool parsed = httpd_req_get_hdr_value_str(req, "Authorization", header, sizeof(header)) ==
                       ESP_OK &&
                   memcmp(header, PREFIX, sizeof(PREFIX) - 1) == 0;
+    const char *token = header + sizeof(PREFIX) - 1;
     bool matches = parsed &&
-                   slate_store_device_token_matches(header + sizeof(PREFIX) - 1);
+                   (slate_store_device_token_matches(token) ||
+                    (allow_integration && slate_store_integration_key_matches(token)));
     memset(header, 0, sizeof(header));
     return matches;
 }
@@ -212,7 +214,8 @@ static esp_err_t dispatch(httpd_req_t *req)
     bool allowed = route->auth == SLATE_API_AUTH_PUBLIC ||
                    route->auth == SLATE_API_AUTH_WS_FIRST_FRAME ||
                    (route->auth == SLATE_API_AUTH_SETUP_AP && request_is_on_setup_ap(req)) ||
-                   bearer_token_matches(req);
+                   bearer_token_matches(
+                       req, route->auth == SLATE_API_AUTH_DEVICE_OR_INTEGRATION);
     if (!allowed) {
         httpd_resp_set_hdr(req, "WWW-Authenticate", "Bearer");
         return slate_api_refuse(req, "401 Unauthorized", "unauthorized");
@@ -360,6 +363,13 @@ esp_err_t slate_api_register_uri(const httpd_uri_t *uri, slate_api_auth_t auth)
     bool first_frame_ws_route = uri->method == HTTP_GET && uri->is_websocket &&
                                 strcmp(uri->uri, SLATE_API_BASE_PATH "/ws") == 0;
     if (auth == SLATE_API_AUTH_WS_FIRST_FRAME && !first_frame_ws_route) {
+        return ESP_ERR_NOT_ALLOWED;
+    }
+
+    bool integration_route = uri->method == HTTP_POST &&
+                             strcmp(uri->uri,
+                                    SLATE_API_BASE_PATH "/direct/state") == 0;
+    if (auth == SLATE_API_AUTH_DEVICE_OR_INTEGRATION && !integration_route) {
         return ESP_ERR_NOT_ALLOWED;
     }
 

@@ -35,6 +35,7 @@
 #include "slate_display.h"
 #include "slate_editor.h"
 #include "slate_ha.h"
+#include "slate_integrations.h"
 #include "slate_mdns.h"
 #include "slate_ota.h"
 #include "slate_setup.h"
@@ -182,6 +183,32 @@ static void store_selftest(void)
     token[SLATE_DEVICE_TOKEN_LEN - 1] = '\0';
     CHECK(!slate_store_device_token_matches(token), "short token rejected");
 
+    size_t key_count = slate_store_integration_key_count();
+    if (key_count < SLATE_INTEGRATION_KEY_MAX) {
+        slate_integration_key_info_t key_info = {0};
+        char integration_token[SLATE_INTEGRATION_KEY_TOKEN_LEN + 1] = {0};
+        CHECK(slate_store_integration_key_create("selftest", &key_info,
+                                                  integration_token,
+                                                  sizeof(integration_token)) == ESP_OK,
+              "create External API key");
+        CHECK(strlen(integration_token) == SLATE_INTEGRATION_KEY_TOKEN_LEN,
+              "External API key is 32 characters");
+        CHECK(slate_store_integration_key_matches(integration_token),
+              "External API key matches");
+        CHECK(!slate_store_integration_key_matches(
+                  "0000000000000000000000000000000A"),
+              "wrong External API key rejected");
+        CHECK(slate_store_integration_key_count() == key_count + 1,
+              "External API key listed");
+        CHECK(slate_store_integration_key_revoke(key_info.id) == ESP_OK,
+              "revoke External API key");
+        CHECK(!slate_store_integration_key_matches(integration_token),
+              "revoked External API key rejected");
+        CHECK(slate_store_integration_key_count() == key_count,
+              "External API key count restored");
+        explicit_bzero(integration_token, sizeof(integration_token));
+    }
+
     char small[4];
     CHECK(slate_store_device_token_copy(small, sizeof(small)) == ESP_ERR_INVALID_SIZE,
           "token copy refuses a small buffer");
@@ -190,6 +217,8 @@ static void store_selftest(void)
     char leak[SLATE_HA_TOKEN_MAX_LEN];
     CHECK(slate_store_str_get("ha_token", leak, sizeof(leak)) == ESP_ERR_INVALID_ARG,
           "ha token unreachable via str_get");
+    CHECK(slate_store_str_get("int_keys", leak, sizeof(leak)) == ESP_ERR_INVALID_ARG,
+          "integration key hashes unreachable via str_get");
 
     /* One vocabulary for "unset", whichever partition it lives on. */
     CHECK(slate_store_str_get("no_such_key", leak, sizeof(leak)) == ESP_ERR_NOT_FOUND,
@@ -449,6 +478,12 @@ static void start_api(void)
     err = slate_control_api_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "device controls unavailable: %s — continuing", esp_err_to_name(err));
+    }
+
+    err = slate_integrations_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "integration management unavailable: %s — continuing",
+                 esp_err_to_name(err));
     }
 
     /*

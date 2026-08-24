@@ -23,7 +23,7 @@ extern "C" {
 
 #define SLATE_API_BASE_PATH        "/api/v1"
 #define SLATE_SETUP_AP_ADDRESS     "192.168.4.1"
-#define SLATE_API_MAX_URI_HANDLERS 24
+#define SLATE_API_MAX_URI_HANDLERS 28
 
 /* §4.1's `model`, and the same string §10's editor and mDNS advertise. One
  * board model per binary (ADR-1), so it is a constant rather than a lookup. */
@@ -37,6 +37,13 @@ typedef enum {
     SLATE_API_AUTH_DEVICE_TOKEN,
 
     /**
+     * Accept either the browser session credential or a named External API
+     * key. Registration is restricted to POST /direct/state so a scoped key
+     * cannot become a second administrator credential by caller error.
+     */
+    SLATE_API_AUTH_DEVICE_OR_INTEGRATION,
+
+    /**
      * The token is mandatory except when the request arrived on the setup
      * access point's local address. §4.3 permits this only for the setup page,
      * GET /wifi/scan and POST /wifi; #55 selects it for those handlers.
@@ -44,9 +51,10 @@ typedef enum {
     SLATE_API_AUTH_SETUP_AP,
 
     /**
-     * The HTTP upgrade is public and the device token is required in the first
-     * WebSocket text frame (§4.2). Registration is restricted to GET /ws in the
-     * same way the two policies above are restricted to their exact routes.
+     * The HTTP upgrade is public and a credential is required in the first
+     * WebSocket text frame (§4.2). A device-session credential gets the editor
+     * channel; an External API key gets only the direct action-consumer flow.
+     * Registration is restricted to GET /ws.
      */
     SLATE_API_AUTH_WS_FIRST_FRAME,
 } slate_api_auth_t;
