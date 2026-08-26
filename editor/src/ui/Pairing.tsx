@@ -1,7 +1,7 @@
 /*
  * Pairing (design.md §4.3).
  *
- * Scanning the QR on the panel opens this page with `?t=` already set and this
+ * Scanning the QR on the panel opens this page with `#t=` already set and this
  * view is never seen — which is the point of the QR. It is what remains for
  * everyone who arrives another way: a bookmark that outlived a token, a second
  * browser, or a phone that scanned the code and could not open the link.

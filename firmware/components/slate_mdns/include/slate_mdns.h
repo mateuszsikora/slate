@@ -3,7 +3,7 @@
  *
  * design.md §4.3, §9.2, §10.
  *
- * The panel answers to `slate-<mac>.local` and advertises the HTTP service the
+ * The panel answers to `slate-<mac6>.local` and advertises the HTTP service the
  * editor and the API are served from. §4.3 asks for this because the device
  * token outlives a DHCP lease: an address in a bookmark can stop being the
  * panel's address, and the name is what the editor falls back to when it does.
@@ -26,7 +26,7 @@ extern "C" {
 #endif
 
 /**
- * @brief Start the responder, claim `slate-<mac>.local` and advertise `_http._tcp`.
+ * @brief Start the responder, claim `slate-<mac6>.local` and advertise `_http._tcp`.
  *
  * Call once, after the default event loop exists and before the components
  * that query mDNS. Both interfaces are covered: §4.3 requires the name on the

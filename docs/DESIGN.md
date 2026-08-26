@@ -114,7 +114,11 @@ The display is 800×480. A fixed 56 px system bar at the top shows the clock, pa
 
 The content area is 800×424, divided into a 4 × 3 grid with a 12 px gap and 14 px margin. Each cell is 184×124 px — enough for an icon, a value and a label, with room for a comfortable touch target.
 
-Permitted tile sizes: 1×1, 2×1, 1×2, 2×2, 4×1.
+The grid can represent tile sizes 1×1, 2×1, 1×2, 2×2 and 4×1. A
+known component accepts only the variants listed in section 7; for example, a
+4×1 light is invalid even though that rectangle fits the grid. An unknown
+component type may use any grid-level size and renders the forward-compatible
+placeholder from section 3.1.
 
 Position is `[column, row]`. Pixel coordinates do not exist in the format.
 
@@ -182,7 +186,18 @@ Twelve cells is also the performance answer, not only a layout choice: S-2 measu
 
 Fields common to every tile: `id`, `type`, `pos`, `size`, plus optional `label` (overrides the normalized resource name) and `icon` (overrides the component default). Where a component variant renders an icon, the override is a stable Material Design Icons name from `tools/fonts/icons.txt`, such as `fire` or `thermometer-low`; a name unavailable in the running firmware renders the broken-image placeholder instead of an empty glyph.
 
+Page ids are unique within the document. Tile ids are also unique across the
+whole document, not merely within one page, because they key validation errors
+and editor selection. Empty ids are invalid.
+
 Most tiles carry one `binding`; a component such as the scene bar carries `bindings`. A binding is always the pair `provider` + `resource`. Resource ids are opaque outside their provider: `light.living_room` has meaning to the HA adapter, while `living-room` may name the same light in the direct provider. The pair is stored and compared as two strings; firmware never infers a provider from punctuation or from a component type.
+
+Provider ids are at most 15 UTF-8 bytes and resource ids at most 63. The same
+pair may feed several tiles only when all known component types agree on its
+normalized kind; binding `direct:living-room` as both a `light` and a `sensor`
+is invalid. One active configuration may reference at most 256 distinct pairs.
+Unknown component types do not reserve provider state until firmware learns
+how to interpret them.
 
 The provider owns the mapping between its native data and the semantic type named by the component. A `light` tile therefore renders an incompatible-binding placeholder if its resource arrives with normalized kind `sensor`, but neither the parser nor the component needs to know how that mismatch was represented upstream. A malformed binding is a validation error; an unknown provider id is accepted and renders a missing-provider placeholder, preserving forward compatibility with configurations created on newer firmware.
 
@@ -196,7 +211,7 @@ Upgrading older configurations (an in-firmware migrator that rewrites and persis
 
 ## 4. Device API (contract v1)
 
-Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: Bearer <device_token>`.
+Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: Bearer <device_token>`, unless the narrow setup-access-point exception in section 4.3 applies.
 
 ### 4.1 HTTP
 
@@ -287,6 +302,10 @@ so the editor can localize it. The schema-1 validation vocabulary is
 an id and a duplicate tile id are document-wide errors because neither has an
 unambiguous `tile.id` bucket. Unknown fields, component types and provider ids
 retain section 3's forward-compatible behavior and are not validation errors.
+`provider_required` and `resource_required` also cover a wrong JSON type, an
+empty string or the length limits from section 3.3. `binding_required` also
+covers reuse of one provider/resource pair by conflicting known component
+kinds and exceeding the 256-resource bound.
 
 An empty body and malformed JSON return the standard `400` documents
 `{"error":"empty_body"}` and `{"error":"invalid_json"}`. A body above the
@@ -401,7 +420,7 @@ A transfer that stops part-way is the one outcome with no error document, becaus
 ### 4.2 WebSocket `/api/v1/ws`
 
 Event channel for the editor, remote diagnostics and direct-provider actions. The HTTP upgrade does not carry a
-credential: putting the device token in the URL would leave it in browser history and access
+credential: putting the device token in the WebSocket query string would expose it to access
 logs, while requiring an `Authorization` header would exclude the browser WebSocket API. The
 client therefore authenticates with its first text frame, within five seconds of the upgrade:
 
@@ -449,12 +468,19 @@ integration is not necessarily a physical state change.
 A 32-character random device token is generated on first boot and stored in NVS. It reaches the browser through a QR code rendered on screen:
 
 ```
-http://192.168.1.42/?t=Xk7p...
+http://192.168.1.42/#t=Xk7p...
 ```
 
-The editor persists it in `localStorage`. Requests without it receive 401. A new token is issued after `factory_reset` or on explicit request from the device screen.
+The token is in the URL fragment, which a browser does not send in the HTTP
+request. The editor claims it on load, persists it in `localStorage`, and
+immediately removes it from the address bar with `history.replaceState`. This
+keeps it out of device access logs, browser history entries and subsequent
+copied URLs. Requests without it receive 401. The editor continues to accept
+the old `?t=` form so pairing links generated by earlier firmware keep working.
+A new token is issued after `factory_reset` or on explicit request from the
+device screen.
 
-This handles device discovery and authorization in a single step. Because the stored token outlives a DHCP lease, the device also advertises itself over mDNS as `slate-<mac>.local`; the editor falls back to it when the remembered IP stops answering, and the error screen always shows the current address. mDNS is advertised on the setup access point too, so the same name works before the panel has ever joined a network.
+This handles device discovery and authorization in a single step. Because the stored token outlives a DHCP lease, the device also advertises itself over mDNS as `slate-<mac6>.local`; the editor falls back to it when the remembered IP stops answering, and the error screen always shows the current address. mDNS is advertised on the setup access point too, so the same name works before the panel has ever joined a network.
 
 There is one exception to the token, and it is narrow. While the setup access point is up, the setup page itself and the three endpoints it needs — `GET /wifi/scan`, `POST /wifi`, `GET /info` — are served **without a token, on the access point interface only**. Everything else answers 401 there exactly as it does on the station interface. The reasoning is that a token the browser must be told, when the browser has just joined an open network whose name is printed on the same screen as the token, is a step that buys nothing and costs the one flow that must not have steps. The exposure this accepts is bounded and worth stating plainly: someone within radio range can move the panel to a different network. They cannot read provider credentials, publish direct-provider state, write a configuration or upload firmware. Section 12 carries the same point from the security side.
 
@@ -691,7 +717,7 @@ Rebuilds must be memory-idempotent. After 500 cycles the free LVGL heap returns 
 
 | Mode    | Behaviour |
 |---------|-----------|
-| setup   | the device runs its own access point and serves the setup page. The screen shows the SSID, the password if one is set, the address and a pairing QR — section 9 |
+| setup   | the device runs its own access point and serves the setup page. The screen shows the SSID, the password if one is set, the address and a WiFi join QR; the pairing QR appears after the station connects — section 9 |
 | normal  | dashboard; touch emits semantic actions for bound resources |
 | edit    | top bar reads "edit mode", touch emits no provider actions, live preview of changes |
 | offline | one or more providers unreachable: only their tiles are dimmed, indicators identify them, last known values remain visible but clearly stale |
@@ -753,7 +779,7 @@ These determine whether dashboards look good on someone else's data, and are man
 
 ## 8. Theming
 
-Appearance derives from tokens. Users choose a theme and optionally an accent colour; they do not set forty colours individually.
+Appearance derives from tokens. Users choose a theme; they do not set forty colours individually. The accent and its contrasting foreground are part of that theme.
 
 ```json
 {
@@ -803,8 +829,8 @@ Steps 6–8 are M6 and later. From M1 the setup page carries the WiFi form and n
 
 | | |
 |---|---|
-| SSID | `slate-<mac6>` — the last three bytes of the base MAC in lowercase hex, the same suffix as `slate-<mac>.local` (§4.3) and the device name (§16), so one panel is called one thing everywhere |
-| Password | **none by default.** WPA2 can be set and is then printed on the setup screen next to the SSID. The 8-character floor is the standard's, not ours |
+| SSID | `slate-<mac6>` — the last three bytes of the base MAC in lowercase hex, the same name as `slate-<mac6>.local` (§4.3) without its `.local` suffix, so one panel is called one thing everywhere |
+| Password | **none by default.** WPA2 can be provisioned in a custom build with `SLATE_SETUP_AP_PASSWORD`; there is no runtime setter in API v1. A configured value lives in NVS and is printed on the setup screen next to the SSID. The 8-character floor is the standard's, not ours |
 | Address | `192.168.4.1`, the `esp_netif` default, kept because it is the address people already recognise from every other device that does this |
 | DHCP | served by the device, which is also the gateway |
 | Portal | a DNS responder answering every query with the device address, so phones open the page unprompted |
@@ -986,7 +1012,7 @@ Minimal by design — the device sits on a LAN, not on the internet.
 - The device token guards write endpoints, direct-provider state publication and provider attachment on the WebSocket. Possessing it grants configuration and control access to the panel; it is a secret, not merely a pairing convenience.
 - Documentation states plainly that a long-lived HA token carries full account privileges, and recommends a dedicated account in Home Assistant's **`system-users`** group. Not `system-admin`, which grants more than Slate needs, and explicitly **not `system-read-only`**, which does not work: S-4 measured that group reading every registry Slate needs while being refused `call_service`, so the panel renders a perfect dashboard on which nothing responds to a tap. The group has to be named, because "restricted" reads like "read-only" to anyone skimming. The failure is also quiet: a denied service call comes back as `home_assistant_error`, not `unauthorized`, so the HA adapter must classify it before the common optimistic update (§5.3) reverts, or every tap fails forever with no hint that the account is the cause.
 - The WiFi passphrase written by `POST /wifi` lives in NVS and is never returned by the API, and it never enters the configuration JSON — §10 makes that file something people export, import and share, and a credential does not belong in a document with those properties.
-- **The setup access point is open by default**, and the setup page on it is served without a token (§4.3). This is the one place the token rule is relaxed, and the trade is worth naming rather than discovering. What an attacker in radio range gets is the ability to move the panel to a different network. What they do not get is provider credentials, direct-provider publication/attachment, the configuration, or `/ota/upload` — those answer 401 on the access point exactly as they do on the station, and a panel moved to a hostile network still holds every secret behind a token that only the screen has shown. The threat model is a room, and the mitigation is the same one the whole pairing scheme rests on: the screen is in that room and the attacker is not. A WPA2 passphrase can be set for anyone whose radio range is a shared building rather than a house; it is then displayed on the setup screen, which is the same trade one layer down.
+- **The setup access point is open by default**, and the setup page on it is served without a token (§4.3). This is the one place the token rule is relaxed, and the trade is worth naming rather than discovering. What an attacker in radio range gets is the ability to move the panel to a different network. What they do not get is provider credentials, direct-provider publication/attachment, the configuration, or `/ota/upload` — those answer 401 on the access point exactly as they do on the station, and a panel moved to a hostile network still holds every secret behind a token that only the screen has shown. The threat model is a room, and the mitigation is the same one the whole pairing scheme rests on: the screen is in that room and the attacker is not. A custom build may provision the WPA2 passphrase from §9.2 when radio range extends beyond that threat model; it is then displayed on the setup screen, which is the same trade one layer down.
 - No HTTPS on the device. A deliberate trade-off: a self-signed certificate on an ESP32 is a worse experience than its absence on a local network.
 - **`GET /coredump` (§11.3) returns memory, so it is the one endpoint whose body is not a curated document.** An ELF core dump carries task stacks, which is where a secret is on its way to or from NVS. Three things keep the two rules above true rather than approximately true. The dump is token-gated like every write, with no setup-access-point exception. `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` stays off, so `.bss`, `.data` and the heap are not in the dump — and the device token, which lives in `.bss`, is therefore not in it either. And the code paths that hold a passphrase or any provider credential on a stack zero it as soon as they are done, for this reason and with this section named at the call site; that is a habit the firmware has to keep, not a property of the endpoint. Enabling `CAPTURE_DRAM` would break the arrangement, which is a second reason it is off.
 
@@ -1081,4 +1107,3 @@ Ordered by when each is likely to become the limiting factor:
 - **Backlight dimming.** On this board the CH422G controls the backlight as a binary output; smooth dimming requires bridging one pin to a GPIO. The firmware should detect both variants: the schedule works in on/off mode unmodified and dims smoothly after the modification, which is documented as optional. Decided before M5.
 - **Power and mounting.** Budget roughly 1 A at 5 V with adequate conductor cross-section. Settled before M3, since it constrains where the panel can hang — harder to change than code.
 - **Multiple panels.** Device name suffixed with the MAC address; `POST /identify` to distinguish them. Whether the editor manages several panels from one view is deferred until a second one exists.
-- **Name collisions.** Before the repository goes public, check for an active project of the same name near ESP32 or Home Assistant. Slack's Slate and the editor libraries are unrelated fields and pose no practical conflict.

@@ -885,7 +885,7 @@ static bool pairing_url(char *out, size_t out_len, char *address, size_t address
     if (slate_store_device_token_copy(token, sizeof(token)) != ESP_OK) {
         return false;
     }
-    int written = snprintf(out, out_len, "http://%s/?t=%s", status.ip, token);
+    int written = snprintf(out, out_len, "http://%s/#t=%s", status.ip, token);
     explicit_bzero(token, sizeof(token));
     if (written < 0 || (size_t) written >= out_len) {
         return false;
