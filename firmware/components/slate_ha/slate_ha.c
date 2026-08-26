@@ -28,6 +28,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "http_parser.h"
 #include "mdns.h"
@@ -35,7 +36,6 @@
 #include "slate_action.h"
 #include "slate_api.h"
 #include "slate_ha_actions.h"
-#include "slate_ha_catalog.h"
 #include "slate_ha_entities.h"
 #include "slate_mdns.h"
 #include "slate_state.h"
@@ -56,6 +56,9 @@
 #define DISCOVERY_MAX_RESULTS    8
 #define DISCOVERY_TIMEOUT_MS     3000
 #define CONNECT_TEST_TIMEOUT_MS  12000
+#define CATALOG_BODY_MAX         64
+#define CATALOG_QUERY_MAX        48
+#define CATALOG_TIMEOUT_US       (30LL * 1000 * 1000)
 
 static const char *TAG = "slate_ha";
 
@@ -72,7 +75,16 @@ typedef enum {
     CMD_ACTION,
     CMD_ACTION_RESULT,
     CMD_CLEAR_ACTIONS,
+    CMD_CATALOG_REQUEST,
 } manager_command_kind_t;
+
+typedef enum {
+    HA_CATALOG_ENTITIES = 0,
+    HA_CATALOG_DEVICES,
+    HA_CATALOG_AREAS,
+    HA_CATALOG_STATES,
+    HA_CATALOG_STAGE_COUNT,
+} ha_catalog_stage_t;
 
 typedef struct {
     manager_command_kind_t kind;
@@ -85,6 +97,10 @@ typedef struct {
             bool success;
             char error[SLATE_HA_ACTION_ERROR_MAX + 1];
         } action_result;
+        struct {
+            uint32_t request_id;
+            ha_catalog_stage_t stage;
+        } catalog;
     } data;
 } manager_command_t;
 
@@ -130,9 +146,28 @@ struct main_connection {
     atomic_bool authenticated;
     atomic_size_t backoff_index;
     atomic_uint_fast32_t subscription_id;
-    atomic_uint_fast32_t catalog_ids[SLATE_HA_CATALOG_STAGE_COUNT];
     uint32_t next_command_id;
 };
+
+typedef enum {
+    CATALOG_IDLE,
+    CATALOG_PENDING,
+    CATALOG_READY,
+    CATALOG_FAILED,
+} catalog_status_t;
+
+typedef struct {
+    SemaphoreHandle_t lock;
+    catalog_status_t status;
+    uint32_t next_request_id;
+    uint32_t request_id;
+    uint32_t command_id;
+    uint32_t stale_command_id;
+    int64_t started_at_us;
+    char *response;
+    size_t response_len;
+    char error[32];
+} catalog_relay_t;
 
 typedef struct {
     EventGroupHandle_t events;
@@ -154,6 +189,7 @@ static QueueHandle_t s_config_jobs;
 static TaskHandle_t s_manager_task;
 static TaskHandle_t s_config_task;
 static main_connection_t s_main;
+static catalog_relay_t s_catalog;
 static bool s_wifi_up;
 static bool s_auth_blocked;
 static atomic_bool s_resubscribe_queued;
@@ -659,6 +695,88 @@ static bool command_id(const cJSON *item, uint32_t *out)
     return true;
 }
 
+/** Read only a top-level numeric `id`; the potentially huge `result` is opaque. */
+static bool raw_command_id(const char *json, size_t len, uint32_t *out)
+{
+    size_t i = 0;
+    unsigned depth = 0;
+    while (i < len) {
+        unsigned char ch = (unsigned char) json[i];
+        if (ch == '{' || ch == '[') {
+            depth++;
+            i++;
+            continue;
+        }
+        if (ch == '}' || ch == ']') {
+            if (depth == 0) {
+                return false;
+            }
+            depth--;
+            i++;
+            continue;
+        }
+        if (ch != '"') {
+            i++;
+            continue;
+        }
+
+        size_t start = ++i;
+        bool escaped = false;
+        while (i < len) {
+            ch = (unsigned char) json[i];
+            if (escaped) {
+                escaped = false;
+            } else if (ch == '\\') {
+                escaped = true;
+            } else if (ch == '"') {
+                break;
+            }
+            i++;
+        }
+        if (i >= len) {
+            return false;
+        }
+        size_t string_len = i - start;
+        i++;
+
+        if (depth != 1 || string_len != 2 ||
+            json[start] != 'i' || json[start + 1] != 'd') {
+            continue;
+        }
+        while (i < len && (json[i] == ' ' || json[i] == '\t' ||
+                           json[i] == '\r' || json[i] == '\n')) {
+            i++;
+        }
+        if (i >= len || json[i++] != ':') {
+            continue;
+        }
+        while (i < len && (json[i] == ' ' || json[i] == '\t' ||
+                           json[i] == '\r' || json[i] == '\n')) {
+            i++;
+        }
+        if (i >= len || json[i] < '0' || json[i] > '9') {
+            return false;
+        }
+        uint64_t value = 0;
+        while (i < len && json[i] >= '0' && json[i] <= '9') {
+            value = value * 10 + (uint64_t) (json[i++] - '0');
+            if (value > UINT32_MAX) {
+                return false;
+            }
+        }
+        while (i < len && (json[i] == ' ' || json[i] == '\t' ||
+                           json[i] == '\r' || json[i] == '\n')) {
+            i++;
+        }
+        if (value == 0 || i >= len || (json[i] != ',' && json[i] != '}')) {
+            return false;
+        }
+        *out = (uint32_t) value;
+        return true;
+    }
+    return false;
+}
+
 static esp_err_t send_json_frame(cJSON *root)
 {
     char *frame = cJSON_PrintUnformatted(root);
@@ -672,66 +790,120 @@ static esp_err_t send_json_frame(cJSON *root)
     return sent == (int) len ? ESP_OK : ESP_FAIL;
 }
 
-static const char *catalog_command(slate_ha_catalog_stage_t stage)
+static const char *catalog_command(ha_catalog_stage_t stage)
 {
-    static const char *const COMMANDS[SLATE_HA_CATALOG_STAGE_COUNT] = {
-        [SLATE_HA_CATALOG_ENTITIES] = "config/entity_registry/list_for_display",
-        [SLATE_HA_CATALOG_DEVICES] = "config/device_registry/list",
-        [SLATE_HA_CATALOG_AREAS] = "config/area_registry/list",
-        [SLATE_HA_CATALOG_STATES] = "get_states",
+    static const char *const COMMANDS[HA_CATALOG_STAGE_COUNT] = {
+        [HA_CATALOG_ENTITIES] = "config/entity_registry/list_for_display",
+        [HA_CATALOG_DEVICES] = "config/device_registry/list",
+        [HA_CATALOG_AREAS] = "config/area_registry/list",
+        [HA_CATALOG_STATES] = "get_states",
     };
-    return stage < SLATE_HA_CATALOG_STAGE_COUNT ? COMMANDS[stage] : NULL;
+    return stage < HA_CATALOG_STAGE_COUNT ? COMMANDS[stage] : NULL;
 }
 
-static void connection_cancel_catalog(void)
+static bool catalog_stage(const char *name, ha_catalog_stage_t *out)
 {
-    for (slate_ha_catalog_stage_t stage = 0;
-         stage < SLATE_HA_CATALOG_STAGE_COUNT; stage++) {
-        atomic_store(&s_main.catalog_ids[stage], 0);
+    static const char *const NAMES[HA_CATALOG_STAGE_COUNT] = {
+        [HA_CATALOG_ENTITIES] = "entities",
+        [HA_CATALOG_DEVICES] = "devices",
+        [HA_CATALOG_AREAS] = "areas",
+        [HA_CATALOG_STATES] = "states",
+    };
+    for (ha_catalog_stage_t stage = 0; stage < HA_CATALOG_STAGE_COUNT; stage++) {
+        if (strcmp(name, NAMES[stage]) == 0) {
+            *out = stage;
+            return true;
+        }
     }
-    slate_ha_catalog_cancel();
+    return false;
 }
 
-/** Ask for the four §5.7 payloads once, with ids reserved before any send. */
-static void connection_refresh_catalog(void)
+static void catalog_reset_locked(void)
 {
-    if (slate_ha_catalog_begin() != ESP_OK) {
-        ESP_LOGW(TAG, "could not start Home Assistant discovery refresh");
+    if (s_catalog.status == CATALOG_PENDING && s_catalog.command_id != 0) {
+        s_catalog.stale_command_id = s_catalog.command_id;
+    }
+    free(s_catalog.response);
+    s_catalog.response = NULL;
+    s_catalog.response_len = 0;
+    s_catalog.status = CATALOG_IDLE;
+    s_catalog.request_id = 0;
+    s_catalog.command_id = 0;
+    s_catalog.started_at_us = 0;
+    s_catalog.error[0] = '\0';
+}
+
+static void catalog_fail(uint32_t request_id, const char *error)
+{
+    xSemaphoreTake(s_catalog.lock, portMAX_DELAY);
+    if (s_catalog.status == CATALOG_PENDING &&
+        (request_id == 0 || s_catalog.request_id == request_id)) {
+        s_catalog.status = CATALOG_FAILED;
+        s_catalog.stale_command_id = s_catalog.command_id;
+        s_catalog.command_id = 0;
+        strlcpy(s_catalog.error, error, sizeof(s_catalog.error));
+    }
+    xSemaphoreGive(s_catalog.lock);
+}
+
+static bool catalog_set_command(uint32_t request_id, uint32_t command_id)
+{
+    bool current = false;
+    xSemaphoreTake(s_catalog.lock, portMAX_DELAY);
+    if (s_catalog.status == CATALOG_PENDING &&
+        s_catalog.request_id == request_id && s_catalog.command_id == 0) {
+        s_catalog.command_id = command_id;
+        current = true;
+    }
+    xSemaphoreGive(s_catalog.lock);
+    return current;
+}
+
+/** Take ownership of a complete raw HA response without constructing a tree. */
+static bool catalog_accept(uint32_t command_id, char *response, size_t response_len)
+{
+    bool intercepted = false;
+    xSemaphoreTake(s_catalog.lock, portMAX_DELAY);
+    if (s_catalog.status == CATALOG_PENDING &&
+        s_catalog.command_id == command_id) {
+        s_catalog.response = response;
+        s_catalog.response_len = response_len;
+        s_catalog.command_id = 0;
+        s_catalog.status = CATALOG_READY;
+        intercepted = true;
+    } else if (s_catalog.stale_command_id == command_id) {
+        /* A timed-out/disconnected relay response must not fall through to the
+         * ordinary cJSON parser merely because its browser request has gone. */
+        s_catalog.stale_command_id = 0;
+        free(response);
+        intercepted = true;
+    }
+    xSemaphoreGive(s_catalog.lock);
+    return intercepted;
+}
+
+static void connection_send_catalog(uint32_t request_id, ha_catalog_stage_t stage)
+{
+    if (s_main.client == NULL || !atomic_load(&s_main.authenticated)) {
+        catalog_fail(request_id, "ha_unavailable");
         return;
     }
 
-    uint32_t ids[SLATE_HA_CATALOG_STAGE_COUNT];
-    for (slate_ha_catalog_stage_t stage = 0;
-         stage < SLATE_HA_CATALOG_STAGE_COUNT; stage++) {
-        ids[stage] = next_command_id();
-        atomic_store(&s_main.catalog_ids[stage], ids[stage]);
+    uint32_t command_id = next_command_id();
+    if (!catalog_set_command(request_id, command_id)) {
+        return;
     }
 
-    for (slate_ha_catalog_stage_t stage = 0;
-         stage < SLATE_HA_CATALOG_STAGE_COUNT; stage++) {
-        cJSON *frame = cJSON_CreateObject();
-        bool ok = frame != NULL &&
-                  cJSON_AddNumberToObject(frame, "id", ids[stage]) != NULL &&
-                  cJSON_AddStringToObject(frame, "type", catalog_command(stage)) != NULL;
-        esp_err_t err = ok ? send_json_frame(frame) : ESP_ERR_NO_MEM;
-        cJSON_Delete(frame);
-        if (err == ESP_OK) {
-            continue;
-        }
-
-        atomic_store(&s_main.catalog_ids[stage], 0);
-        bool complete = false;
-        bool degraded = false;
-        esp_err_t accept_err = slate_ha_catalog_accept(
-            stage, false, NULL, &complete, &degraded);
-        ESP_LOGW(TAG, "could not request Home Assistant discovery stage %u: %s",
+    cJSON *frame = cJSON_CreateObject();
+    bool ok = frame != NULL &&
+              cJSON_AddNumberToObject(frame, "id", command_id) != NULL &&
+              cJSON_AddStringToObject(frame, "type", catalog_command(stage)) != NULL;
+    esp_err_t err = ok ? send_json_frame(frame) : ESP_ERR_NO_MEM;
+    cJSON_Delete(frame);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "could not relay Home Assistant catalog stage %u: %s",
                  (unsigned) stage, esp_err_to_name(err));
-        if (accept_err != ESP_OK) {
-            ESP_LOGW(TAG, "Home Assistant discovery refresh kept its previous catalog");
-        } else if (complete) {
-            ESP_LOGI(TAG, "Home Assistant discovery catalog refreshed%s",
-                     degraded ? " without registry areas" : "");
-        }
+        catalog_fail(request_id, "ha_unavailable");
     }
 }
 
@@ -977,6 +1149,15 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         return;
     }
 
+    uint32_t raw_id = 0;
+    if (raw_command_id(context->message.data, context->message.used, &raw_id) &&
+        catalog_accept(raw_id, context->message.data, context->message.used)) {
+        /* The relay consumed the buffer (normally by taking ownership; a late
+         * response may instead be freed). The next HA frame gets a fresh one. */
+        context->message = (payload_buffer_t) {0};
+        return;
+    }
+
     cJSON *root = cJSON_ParseWithLength(context->message.data, context->message.used);
     payload_reset(&context->message);
     if (!cJSON_IsObject(root)) {
@@ -1020,33 +1201,7 @@ static void main_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         const cJSON *success = cJSON_GetObjectItemCaseSensitive(root, "success");
         uint32_t id_value = 0;
         bool has_id = command_id(id_item, &id_value);
-        bool catalog_result = false;
-        if (has_id) {
-            for (slate_ha_catalog_stage_t stage = 0;
-                 stage < SLATE_HA_CATALOG_STAGE_COUNT; stage++) {
-                if (id_value != atomic_load(&connection->catalog_ids[stage])) {
-                    continue;
-                }
-                atomic_store(&connection->catalog_ids[stage], 0);
-                bool complete = false;
-                bool degraded = false;
-                const cJSON *result = cJSON_GetObjectItemCaseSensitive(root, "result");
-                esp_err_t err = slate_ha_catalog_accept(
-                    stage, cJSON_IsTrue(success), result, &complete, &degraded);
-                if (err != ESP_OK) {
-                    ESP_LOGW(TAG, "discarding Home Assistant discovery stage %u: %s",
-                             (unsigned) stage, esp_err_to_name(err));
-                } else if (complete) {
-                    ESP_LOGI(TAG, "Home Assistant discovery catalog refreshed%s",
-                             degraded ? " without registry areas" : "");
-                }
-                catalog_result = true;
-                break;
-            }
-        }
-        if (catalog_result) {
-            /* Discovery command results never enter action correlation. */
-        } else if (has_id && id_value == atomic_load(&connection->subscription_id)) {
+        if (has_id && id_value == atomic_load(&connection->subscription_id)) {
             if (!cJSON_IsTrue(success)) {
                 const cJSON *error = cJSON_GetObjectItemCaseSensitive(root, "error");
                 const cJSON *code = cJSON_GetObjectItemCaseSensitive(error, "code");
@@ -1102,7 +1257,7 @@ static void connection_destroy(void)
     atomic_store(&s_main.enabled, false);
     atomic_store(&s_main.authenticated, false);
     atomic_store(&s_main.subscription_id, 0);
-    connection_cancel_catalog();
+    catalog_fail(0, "ha_unavailable");
     if (s_main.client == NULL) {
         if (s_main.event_context != NULL) {
             payload_reset(&s_main.event_context->message);
@@ -1225,7 +1380,7 @@ static void manager_task(void *arg)
         case CMD_WIFI_DOWN:
             s_wifi_up = false;
             atomic_store(&s_main.authenticated, false);
-            connection_cancel_catalog();
+            catalog_fail(0, "ha_unavailable");
             clear_bus_actions("wifi_disconnected");
             if (slate_store_ha_token_is_set() &&
                 !atomic_load(&s_main.auth_rejected)) {
@@ -1236,7 +1391,6 @@ static void manager_task(void *arg)
         case CMD_RELOAD:
             clear_bus_actions("credentials_reloaded");
             connection_destroy();
-            slate_ha_catalog_clear();
             explicit_bzero(s_main.token, sizeof(s_main.token));
             s_auth_blocked = false;
             if (s_wifi_up) {
@@ -1255,7 +1409,6 @@ static void manager_task(void *arg)
                 break;
             }
             atomic_store(&s_main.authenticated, true);
-            connection_refresh_catalog();
             if (connection_resubscribe() != ESP_OK) {
                 ESP_LOGW(TAG, "could not establish Home Assistant entity subscription");
             }
@@ -1302,8 +1455,12 @@ static void manager_task(void *arg)
         case CMD_CLEAR_ACTIONS:
             if (received.generation == s_main.generation) {
                 slate_ha_action_clear();
-                connection_cancel_catalog();
+                catalog_fail(0, "ha_unavailable");
             }
+            break;
+        case CMD_CATALOG_REQUEST:
+            connection_send_catalog(received.data.catalog.request_id,
+                                    received.data.catalog.stage);
             break;
         }
     }
@@ -1545,6 +1702,152 @@ static esp_err_t disconnect_handler(httpd_req_t *req)
     return httpd_resp_send(req, NULL, 0);
 }
 
+static bool catalog_expired_locked(void)
+{
+    return s_catalog.status != CATALOG_IDLE && s_catalog.started_at_us > 0 &&
+           esp_timer_get_time() - s_catalog.started_at_us >= CATALOG_TIMEOUT_US;
+}
+
+static esp_err_t catalog_start_handler(httpd_req_t *req)
+{
+    char body[CATALOG_BODY_MAX] = {0};
+    const char *problem = read_body(req, body, sizeof(body));
+    if (problem != NULL) {
+        return slate_api_refuse(req,
+                                strcmp(problem, "too_large") == 0
+                                    ? "413 Payload Too Large"
+                                    : "400 Bad Request",
+                                problem);
+    }
+
+    cJSON *root = cJSON_Parse(body);
+    const cJSON *stage_item = cJSON_GetObjectItemCaseSensitive(root, "stage");
+    ha_catalog_stage_t stage = HA_CATALOG_ENTITIES;
+    bool valid = cJSON_IsObject(root) && cJSON_IsString(stage_item) &&
+                 catalog_stage(stage_item->valuestring, &stage);
+    cJSON_Delete(root);
+    if (!valid) {
+        return slate_api_refuse(req, "400 Bad Request", "catalog_stage_invalid");
+    }
+    if (!atomic_load(&s_main.authenticated)) {
+        return slate_api_refuse(req, "409 Conflict", "provider_unavailable");
+    }
+
+    uint32_t request_id = 0;
+    xSemaphoreTake(s_catalog.lock, portMAX_DELAY);
+    if (catalog_expired_locked()) {
+        catalog_reset_locked();
+    }
+    if (s_catalog.status == CATALOG_IDLE) {
+        if (++s_catalog.next_request_id == 0) {
+            s_catalog.next_request_id = 1;
+        }
+        request_id = s_catalog.next_request_id;
+        s_catalog.request_id = request_id;
+        s_catalog.started_at_us = esp_timer_get_time();
+        s_catalog.status = CATALOG_PENDING;
+    }
+    xSemaphoreGive(s_catalog.lock);
+    if (request_id == 0) {
+        return slate_api_refuse(req, "409 Conflict", "catalog_busy");
+    }
+
+    manager_command_t command = {
+        .kind = CMD_CATALOG_REQUEST,
+    };
+    command.data.catalog.request_id = request_id;
+    command.data.catalog.stage = stage;
+    if (xQueueSend(s_commands, &command, 0) != pdTRUE) {
+        xSemaphoreTake(s_catalog.lock, portMAX_DELAY);
+        if (s_catalog.request_id == request_id) {
+            catalog_reset_locked();
+        }
+        xSemaphoreGive(s_catalog.lock);
+        return slate_api_refuse(req, "503 Service Unavailable", "ha_busy");
+    }
+
+    root = cJSON_CreateObject();
+    bool ok = root != NULL &&
+              cJSON_AddNumberToObject(root, "request", request_id) != NULL;
+    if (!ok) {
+        cJSON_Delete(root);
+        catalog_fail(request_id, "out_of_memory");
+        return slate_api_send_json(req, NULL);
+    }
+    httpd_resp_set_status(req, "202 Accepted");
+    return slate_api_send_json(req, root);
+}
+
+static bool query_request_id(httpd_req_t *req, uint32_t *out)
+{
+    char query[CATALOG_QUERY_MAX] = {0};
+    char value[16] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "request", value, sizeof(value)) != ESP_OK) {
+        return false;
+    }
+    char *end = NULL;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (value[0] == '\0' || end == NULL || *end != '\0' || parsed == 0 ||
+        parsed > UINT32_MAX) {
+        return false;
+    }
+    *out = (uint32_t) parsed;
+    return true;
+}
+
+static esp_err_t catalog_result_handler(httpd_req_t *req)
+{
+    uint32_t request_id = 0;
+    if (!query_request_id(req, &request_id)) {
+        return slate_api_refuse(req, "400 Bad Request", "catalog_request_required");
+    }
+
+    char *response = NULL;
+    size_t response_len = 0;
+    char error[sizeof(s_catalog.error)] = {0};
+    catalog_status_t status = CATALOG_IDLE;
+
+    xSemaphoreTake(s_catalog.lock, portMAX_DELAY);
+    if (s_catalog.request_id == request_id) {
+        if (catalog_expired_locked() && s_catalog.status == CATALOG_PENDING) {
+            s_catalog.status = CATALOG_FAILED;
+            s_catalog.stale_command_id = s_catalog.command_id;
+            s_catalog.command_id = 0;
+            strlcpy(s_catalog.error, "catalog_timeout", sizeof(s_catalog.error));
+        }
+        status = s_catalog.status;
+        if (status == CATALOG_READY) {
+            response = s_catalog.response;
+            response_len = s_catalog.response_len;
+            s_catalog.response = NULL;
+            catalog_reset_locked();
+        } else if (status == CATALOG_FAILED) {
+            strlcpy(error, s_catalog.error, sizeof(error));
+            catalog_reset_locked();
+        }
+    }
+    xSemaphoreGive(s_catalog.lock);
+
+    if (status == CATALOG_IDLE) {
+        return slate_api_refuse(req, "404 Not Found", "catalog_request_not_found");
+    }
+    if (status == CATALOG_PENDING) {
+        httpd_resp_set_status(req, "202 Accepted");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"status\":\"pending\"}");
+    }
+    if (status == CATALOG_FAILED) {
+        return slate_api_refuse(req, "502 Bad Gateway",
+                                error[0] != '\0' ? error : "ha_unavailable");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_send(req, response, response_len);
+    free(response);
+    return err;
+}
+
 /* --- Public lifecycle -------------------------------------------------- */
 
 esp_err_t slate_ha_init(void)
@@ -1557,9 +1860,9 @@ esp_err_t slate_ha_init(void)
     if (entities_err != ESP_OK) {
         return entities_err;
     }
-    esp_err_t catalog_err = slate_ha_catalog_init();
-    if (catalog_err != ESP_OK) {
-        return catalog_err;
+    s_catalog.lock = xSemaphoreCreateMutex();
+    if (s_catalog.lock == NULL) {
+        return ESP_ERR_NO_MEM;
     }
     esp_err_t actions_err = slate_ha_action_tracker_init();
     if (actions_err != ESP_OK) {
@@ -1636,6 +1939,16 @@ esp_err_t slate_ha_init(void)
         .method = HTTP_GET,
         .handler = discovery_handler,
     };
+    const httpd_uri_t catalog_start = {
+        .uri = SLATE_API_BASE_PATH "/ha/catalog",
+        .method = HTTP_POST,
+        .handler = catalog_start_handler,
+    };
+    const httpd_uri_t catalog_result = {
+        .uri = SLATE_API_BASE_PATH "/ha/catalog",
+        .method = HTTP_GET,
+        .handler = catalog_result_handler,
+    };
     esp_err_t route_err = slate_api_register_uri(&configure, SLATE_API_AUTH_DEVICE_TOKEN);
     if (route_err == ESP_OK) {
         route_err = slate_api_register_uri(&configuration, SLATE_API_AUTH_DEVICE_TOKEN);
@@ -1647,8 +1960,12 @@ esp_err_t slate_ha_init(void)
         route_err = slate_api_register_uri(&discover, SLATE_API_AUTH_DEVICE_TOKEN);
     }
     if (route_err == ESP_OK) {
-        route_err = slate_api_resources_register(SLATE_HA_PROVIDER_ID,
-                                                 slate_ha_catalog_append, NULL);
+        route_err = slate_api_register_uri(&catalog_start,
+                                           SLATE_API_AUTH_DEVICE_TOKEN);
+    }
+    if (route_err == ESP_OK) {
+        route_err = slate_api_register_uri(&catalog_result,
+                                           SLATE_API_AUTH_DEVICE_TOKEN);
     }
 
     s_initialized = true;
@@ -1762,6 +2079,24 @@ esp_err_t slate_ha_selftest(void)
     cJSON_Delete(maximum_id);
     cJSON_Delete(fractional_id);
 
+    const char raw_result[] =
+        "{\"result\":{\"id\":7},\"type\":\"result\",\"id\":42,"
+        "\"label\":\"escaped \\\"id\\\" and }\"}";
+    CHECK(raw_command_id(raw_result, strlen(raw_result), &parsed_id) &&
+              parsed_id == 42 &&
+              !raw_command_id("{\"id\":0}", sizeof("{\"id\":0}") - 1, &parsed_id) &&
+              !raw_command_id("{\"id\":1.5}", sizeof("{\"id\":1.5}") - 1,
+                              &parsed_id),
+          "raw catalog response id without parsing result tree");
+
+    ha_catalog_stage_t stage = HA_CATALOG_STAGE_COUNT;
+    CHECK(catalog_stage("entities", &stage) && stage == HA_CATALOG_ENTITIES &&
+              catalog_stage("devices", &stage) && stage == HA_CATALOG_DEVICES &&
+              catalog_stage("areas", &stage) && stage == HA_CATALOG_AREAS &&
+              catalog_stage("states", &stage) && stage == HA_CATALOG_STATES &&
+              !catalog_stage("call_service", &stage),
+          "catalog relay exposes only fixed read commands");
+
     CHECK(subscription_is_current(0, 0, SLATE_PROVIDER_ONLINE) &&
               subscription_is_current(2, 7, SLATE_PROVIDER_ONLINE) &&
               !subscription_is_current(0, 7, SLATE_PROVIDER_ONLINE) &&
@@ -1780,8 +2115,6 @@ esp_err_t slate_ha_selftest(void)
 
     CHECK(slate_ha_entities_selftest() == ESP_OK,
           "compressed entity diff and normalized mapping fixtures");
-    CHECK(slate_ha_catalog_selftest() == ESP_OK,
-          "area-aware discovery catalog and flat fallback fixtures");
     CHECK(slate_ha_actions_selftest() == ESP_OK,
           "service-call mapping and result correlation fixtures");
 

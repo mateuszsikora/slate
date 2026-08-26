@@ -20,6 +20,13 @@ A long-lived token carries the full authority of its account. Slate stores it
 only in device NVS, never returns it from the API, and tests authentication
 before replacing working credentials.
 
+While the editor's resource picker is open, Slate relays the HA registries and
+current states to the browser one response at a time; the browser assembles the
+full catalog once and shares its in-memory cache between tile pickers. A stale
+cache refreshes in the background instead of blocking the next tile. After
+publishing, the panel keeps only the selected entity ids and subscribes to
+compact updates for exactly those entities.
+
 Open **Integrations** in the panel's embedded editor to discover an instance or
 enter its URL manually, test the token, reconnect, or remove the integration.
 

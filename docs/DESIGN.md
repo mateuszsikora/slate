@@ -214,6 +214,8 @@ Base: `http://<ip>/api/v1`. `/info` and `/session` are the public browser bootst
 | POST   | `/ha`              | configure the HA provider; connection is tested before saving |
 | DELETE | `/ha`              | disconnect HA and erase its URL and token |
 | GET    | `/ha/discover`     | discover local HA instances over mDNS; manual URL entry remains available |
+| POST   | `/ha/catalog`      | start one editor-only HA catalog relay stage (`entities`, `devices`, `areas` or `states`); returns a request id |
+| GET    | `/ha/catalog?request=<id>` | poll and consume the raw HA result for one catalog relay stage |
 | GET    | `/integration-keys` | list non-secret External API key metadata |
 | POST   | `/integration-keys` | create a named External API key; the plaintext is returned once |
 | DELETE | `/integration-keys?id=<id>` | revoke one External API key and close active integration WebSockets |
@@ -525,7 +527,7 @@ Unknown state fields and capabilities are ignored. An unavailable resource keeps
 ]}
 ```
 
-`GET /resources?provider=<id>` returns this normalized vocabulary for the picker as `{"resources":[...]}`. The HA provider can list its full discovered catalog; `direct` lists only resources already referenced and published since boot. A provider-specific detail may be added under an `extensions` object namespaced by provider, but components and the generic picker cannot depend on it. Missing, unknown and unconfigured provider queries return `400 provider_required`, `404 provider_not_found` and `409 provider_unconfigured` respectively.
+`GET /resources?provider=<id>` returns this normalized vocabulary for the picker as `{"resources":[...]}`. `direct` lists only resources already referenced and published since boot. Home Assistant discovery uses the editor-only relay in §5.7 because assembling its full catalog on the ESP32 would consume memory in proportion to the whole HA instance. A provider-specific detail may be added under an `extensions` object namespaced by provider, but components and the generic picker cannot depend on it. Missing, unknown and unconfigured provider queries return `400 provider_required`, `404 provider_not_found` and `409 provider_unconfigured` respectively.
 
 ### 5.3 Actions and optimistic state
 
@@ -603,15 +605,17 @@ Reconnect with exponential backoff: 1 s → 2 → 4 → 8 → 15 → 30 s (ceili
 
 Use `subscribe_entities` with the explicit HA entity ids in the HA provider's subscription set — never the full instance state. It returns compressed diffs, which keeps bandwidth and parsing cost negligible at typical dashboard sizes. The adapter expands those diffs, maps HA domains, states and attributes into §5.2, and only then updates the common store.
 
-Re-subscription follows any successful `PUT /config` that changes the HA binding set and every reconnect. The existing UI tree does not care why a fresh snapshot arrived.
+Re-subscription follows any successful `PUT /config` that changes the HA binding set and every reconnect. With no HA bindings, firmware deliberately sends no subscription: Home Assistant treats a missing or empty `entity_ids` filter as the full instance. The existing UI tree does not care why a fresh snapshot arrived.
 
 ### 5.7 Home Assistant resource picker
 
-`GET /resources?provider=ha` requires `config/entity_registry/list_for_display`, `config/area_registry/list`, `config/device_registry/list` and `get_states`. None needs an administrator — S-4 measured the underlying registry reads from a `system-users` and a `system-read-only` token and got payloads byte-identical to the administrator's. Only mutating registry commands are gated. `list_for_display` is used instead of the full entity registry: on the measured instance it was 83 KB rather than 635 KB and had already removed disabled entities that cannot back a tile.
+Opening the HA picker makes the browser request four relay stages in sequence: `config/entity_registry/list_for_display`, `config/device_registry/list`, `config/area_registry/list` and `get_states`. None needs an administrator — S-4 measured the underlying registry reads from a `system-users` and a `system-read-only` token and got payloads byte-identical to the administrator's. Only mutating registry commands are gated. `list_for_display` is used instead of the full entity registry: on the measured instance it was 83 KB rather than 635 KB and had already removed disabled entities that cannot back a tile.
 
-The normalized `name` comes from the already-composed `friendly_name` in live state, not from the sparse registry name fields. HA domain and state attributes map to `kind`, state and capabilities inside the adapter. This discovery fetch is deliberately broader than the runtime subscription in §5.6: it happens for the picker, not continuously.
+For each stage, `POST /ha/catalog` queues one command on the existing authenticated HA WebSocket and returns `202 {"request":N}`. The browser polls `GET /ha/catalog?request=N`: pending work remains `202`, success returns the original HA result frame, and reading the result consumes it. Only one stage may be in flight, and an unconsumed stage expires after 30 seconds. The relay is deliberately narrow: callers select one of four fixed commands and cannot use it as a generic authenticated HA proxy.
 
-The picker degrades on **failure, not on privilege**: firmware issues the registry commands and falls back if they fail, for whatever reason — an older or unusual instance, a transport error, a future Home Assistant that tightens this. It does not predict a permission in advance. `get_states` still yields a flat normalized list with no `area`, so registry failure changes grouping rather than the public API shape.
+Firmware reassembles each WebSocket message into a PSRAM buffer but treats a catalog result as opaque JSON: it reads only the top-level command id, hands the raw response to HTTP, and neither builds a cJSON tree nor retains a normalized catalog. The browser owns the four decoded payloads, joins them and creates the provider-neutral picker entries. The normalized `name` comes from the already-composed `friendly_name` in live state, not from the sparse registry name fields. This discovery fetch is deliberately broader than the runtime subscription in §5.6: it happens on demand while configuring, not at connection time or continuously.
+
+The picker degrades on **failure, not on privilege**: the browser falls back when a registry stage fails, for whatever reason — an older or unusual instance, a transport error, a future Home Assistant that tightens this. It does not predict a permission in advance. `get_states` is required and still yields a flat normalized list with no `area`, so registry failure changes grouping rather than the picker vocabulary.
 
 This path must be implemented, not assumed away — and it is needed more often than that reads. On the instance S-4 measured, 63 % of registry entries resolve to no area at all, so the flat ungrouped list is what the picker shows for the majority of a real installation regardless of permissions. It is a first-class presentation, not an error state, and the editor (§10) must make it look deliberate.
 
@@ -625,7 +629,7 @@ entity_registry.area_id
 
 Zero of 1 045 entities on the measured instance carried `area_id` directly; all 387 area assignments came from the device. Omitting the device registry therefore produces a null normalized `area` for every entity and looks like a generic-picker bug.
 
-Registries are fetched once per connection and cached in PSRAM, not NVS. The registry, device and state payloads together are hundreds of kilobytes on the wire and several times that once parsed, which does not fit internal RAM.
+Catalog data is never written to NVS and is not cached by firmware. During configuration, the browser holds one assembled catalog for the editor session while the panel holds at most one raw HA result in PSRAM. Every tile picker reuses that browser cache immediately; after five minutes it may start one deduplicated refresh in the background, without making the picker wait. Reconfiguring or disconnecting HA invalidates the cache. After the editor closes, the browser catalog disappears and the firmware stores only the dashboard's selected ids; §5.6 then requests small state diffs for exactly those ids. The registry, device and state payloads together are hundreds of kilobytes on the wire and several times that once parsed, which is precisely why the join belongs in the browser.
 
 ### 5.8 Home Assistant action mapping
 
@@ -653,7 +657,7 @@ All LVGL access happens on one task; API handlers and every provider post normal
 - Bounce buffer in internal SRAM — required, otherwise WiFi activity causes visible artifacts. The artifact is worth naming, because no counter on the CPU side shows it: the picture rolls vertically, with the bottom of the screen appearing at the top. That is the DMA losing its race to read the framebuffer out of PSRAM while the radio and the renderer compete for the same bus. S-2 measured frames as 4 % *cheaper* without the bounce buffer, and the display unusable.
 - LVGL draw buffer: ~1/10 screen, internal SRAM — but only in a single-framebuffer configuration, which is not the one above. LVGL wants two such buffers so rendering and flushing overlap, and 2 × 76 800 B does not fit: S-2 measured 104 167 B of internal DMA-capable memory free once WiFi is up. Size any internal draw buffer from what is actually free after `esp_wifi_start()`, not from the screen.
 - LVGL heap: 2 MB in PSRAM — the entire widget tree budget.
-- State store: sized from the configuration, ~256 B per bound resource plus kind-specific state. Even a config saturating the 64 KB limit stays in the tens of KB. Discovery catalogs used by the editor live separately in PSRAM and may be much larger.
+- State store: sized from the configuration, ~256 B per bound resource plus kind-specific state. Even a config saturating the 64 KB limit stays in the tens of KB. During HA discovery, one opaque WebSocket result may temporarily occupy PSRAM; the browser, not the panel, owns the assembled catalog.
 - Configuration: ≤64 KB, parsed into structs then freed.
 - The setup access point (§9) costs internal SRAM where there is least of it. S-2 measured 104 167 B of internal DMA-capable memory free with the station alone; `WIFI_MODE_APSTA` adds a second interface's buffers on top. It is raised on demand and torn down as soon as the station associates, never left running as a permanent second interface. `APSTA` is the intended mode and §9.4 depends on it: the station must keep trying while the access point is up, which is what lets an unattended panel recover on its own. If it does not fit, that is a budget problem to solve — not a behaviour to drop; §9.4 names the degraded shape it may not fall below.
 

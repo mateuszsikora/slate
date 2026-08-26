@@ -18,6 +18,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "cJSON.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
@@ -47,6 +48,34 @@
 #include "slate_ws.h"
 
 static const char *TAG = "slate";
+
+/*
+ * cJSON represents a large Home Assistant catalog as thousands of small
+ * allocations. ESP-IDF's default 16 KiB external-memory threshold puts every
+ * one of those nodes in scarce internal RAM even though the assembled payload
+ * itself lives in PSRAM. A real installation can therefore exhaust internal
+ * memory while several megabytes of PSRAM remain free; the Wi-Fi PHY is then
+ * the first subsystem to abort when it cannot allocate its tracking timer.
+ *
+ * Hooks are process-global, so install them once, before any component can use
+ * cJSON or start another task. free() accepts pointers from either ESP heap,
+ * which also makes the internal fallback safe if PSRAM is ever full.
+ */
+static void *json_malloc(size_t size)
+{
+    return heap_caps_malloc_prefer(size, 2,
+                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+static void configure_json_allocator(void)
+{
+    cJSON_Hooks hooks = {
+        .malloc_fn = json_malloc,
+        .free_fn = free,
+    };
+    cJSON_InitHooks(&hooks);
+}
 
 #ifdef SLATE_OTA_ROLLBACK_SELFTEST
 /*
@@ -623,6 +652,8 @@ static void start_ui(void)
 
 void app_main(void)
 {
+    configure_json_allocator();
+
     /* §11.3's retained backlog starts before the boot report and board
      * bring-up, while its network transport still starts later with the API.
      * The capture half uses static storage, so it is safe before the store has

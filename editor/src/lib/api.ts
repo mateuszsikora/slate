@@ -6,6 +6,8 @@
  * hide a fetch behind, so this file is the whole client.
  */
 
+import { assembleHaResources, type HaCatalogPayloads } from './ha'
+
 export const API_BASE = '/api/v1'
 
 export interface Ipv4Static {
@@ -62,6 +64,23 @@ export interface IntegrationKey {
 
 export interface CreatedIntegrationKey extends IntegrationKey {
   token: string
+}
+
+type HaCatalogStage = keyof HaCatalogPayloads
+
+interface HaCatalogStarted {
+  request: number
+}
+
+interface HaCatalogPending {
+  status: 'pending'
+}
+
+interface HaCatalogResult {
+  type: 'result'
+  success: boolean
+  result?: unknown
+  error?: unknown
 }
 
 export interface Binding {
@@ -169,6 +188,20 @@ const FACTORY_RESET_TIMEOUT_MS = 30000
 /* Credential testing includes a WebSocket connection to Home Assistant. */
 const HA_CONFIGURATION_TIMEOUT_MS = 20000
 
+/* Registry data changes rarely, while one real catalog is hundreds of KB. A
+ * picker gets the session cache immediately and at most starts one refresh in
+ * the background after this age; switching tiles never waits on duplicate HA
+ * requests. Reloading the editor naturally drops this in-memory cache. */
+const HA_CATALOG_REFRESH_MS = 5 * 60 * 1000
+
+interface HaCatalogCacheEntry {
+  resources?: Resource[]
+  fetchedAt: number
+  refresh?: Promise<Resource[]>
+}
+
+const haCatalogCache = new Map<string, HaCatalogCacheEntry>()
+
 export class DeviceClient {
   private readonly origin: string
   private readonly token: string | null
@@ -246,6 +279,7 @@ export class DeviceClient {
   }
 
   resources(provider: string): Promise<Resource[]> {
+    if (provider === 'ha') return this.homeAssistantResources()
     return this.request<{ resources: Resource[] }>(
       'GET',
       `/resources?provider=${encodeURIComponent(provider)}`,
@@ -266,11 +300,93 @@ export class DeviceClient {
     return this.request<void>('POST', '/ha', {
       body: JSON.stringify({ url, token }),
       timeoutMs: HA_CONFIGURATION_TIMEOUT_MS,
-    })
+    }).then(() => this.invalidateHomeAssistantCatalog())
   }
 
   disconnectHomeAssistant(): Promise<void> {
-    return this.request<void>('DELETE', '/ha')
+    return this.request<void>('DELETE', '/ha').then(() => this.invalidateHomeAssistantCatalog())
+  }
+
+  private homeAssistantResources(): Promise<Resource[]> {
+    const key = `${this.origin}\n${this.token ?? ''}`
+    let cached = haCatalogCache.get(key)
+    if (cached === undefined) {
+      cached = { fetchedAt: 0 }
+      haCatalogCache.set(key, cached)
+    }
+
+    if (cached.resources !== undefined) {
+      if (Date.now() - cached.fetchedAt >= HA_CATALOG_REFRESH_MS && cached.refresh === undefined) {
+        void this.refreshHomeAssistantResources(key, cached).catch(() => undefined)
+      }
+      return Promise.resolve(cached.resources)
+    }
+    return cached.refresh ?? this.refreshHomeAssistantResources(key, cached)
+  }
+
+  private async refreshHomeAssistantResources(
+    key: string,
+    cached: HaCatalogCacheEntry,
+  ): Promise<Resource[]> {
+    const refresh = this.fetchHomeAssistantResources()
+      .then((resources) => {
+        if (haCatalogCache.get(key) === cached) {
+          cached.resources = resources
+          cached.fetchedAt = Date.now()
+          cached.refresh = undefined
+        }
+        return resources
+      })
+      .catch((error: unknown) => {
+        if (haCatalogCache.get(key) === cached) cached.refresh = undefined
+        throw error
+      })
+    cached.refresh = refresh
+    return refresh
+  }
+
+  private async fetchHomeAssistantResources(): Promise<Resource[]> {
+    const stages: HaCatalogStage[] = ['entities', 'devices', 'areas', 'states']
+    const payloads: Partial<HaCatalogPayloads> = {}
+    for (const stage of stages) {
+      try {
+        payloads[stage] = await this.homeAssistantCatalogStage(stage)
+      } catch (error) {
+        if (stage === 'states') throw error
+        payloads[stage] = stage === 'entities' ? { entities: [] } : []
+      }
+    }
+    return assembleHaResources(payloads as HaCatalogPayloads)
+  }
+
+  private invalidateHomeAssistantCatalog(): void {
+    haCatalogCache.delete(`${this.origin}\n${this.token ?? ''}`)
+  }
+
+  private async homeAssistantCatalogStage(stage: HaCatalogStage): Promise<unknown> {
+    const started = await this.request<HaCatalogStarted>('POST', '/ha/catalog', {
+      body: JSON.stringify({ stage }),
+    })
+    for (let attempt = 0; attempt < 150; attempt++) {
+      const response = await this.request<HaCatalogPending | HaCatalogResult>(
+        'GET',
+        `/ha/catalog?request=${encodeURIComponent(started.request)}`,
+      )
+      if ('status' in response && response.status === 'pending') {
+        await delay(200)
+        continue
+      }
+      if ('type' in response && response.type === 'result' && response.success) {
+        return response.result
+      }
+      throw new ApiError(
+        502,
+        'ha_catalog_failed',
+        undefined,
+        'error' in response ? response.error : response,
+      )
+    }
+    throw new ApiError(504, 'catalog_timeout')
   }
 
   integrationKeys(): Promise<IntegrationKey[]> {
@@ -335,6 +451,10 @@ export class DeviceClient {
     }
     return (await response.json()) as T
   }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
 }
 
 async function errorBody(response: Response): Promise<unknown> {

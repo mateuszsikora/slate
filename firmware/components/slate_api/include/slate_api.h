@@ -23,7 +23,7 @@ extern "C" {
 
 #define SLATE_API_BASE_PATH        "/api/v1"
 #define SLATE_SETUP_AP_ADDRESS     "192.168.4.1"
-#define SLATE_API_MAX_URI_HANDLERS 28
+#define SLATE_API_MAX_URI_HANDLERS 30
 
 /* §4.1's `model`, and the same string §10's editor and mDNS advertise. One
  * board model per binary (ADR-1), so it is a constant rather than a lookup. */
