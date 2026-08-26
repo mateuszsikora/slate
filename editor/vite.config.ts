@@ -20,7 +20,7 @@ import { viteSingleFile } from 'vite-plugin-singlefile'
  * configuration whose `types` the application shares. */
 declare const process: { env: Record<string, string | undefined> }
 
-/* A panel answers to `slate-<mac>.local` (§4.3) and this file cannot know the
+/* A panel answers to `slate-<mac6>.local` (§4.3) and this file cannot know the
  * MAC, so the fallback below is a placeholder: `npm run dev` normally wants an
  * address or the panel's real name in SLATE_DEVICE. */
 const device = process.env['SLATE_DEVICE'] ?? 'slate.local'

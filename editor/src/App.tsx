@@ -290,7 +290,7 @@ export function App() {
 
   /*
    * The address in the bookmark stopped answering. The panel advertises
-   * `slate-<mac>.local` for exactly this, so the editor asks that name whether
+   * `slate-<mac6>.local` for exactly this, so the editor asks that name whether
    * the same panel is there and moves the page — carrying the token, because
    * the name is a different origin with a different localStorage.
    */
@@ -314,7 +314,7 @@ export function App() {
       void deviceAnswersAt(origin, name).then((answered) => {
         if (answered && !cancelled) {
           setMovingTo(origin)
-          const target = token === null ? origin : `${origin}/?t=${encodeURIComponent(token)}`
+          const target = token === null ? origin : `${origin}/#t=${encodeURIComponent(token)}`
           window.location.assign(target)
         }
       })

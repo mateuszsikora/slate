@@ -3,7 +3,7 @@
  *
  * The token outlives a DHCP lease, so the address in a bookmark does not have
  * to be the address the panel has today. The device advertises itself as
- * `slate-<mac>.local`, and that name is what this editor falls back to when
+ * `slate-<mac6>.local`, and that name is what this editor falls back to when
  * the origin it was served from stops answering.
  */
 

@@ -80,9 +80,10 @@ typedef struct {
 /*
  * The device token alphabet, and the reason it is exactly 64 characters long.
  *
- * §4.3 delivers the token in a URL — `http://192.168.1.42/?t=Xk7p...` — so
- * every character has to survive a query string untouched. That rules out the
- * standard base64 alphabet's `+` and `/`, which leaves the URL-safe variant:
+ * §4.3 delivers the token in a URL fragment —
+ * `http://192.168.1.42/#t=Xk7p...` — so every character should survive URL
+ * handling without percent encoding. That rules out the standard base64
+ * alphabet's `+` and `/`, which leaves the URL-safe variant:
  * 26 + 26 + 10 + 2 = 64.
  *
  * 64 is also what makes the draw unbiased. Six bits index the table exactly, so
