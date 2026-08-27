@@ -1,0 +1,292 @@
+# Slate releases — design.md §14 M8, "someone without ESP-IDF gets a running panel".
+#
+# A tag is the whole trigger. Pushing `v1.2.3` builds the release image from that tag,
+# publishes it as a GitHub Release with checksums, and deploys the browser flasher of
+# flasher/index.html to GitHub Pages pointing at those images. Nothing here is manual,
+# because the alternative is a page and a release that disagree about what is installed.
+#
+# What this deliberately does not do:
+#
+# It does not sign anything and the device does not check for it. §11.4's release OTA is
+# #37 and a separate mechanism; until it lands, "receives updates" is a person visiting
+# this page again or running tools/ota/upload.sh. The README says so rather than letting
+# a download page imply a channel that does not exist.
+#
+# It does not publish a second, merged factory image. The four images below are the ones
+# ESP-IDF produced together with the offsets it recorded for them, and a merged blob is a
+# fifth artifact carrying a fifth copy of those offsets — one more thing that can be
+# regenerated wrong. `idf.py flash` and the flasher both work from the same four.
+#
+# It does not build the development variant. What ships is the -Os image; the -Og one is
+# a development tool that travels over the wire between a desk and a wall (§11.1), and
+# publishing both would only invite the question of which one to install.
+#
+# Pages carries the flasher for the most recent release only, and its images with it.
+# Older versions stay on the Releases page, which is where somebody deliberately
+# installing an old image already is. The consequence worth knowing: a fix to the page
+# itself reaches the world with the next tag, not on its own.
+#
+# One-time repository setting: Settings → Pages → Source must be "GitHub Actions".
+# Nothing in this file can set it, and until it is set the deploy step fails with a
+# permissions error that does not name the cause.
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# Releasing twice at once would race on both the release and the Pages deployment, and
+# neither is cancellable half-way in a useful state. Serialise instead.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # The version is derived once, here, and every other job takes it from this output.
+  # `v1.2.3` is the tag and `1.2.3` is the version — §4.1's firmware_version and §11.4's
+  # manifest both carry the second form, and a release whose page, image and API answered
+  # with two different spellings would be a bug report nobody can reproduce.
+  version:
+    name: version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+    steps:
+      - id: derive
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          # ESP-IDF truncates PROJECT_VER at 32 characters into the application
+          # descriptor, and `esp_app_desc` is what the panel reports and what
+          # tools/ota/upload.sh compares against. A tag that would be cut short there
+          # is refused now rather than producing a panel that reports half a version.
+          if [ ${#version} -gt 31 ]; then
+            echo "::error::tag $TAG leaves a version of ${#version} characters; ESP-IDF stores 31"
+            exit 1
+          fi
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::tag $TAG is not vMAJOR.MINOR.PATCH[-suffix]"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  # The two generated build inputs, in one job because unlike CI this workflow reports no
+  # sizes and has nothing to gain from telling the two apart. Their reasons for being
+  # generated rather than committed are in .gitignore and in tools/*/; the firmware build
+  # below cannot start without either.
+  assets:
+    name: assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: editor/package-lock.json
+
+      - name: Generate fonts
+        run: tools/fonts/generate.sh
+
+      - name: Build the editor bundle
+        run: tools/editor/build.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: assets
+          path: |
+            firmware/components/slate_theme/assets/*
+            editor/dist/*
+          retention-days: 7
+
+  firmware:
+    name: firmware
+    runs-on: ubuntu-latest
+    needs: [version, assets]
+    # The same pin CI builds against and firmware/dependencies.lock resolves against, so
+    # a released image is the image CI measured on the commit it was tagged from.
+    container: espressif/idf:v5.5.5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: assets
+          path: .
+
+      - uses: actions/cache@v6
+        with:
+          path: firmware/managed_components
+          key: components-${{ hashFiles('firmware/dependencies.lock') }}
+
+      # -DPROJECT_VER rather than the environment variable of the same name: ESP-IDF reads
+      # it as a CMake variable, and setting it in the environment silently changes nothing,
+      # leaving `git describe` to stamp a released image with a commit hash.
+      #
+      # The release overlay is .github/sdkconfig.ci-release, which is what CI's release leg
+      # builds. Its own header says it describes what CI builds rather than what Slate
+      # ships, and this job is the change that makes those the same thing.
+      - name: Build
+        working-directory: firmware
+        run: |
+          . "$IDF_PATH/export.sh" >/dev/null
+          idf.py -B build-release \
+                 -DSDKCONFIG=build-release/sdkconfig \
+                 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;../.github/sdkconfig.ci-release" \
+                 -DPROJECT_VER="${{ needs.version.outputs.version }}" \
+                 build
+
+      # The version that will be on the panel, read back out of the image that was just
+      # linked rather than out of the variable that was passed in. `esp_app_desc_t` sits at
+      # a fixed offset behind the image header, and its version field is what
+      # `GET /api/v1/info` answers with and what tools/ota/upload.sh compares against.
+      - name: Check the image reports the tagged version
+        working-directory: firmware
+        run: |
+          stamped=$(python3 -c "print(open('build-release/slate.bin','rb').read()[0x30:0x50].split(b'\0')[0].decode())")
+          want='${{ needs.version.outputs.version }}'
+          if [ "$stamped" != "$want" ]; then
+            echo "::error::image reports '$stamped', tag says '$want'"
+            exit 1
+          fi
+          echo "image reports $stamped"
+
+      - name: Check the configuration is the release one
+        working-directory: firmware
+        run: |
+          grep -qx CONFIG_COMPILER_OPTIMIZATION_SIZE=y build-release/sdkconfig || {
+            echo '::error::build-release/sdkconfig is not the size-optimised configuration'
+            exit 1
+          }
+
+      # flash_project_args travels with the images because it is where their offsets are:
+      # tools/flasher/manifest.py reads it rather than repeating firmware/partitions.csv,
+      # and the publish job below has no ESP-IDF to regenerate it with.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image
+          path: |
+            firmware/build-release/flash_project_args
+            firmware/build-release/slate.bin
+            firmware/build-release/slate.elf
+            firmware/build-release/slate.map
+            firmware/build-release/sdkconfig
+            firmware/build-release/ota_data_initial.bin
+            firmware/build-release/bootloader/bootloader.bin
+            firmware/build-release/partition_table/partition-table.bin
+          retention-days: 7
+
+  publish:
+    name: publish
+    runs-on: ubuntu-latest
+    needs: [version, firmware]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: image
+          path: firmware/build-release
+
+      # Names carry the version. `slate.bin` is what the build produces and what
+      # tools/ota/upload.sh defaults to, but a download that lands in a directory beside
+      # last month's `slate.bin` should not be indistinguishable from it.
+      - name: Stage the release assets
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          mkdir -p release
+          cp firmware/build-release/slate.bin              "release/slate-$VERSION.bin"
+          cp firmware/build-release/slate.elf              "release/slate-$VERSION.elf"
+          cp firmware/build-release/slate.map              "release/slate-$VERSION.map"
+          cp firmware/build-release/bootloader/bootloader.bin "release/bootloader-$VERSION.bin"
+          cp firmware/build-release/partition_table/partition-table.bin \
+                                                           "release/partition-table-$VERSION.bin"
+          cp firmware/build-release/ota_data_initial.bin   "release/ota-data-initial-$VERSION.bin"
+          cp firmware/build-release/sdkconfig              "release/sdkconfig-$VERSION.txt"
+          # Computed outside the directory and moved in, so the file cannot end up
+          # listing itself half-written, and every name in it is the name it is
+          # downloaded under.
+          (cd release && sha256sum *) > SHA256SUMS
+          mv SHA256SUMS release/
+          cat release/SHA256SUMS
+
+      # The prose lives in .github/release-notes.md.in, where it can be read and edited as
+      # prose. NOTES.md is written outside release/ deliberately: everything in that
+      # directory is uploaded as an asset and covered by the checksums above, and the
+      # notes are neither.
+      - name: Write the release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          PAGE="https://${OWNER}.github.io/${REPO#*/}/" python3 - <<'PY' > NOTES.md
+          import os, pathlib
+          template = pathlib.Path('.github/release-notes.md.in').read_text()
+          print(template
+                .replace('{{VERSION}}', os.environ['VERSION'])
+                .replace('{{REPO}}', os.environ['REPO'])
+                .replace('{{PAGE}}', os.environ['PAGE'])
+                .replace('{{CHECKSUMS}}', pathlib.Path('release/SHA256SUMS').read_text().strip()),
+                end='')
+          PY
+          cat NOTES.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "Slate $VERSION" \
+            --notes-file NOTES.md \
+            --verify-tag \
+            release/*
+
+  pages:
+    name: pages
+    runs-on: ubuntu-latest
+    needs: [version, firmware]
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: flasher/package-lock.json
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: image
+          path: firmware/build-release
+
+      # The offsets in the manifest come out of flash_project_args and are checked back
+      # against firmware/partitions.csv inside this script; see tools/flasher/manifest.py.
+      - name: Build the flashing page
+        run: tools/flasher/build.sh "${{ needs.version.outputs.version }}" firmware/build-release
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: flasher/dist
+
+      - id: deploy
+        uses: actions/deploy-pages@v5

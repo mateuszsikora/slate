@@ -295,6 +295,10 @@ jobs:
       # pull request's build being flashable to the panel from any machine with no
       # ESP-IDF on it. The .elf and .map are what a core dump (§11.3) and a size
       # regression are read against, and both are useless once the runner is gone.
+      #
+      # The bootloader, the partition table and flash_project_args are here for the
+      # flasher job below, which needs the whole set an initial flash writes and the
+      # offsets ESP-IDF recorded for them. They are small next to the .map.
       - uses: actions/upload-artifact@v7
         with:
           name: slate-${{ matrix.variant }}
@@ -302,6 +306,61 @@ jobs:
             firmware/build-${{ matrix.variant }}/slate.bin
             firmware/build-${{ matrix.variant }}/slate.elf
             firmware/build-${{ matrix.variant }}/slate.map
+            firmware/build-${{ matrix.variant }}/sdkconfig
+            firmware/build-${{ matrix.variant }}/flash_project_args
+            firmware/build-${{ matrix.variant }}/ota_data_initial.bin
+            firmware/build-${{ matrix.variant }}/bootloader/bootloader.bin
+            firmware/build-${{ matrix.variant }}/partition_table/partition-table.bin
+          retention-days: 14
+
+  # The browser flasher of §9.1, assembled here for the same reason the firmware is
+  # built here: .github/workflows/release.yml runs these commands on a tag, when nobody
+  # is watching and there is no pull request to fail. A page that cannot be assembled,
+  # a manifest whose offsets have drifted from firmware/partitions.csv, or a pinned
+  # ESP Web Tools that no longer resolves would otherwise surface as a broken release.
+  #
+  # It does not flash anything and cannot: Web Serial needs a browser and a board.
+  # What this proves is that the artifact set is complete and self-consistent.
+  flasher:
+    name: flasher
+    runs-on: ubuntu-latest
+    needs: [firmware]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: flasher/package-lock.json
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: slate-release
+          path: firmware/build-release
+
+      # A version that could never be a tag, so nothing about this run can be mistaken
+      # for a published one. tools/flasher/manifest.py does the checking; this step
+      # fails if any of it fails.
+      - name: Assemble
+        run: tools/flasher/build.sh 0.0.0-ci firmware/build-release
+
+      - name: Report
+        run: |
+          {
+            echo '### Flasher'
+            echo
+            echo '```json'
+            cat flasher/dist/manifest.json
+            echo '```'
+            echo
+            echo "page and bundle: $(du -sh flasher/dist/index.html flasher/dist/esp-web-tools | tr '\t' ' ' | tr '\n' ';')"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flasher
+          path: flasher/dist/*
           retention-days: 14
 
   # Require this one in branch protection, not the jobs above. Matrix leg names change
@@ -310,7 +369,7 @@ jobs:
   ci:
     name: ci
     runs-on: ubuntu-latest
-    needs: [fonts, editor, firmware]
+    needs: [fonts, editor, firmware, flasher]
     if: always()
     steps:
       - name: Gate
