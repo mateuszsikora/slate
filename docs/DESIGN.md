@@ -815,6 +815,14 @@ Two themes at launch: Midnight (dark) and Minimal Light. Themes live in firmware
 
 Three type steps: hero 44 px, body 20 px, caption 15 px. Fonts are rendered at `bpp: 4` — without antialiasing everything looks dated regardless of the rest.
 
+The system bar reserves 220 px for provider status so its clock and centred
+320 px page title never move. Status is one caption line: unavailable providers
+are ordered by severity so the most important entry gets the available width
+first, and lower-priority entries use a glyph-safe ellipsis when their combined
+summary exceeds the fixed width. Tiles from every affected provider are still
+dimmed independently, so truncating the summary never makes stale controls look
+live.
+
 Icons: 60–80 Material Design Icons glyphs selected for the component set, compiled as a font. Character coverage: Latin-1 plus Polish diacritics. Wider script support is deferred, but the coverage decision is made during S-3 because it drives flash usage.
 
 ## 9. First run and the setup access point

@@ -207,6 +207,20 @@ static void provider_summary(char *out, size_t size, uint32_t *color,
         unavailable = unavailable || provider_status_unavailable(info.status);
     }
 
+    /* The fixed-width bar may ellipsize a multi-provider summary. Give the
+     * most important outage the available width first and retain registration
+     * order for peers with the same severity. */
+    for (size_t i = 1; i < active_count; i++) {
+        slate_state_provider_info_t info = providers[i];
+        unsigned rank = provider_status_rank(info.status);
+        size_t j = i;
+        while (j > 0 && provider_status_rank(providers[j - 1].status) < rank) {
+            providers[j] = providers[j - 1];
+            j--;
+        }
+        providers[j] = info;
+    }
+
     for (size_t i = 0; i < active_count; i++) {
         slate_state_provider_info_t info = providers[i];
         unsigned rank = provider_status_rank(info.status);
@@ -2258,14 +2272,18 @@ static esp_err_t selftest_on_task(void)
         slate_state_drain(discard_changed, NULL);
         update_all();
     }
+    lv_obj_update_layout(s_tree->screen);
+    const char *provider_text = lv_label_get_text(s_tree->provider);
     UI_CHECK(fixture_offline_err == ESP_OK && s_tree == mixed_tree &&
                  direct_view != NULL &&
                  lv_obj_get_style_opa(direct_view->tile, LV_PART_MAIN) == LV_OPA_50 &&
                  fixture_view != NULL &&
                  lv_obj_get_style_opa(fixture_view->tile, LV_PART_MAIN) == LV_OPA_50 &&
-                 strcmp(lv_label_get_text(s_tree->provider),
-                        "DIRECT CONNECTING + UI-FIXTURE OFFLINE") == 0,
-             "the bar names simultaneous unavailable providers");
+                 label_is_one_line(s_tree->provider) &&
+                 strncmp(provider_text, "UI-FIXTURE OFFLINE",
+                         strlen("UI-FIXTURE OFFLINE")) == 0 &&
+                 strstr(provider_text, "...") != NULL,
+             "the bar prioritizes and truncates a multi-provider outage");
 
     esp_err_t direct_degraded_err =
         slate_state_provider_set_status("direct", SLATE_PROVIDER_DEGRADED);
