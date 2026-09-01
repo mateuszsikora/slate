@@ -2,8 +2,9 @@ idf_component_register(
     SRCS "main.c"
     INCLUDE_DIRS "."
     REQUIRES slate_action slate_api slate_brightness slate_config_api slate_control_api
-             slate_coredump slate_direct slate_display slate_editor slate_ha slate_mdns slate_ota
-             slate_setup slate_state slate_store slate_ui slate_wifi slate_time slate_ws app_update
+             slate_coredump slate_direct slate_display slate_editor slate_ha slate_integrations
+             slate_mdns slate_ota slate_setup slate_state slate_store slate_ui slate_wifi slate_time
+             slate_ws app_update json
              esp_system esp_event
 )
 
@@ -56,9 +57,9 @@ idf_component_register(
 #                              from there. Erasing the partition re-arms it.
 #
 #   -DSLATE_SETUP_AP_PASSWORD='"..."'  §9.2's optional WPA2 passphrase for the
-#                                      setup access point, which lives in NVS and
-#                                      has no writer until #35 puts the field on
-#                                      the page. Quoted twice on purpose — the
+#                                      setup access point, as a first-boot
+#                                      provisioning override for #35's page.
+#                                      Quoted twice on purpose — the
 #                                      shell eats one layer and the compiler needs
 #                                      a string literal. Never given a default
 #                                      here: §12 keeps passphrases out of the

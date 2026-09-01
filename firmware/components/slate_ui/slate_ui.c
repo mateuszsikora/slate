@@ -49,8 +49,8 @@ static const char *TAG = "slate_ui";
 #define UI_REBUILD_POST_TIMEOUT_MS 1000
 #define UI_LABEL_LIMIT             64
 #define UI_PROVIDER_SUMMARY_MAX    128
-#define UI_PAIRING_URL_MAX         80
-#define UI_PAIRING_QR_SIZE         220
+#define UI_EDITOR_URL_MAX          32
+#define UI_EDITOR_QR_SIZE          220
 
 typedef struct {
     char provider[SLATE_PROVIDER_ID_MAX + 1];
@@ -873,7 +873,7 @@ esp_err_t slate_ui_rebuild(const slate_config_t *config)
     return err;
 }
 
-static bool pairing_url(char *out, size_t out_len, char *address, size_t address_len)
+static bool editor_url(char *out, size_t out_len, char *address, size_t address_len)
 {
     slate_wifi_status_t status;
     slate_wifi_status(&status);
@@ -881,12 +881,7 @@ static bool pairing_url(char *out, size_t out_len, char *address, size_t address
         return false;
     }
 
-    char token[SLATE_DEVICE_TOKEN_LEN + 1] = {0};
-    if (slate_store_device_token_copy(token, sizeof(token)) != ESP_OK) {
-        return false;
-    }
-    int written = snprintf(out, out_len, "http://%s/#t=%s", status.ip, token);
-    explicit_bzero(token, sizeof(token));
+    int written = snprintf(out, out_len, "http://%s/", status.ip);
     if (written < 0 || (size_t) written >= out_len) {
         return false;
     }
@@ -908,19 +903,19 @@ static ui_tree_t *build_message_tree(const char *title, const char *message)
         return NULL;
     }
     style_plain(card);
-    char url[UI_PAIRING_URL_MAX] = {0};
+    char url[UI_EDITOR_URL_MAX] = {0};
     char address[16] = {0};
-    bool can_pair = pairing_url(url, sizeof(url), address, sizeof(address));
+    bool can_open = editor_url(url, sizeof(url), address, sizeof(address));
 
-    lv_obj_set_size(card, can_pair ? 720 : 650, can_pair ? 330 : 250);
+    lv_obj_set_size(card, can_open ? 720 : 650, can_open ? 330 : 250);
     lv_obj_center(card);
     lv_obj_set_style_bg_color(card, lv_color_hex(theme->surface), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(card, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(card, theme->radius, LV_PART_MAIN);
     lv_obj_set_style_pad_all(card, 30, LV_PART_MAIN);
 
-    int32_t text_x = can_pair ? UI_PAIRING_QR_SIZE + 36 : 0;
-    int32_t text_width = can_pair ? 404 : 590;
+    int32_t text_x = can_open ? UI_EDITOR_QR_SIZE + 36 : 0;
+    int32_t text_width = can_open ? 404 : 590;
     lv_obj_t *heading = make_label(card, title, theme->body, theme->warn);
     if (heading == NULL) {
         tree_destroy(tree);
@@ -934,16 +929,16 @@ static ui_tree_t *build_message_tree(const char *title, const char *message)
     }
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(body, text_width);
-    lv_obj_align(body, LV_ALIGN_TOP_LEFT, text_x, can_pair ? 104 : 55);
+    lv_obj_align(body, LV_ALIGN_TOP_LEFT, text_x, can_open ? 104 : 55);
 
-    if (can_pair) {
+    if (can_open) {
         lv_obj_t *qr = lv_qrcode_create(card);
         if (qr == NULL) {
             explicit_bzero(url, sizeof(url));
             tree_destroy(tree);
             return NULL;
         }
-        lv_qrcode_set_size(qr, UI_PAIRING_QR_SIZE);
+        lv_qrcode_set_size(qr, UI_EDITOR_QR_SIZE);
         /* Machine-readable contrast is not a theme token. In particular, the
          * default dark theme's text/surface pair would invert the symbol, which
          * some camera decoders do not support. */
@@ -960,7 +955,7 @@ static ui_tree_t *build_message_tree(const char *title, const char *message)
         char open[64];
         snprintf(open, sizeof(open), "Open http://%s", address);
         lv_obj_t *address_label = make_label(card, open, theme->body, theme->text_hi);
-        lv_obj_t *hint = make_label(card, "Scan to pair this browser", theme->caption,
+        lv_obj_t *hint = make_label(card, "Scan to open the editor", theme->caption,
                                     theme->accent);
         if (address_label == NULL || hint == NULL) {
             explicit_bzero(url, sizeof(url));
@@ -1132,7 +1127,7 @@ void slate_ui_network_connected(void)
     }
     esp_err_t err = restore_stored(NULL);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "refreshing pairing address: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "refreshing editor address: %s", esp_err_to_name(err));
     }
 }
 

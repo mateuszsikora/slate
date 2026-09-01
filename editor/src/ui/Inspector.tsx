@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 
 import { ApiError, type Binding, type ProviderStatus, type Resource, type Tile } from '../lib/api'
 import { COMPONENTS, bindingFor, definitionFor, withSize, type TileSize } from '../lib/editor'
+import { providerLabel } from '../lib/providers'
 
 interface Props {
   tile: Tile | null
@@ -228,7 +229,7 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
               <option value="">Choose a provider</option>
               {providerIds.map((id) => (
                 <option key={id} value={id}>
-                  {id} — {providers.find((entry) => entry.id === id)?.status ?? 'unknown'}
+                  {providerLabel(id)} — {providers.find((entry) => entry.id === id)?.status ?? 'unknown'}
                 </option>
               ))}
             </select>
@@ -277,7 +278,11 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
               </div>
               <div className="catalog__results">
                 {matching.length === 0 ? (
-                  <p>No matching {tile.type} resources. You can still type an ID above.</p>
+                  <p>
+                    {provider === 'direct'
+                      ? 'No External API resources have published state yet. Type an ID above, publish the dashboard, then send that resource to the panel.'
+                      : `No matching ${tile.type} resources. You can still type an ID above.`}
+                  </p>
                 ) : (
                   matching.slice(0, 80).map((resource) => (
                     <button
@@ -329,13 +334,13 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
 
 function resourceError(error: unknown, provider: string): string {
   if (!(error instanceof ApiError)) {
-    return `The ${provider} catalog could not be loaded.`
+    return `The ${providerLabel(provider)} catalog could not be loaded.`
   }
   if (error.code === 'provider_unconfigured') {
-    return `${provider} is not configured on this panel yet.`
+    return `${providerLabel(provider)} is not configured on this panel yet. Open Integrations to connect it.`
   }
   if (error.code === 'unreachable') {
     return 'The panel did not answer. Resource IDs can still be entered manually.'
   }
-  return `The ${provider} catalog is unavailable (${error.code}).`
+  return `The ${providerLabel(provider)} catalog is unavailable (${error.code}).`
 }

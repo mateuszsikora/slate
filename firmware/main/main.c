@@ -9,8 +9,8 @@
  * It exists to answer the questions the landed issues are judged on — is the
  * device token the same one as before the reboot, did the station come back on
  * its own — and it answers the first with a fingerprint rather than the token.
- * The token itself belongs in exactly one place, §4.3's pairing QR on the
- * screen; a serial log is a thing people paste into issues.
+ * The token itself stays inside the API/session boundary; a serial log is a
+ * thing people paste into issues.
  */
 
 #include <inttypes.h>
@@ -18,6 +18,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "cJSON.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
@@ -35,6 +36,7 @@
 #include "slate_display.h"
 #include "slate_editor.h"
 #include "slate_ha.h"
+#include "slate_integrations.h"
 #include "slate_mdns.h"
 #include "slate_ota.h"
 #include "slate_setup.h"
@@ -46,6 +48,34 @@
 #include "slate_ws.h"
 
 static const char *TAG = "slate";
+
+/*
+ * cJSON represents a large Home Assistant catalog as thousands of small
+ * allocations. ESP-IDF's default 16 KiB external-memory threshold puts every
+ * one of those nodes in scarce internal RAM even though the assembled payload
+ * itself lives in PSRAM. A real installation can therefore exhaust internal
+ * memory while several megabytes of PSRAM remain free; the Wi-Fi PHY is then
+ * the first subsystem to abort when it cannot allocate its tracking timer.
+ *
+ * Hooks are process-global, so install them once, before any component can use
+ * cJSON or start another task. free() accepts pointers from either ESP heap,
+ * which also makes the internal fallback safe if PSRAM is ever full.
+ */
+static void *json_malloc(size_t size)
+{
+    return heap_caps_malloc_prefer(size, 2,
+                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                   MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+static void configure_json_allocator(void)
+{
+    cJSON_Hooks hooks = {
+        .malloc_fn = json_malloc,
+        .free_fn = free,
+    };
+    cJSON_InitHooks(&hooks);
+}
 
 #ifdef SLATE_OTA_ROLLBACK_SELFTEST
 /*
@@ -182,6 +212,32 @@ static void store_selftest(void)
     token[SLATE_DEVICE_TOKEN_LEN - 1] = '\0';
     CHECK(!slate_store_device_token_matches(token), "short token rejected");
 
+    size_t key_count = slate_store_integration_key_count();
+    if (key_count < SLATE_INTEGRATION_KEY_MAX) {
+        slate_integration_key_info_t key_info = {0};
+        char integration_token[SLATE_INTEGRATION_KEY_TOKEN_LEN + 1] = {0};
+        CHECK(slate_store_integration_key_create("selftest", &key_info,
+                                                  integration_token,
+                                                  sizeof(integration_token)) == ESP_OK,
+              "create External API key");
+        CHECK(strlen(integration_token) == SLATE_INTEGRATION_KEY_TOKEN_LEN,
+              "External API key is 32 characters");
+        CHECK(slate_store_integration_key_matches(integration_token),
+              "External API key matches");
+        CHECK(!slate_store_integration_key_matches(
+                  "0000000000000000000000000000000A"),
+              "wrong External API key rejected");
+        CHECK(slate_store_integration_key_count() == key_count + 1,
+              "External API key listed");
+        CHECK(slate_store_integration_key_revoke(key_info.id) == ESP_OK,
+              "revoke External API key");
+        CHECK(!slate_store_integration_key_matches(integration_token),
+              "revoked External API key rejected");
+        CHECK(slate_store_integration_key_count() == key_count,
+              "External API key count restored");
+        explicit_bzero(integration_token, sizeof(integration_token));
+    }
+
     char small[4];
     CHECK(slate_store_device_token_copy(small, sizeof(small)) == ESP_ERR_INVALID_SIZE,
           "token copy refuses a small buffer");
@@ -190,6 +246,8 @@ static void store_selftest(void)
     char leak[SLATE_HA_TOKEN_MAX_LEN];
     CHECK(slate_store_str_get("ha_token", leak, sizeof(leak)) == ESP_ERR_INVALID_ARG,
           "ha token unreachable via str_get");
+    CHECK(slate_store_str_get("int_keys", leak, sizeof(leak)) == ESP_ERR_INVALID_ARG,
+          "integration key hashes unreachable via str_get");
 
     /* One vocabulary for "unset", whichever partition it lives on. */
     CHECK(slate_store_str_get("no_such_key", leak, sizeof(leak)) == ESP_ERR_NOT_FOUND,
@@ -324,9 +382,9 @@ static void network_event(void *arg, esp_event_base_t base, int32_t id, void *da
  *
  * The station credentials no longer arrive this way — `POST /wifi` is what does
  * that from #55 onwards, which is the whole point of the milestone. This one
- * knob remains because §9.2 puts the value in NVS and nothing in M1's scope
- * writes it: the setup page grows that field in #35, and until it does a knob is
- * the difference between a path that is exercised and a path that is asserted.
+ * knob remains as a development/provisioning override. #35 adds the ordinary
+ * writer to the setup page; a build-time value is still useful for exercising
+ * a secured access point from its very first boot.
  *
  * Written only when it differs from what is stored, so a boot without the knob
  * does not undo it. Pass an empty string to go back to an open access point.
@@ -449,6 +507,12 @@ static void start_api(void)
     err = slate_control_api_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "device controls unavailable: %s — continuing", esp_err_to_name(err));
+    }
+
+    err = slate_integrations_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "integration management unavailable: %s — continuing",
+                 esp_err_to_name(err));
     }
 
     /*
@@ -588,6 +652,8 @@ static void start_ui(void)
 
 void app_main(void)
 {
+    configure_json_allocator();
+
     /* §11.3's retained backlog starts before the boot report and board
      * bring-up, while its network transport still starts later with the API.
      * The capture half uses static storage, so it is safe before the store has

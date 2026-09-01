@@ -6,10 +6,10 @@
 #
 # The device token comes from $SLATE_TOKEN and is handed to curl over a config
 # file on stdin rather than as an argument, so it does not appear in the process
-# list of a shared machine. It is never printed. §4.3 delivers it through the
-# pairing QR on the panel, and #36 is what renders that; there is deliberately
-# no way to make the firmware log it (§12), so until then the way to read it off
-# a device you have a cable to is the NVS partition itself:
+# list of a shared machine. It is never printed. The editor obtains it through
+# §4.3's session bootstrap and keeps it in memory; development automation may
+# read it from a trusted local secret store. A legacy panel can be recovered
+# without changing its configuration by reading the NVS partition over USB:
 #
 #   esptool.py -p <port> read_flash 0x9000 0x14000 nvs.bin
 #   python $IDF_PATH/components/nvs_flash/nvs_partition_tool/nvs_tool.py nvs.bin

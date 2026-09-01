@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Answer a Slate panel's semantic actions through the direct provider.
+"""Answer a Slate panel's semantic actions through the External API.
 
 design.md §4.2 (the WebSocket), §5.2 (normalized state), §5.3 (semantic actions
-and optimistic updates), §5.4 (the direct provider).
+and optimistic updates), §5.4 (the `direct` provider behind External API).
 
-    SLATE_TOKEN=... tools/direct/agent.py <host> [--fail]
+    SLATE_API_KEY=... tools/direct/agent.py <host> [--fail]
 
 This is the reference consumer and the other half of `publish.sh`: it attaches
-to the direct provider, receives the `action` frames a tap produces, applies
+to the External API provider, receives the `action` frames a tap produces, applies
 them to a small in-memory model of one light, answers with `action_result`, and
 publishes the resulting §5.2 snapshot back over HTTP. It can model either a
 light or a cover, including the cover's mid-travel `stop` path. That last step
@@ -26,7 +26,7 @@ to install before they can see the contract work, and RFC 6455's client side is
 about eighty lines for frames this small.
 
 What this is not: a broker, a bridge or a daemon to run in production. §5.4 is
-explicit that the direct provider is the smallest useful interoperability path —
+explicit that External API is the smallest useful interoperability path —
 a script, a Node-RED flow or a test fixture. This file is the shape such a thing
 takes, not a component of the system.
 """
@@ -260,9 +260,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    token = os.environ.get("SLATE_TOKEN")
+    token = os.environ.get("SLATE_API_KEY") or os.environ.get("SLATE_TOKEN")
     if not token:
-        print("set SLATE_TOKEN to the device token (design.md §4.3)", file=sys.stderr)
+        print("set SLATE_API_KEY to a named External API key", file=sys.stderr)
         return 2
 
     host = args.host.removeprefix("http://").removeprefix("https://").rstrip("/")
@@ -300,7 +300,7 @@ def main() -> int:
                 # §5.4: one consumer at a time, so two processes cannot both
                 # operate the same light. A second attachment gets provider_busy.
                 ws.send(json.dumps({"type": "provider_attach", "provider": "direct"}))
-                print("authenticated; attaching to the direct provider")
+                print("authenticated; attaching to External API")
                 continue
             if kind == "error":
                 print(f"panel refused: {frame.get('error')}", file=sys.stderr)

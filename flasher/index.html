@@ -193,10 +193,10 @@
 
       <p class="note">
         Erasing the device during installation also erases its configuration,
-        its device token and its stored WiFi credentials, which live outside the
-        firmware partitions and otherwise survive an update. On a panel that has
-        never run Slate there is nothing to lose; on one that has, export the
-        dashboard from the editor first.
+        administrator security settings, External API keys and stored WiFi
+        credentials, which live outside the firmware partitions and otherwise
+        survive an update. On a panel that has never run Slate there is nothing
+        to lose; on one that has, export the dashboard from the editor first.
       </p>
 
       <h2>What happens next</h2>
@@ -209,18 +209,18 @@
         <li>
           Join that network from a phone or laptop and open
           <code>http://192.168.4.1</code>. Pick your WiFi, type the password,
-          submit.
+          optionally set a 4–12 digit administrator PIN, and submit.
         </li>
         <li>
           <strong>The result appears on the panel, not in the browser.</strong>
           The device has one radio, so joining your network drops the setup
           network at the instant it succeeds. On success the screen shows the
-          panel's address and a pairing QR.
+          panel's address and an address-only QR.
         </li>
         <li>
-          Scan the pairing QR. It opens the editor, served by the panel itself,
-          already authenticated — from there you choose a provider and arrange
-          the first page.
+          Scan the QR to open the editor served by the panel. Enter the
+          administrator PIN if one was configured, then choose a provider and
+          arrange the first page.
         </li>
       </ol>
 

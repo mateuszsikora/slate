@@ -1,6 +1,7 @@
 import { useRef, type KeyboardEvent, type PointerEvent } from 'react'
 
 import type { Page, Tile } from '../lib/api'
+import { providerLabel } from '../lib/providers'
 import { COMPONENTS, GRID_COLUMNS, GRID_ROWS, definitionFor, type TileSize } from '../lib/editor'
 
 interface Props {
@@ -162,7 +163,9 @@ export function DashboardGrid({ page, selectedId, onSelect, onMove, onResize, on
               <span className="grid-tile__binding">
                 {bindings.length === 0
                   ? 'not bound'
-                  : bindings.map((binding) => `${binding.provider}:${binding.resource}`).join(' · ')}
+                  : bindings
+                      .map((binding) => `${providerLabel(binding.provider)}: ${binding.resource}`)
+                      .join(' · ')}
               </span>
               <span className="grid-tile__size">
                 {tile.size[0]}×{tile.size[1]}

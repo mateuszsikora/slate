@@ -7,8 +7,8 @@
 # The device token is handled exactly as tools/ota/upload.sh handles it: taken
 # from $SLATE_TOKEN and handed to curl over a config file on stdin rather than as
 # an argument, so it does not appear in the process list of a shared machine, and
-# never printed. That script's header says how to read the token off a panel you
-# have a cable to until #36 renders §4.3's pairing QR.
+# never printed. That script's header describes the browser-session and
+# read-only USB recovery paths.
 #
 # What comes back is the flash image the panic handler wrote: ESP-IDF's header,
 # an ELF core file, and a checksum. `esp-coredump --core-format raw` is what

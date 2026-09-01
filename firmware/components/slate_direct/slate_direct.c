@@ -612,7 +612,8 @@ esp_err_t slate_direct_init(void)
         .method = HTTP_POST,
         .handler = state_handler,
     };
-    esp_err_t route_err = slate_api_register_uri(&state, SLATE_API_AUTH_DEVICE_TOKEN);
+    esp_err_t route_err =
+        slate_api_register_uri(&state, SLATE_API_AUTH_DEVICE_OR_INTEGRATION);
     if (route_err != ESP_OK) {
         ESP_LOGE(TAG, "state publication unavailable: %s", esp_err_to_name(route_err));
     }

@@ -23,18 +23,25 @@ extern "C" {
 
 #define SLATE_API_BASE_PATH        "/api/v1"
 #define SLATE_SETUP_AP_ADDRESS     "192.168.4.1"
-#define SLATE_API_MAX_URI_HANDLERS 24
+#define SLATE_API_MAX_URI_HANDLERS 30
 
 /* §4.1's `model`, and the same string §10's editor and mDNS advertise. One
  * board model per binary (ADR-1), so it is a constant rather than a lookup. */
 #define SLATE_API_MODEL_ID "waveshare-s3-touch-7"
 
 typedef enum {
-    /** No device token. Intended only for GET /info and CORS preflight. */
+    /** No device token. Restricted to GET /info, POST /session and preflight. */
     SLATE_API_AUTH_PUBLIC = 0,
 
     /** A valid `Authorization: Bearer <device_token>` is mandatory. */
     SLATE_API_AUTH_DEVICE_TOKEN,
+
+    /**
+     * Accept either the browser session credential or a named External API
+     * key. Registration is restricted to POST /direct/state so a scoped key
+     * cannot become a second administrator credential by caller error.
+     */
+    SLATE_API_AUTH_DEVICE_OR_INTEGRATION,
 
     /**
      * The token is mandatory except when the request arrived on the setup
@@ -44,9 +51,10 @@ typedef enum {
     SLATE_API_AUTH_SETUP_AP,
 
     /**
-     * The HTTP upgrade is public and the device token is required in the first
-     * WebSocket text frame (§4.2). Registration is restricted to GET /ws in the
-     * same way the two policies above are restricted to their exact routes.
+     * The HTTP upgrade is public and a credential is required in the first
+     * WebSocket text frame (§4.2). A device-session credential gets the editor
+     * channel; an External API key gets only the direct action-consumer flow.
+     * Registration is restricted to GET /ws.
      */
     SLATE_API_AUTH_WS_FIRST_FRAME,
 } slate_api_auth_t;
@@ -58,7 +66,7 @@ typedef enum {
  * the setup page on the access point, where a phone that has just joined
  * `slate-<mac6>` opens `http://192.168.4.1` and a captive portal probe is
  * redirected to the same place. §10 serves the editor, which is what the
- * pairing QR of §4.3 points a browser at once the panel is on a network.
+ * editor QR points a browser at once the panel is on a network.
  *
  * One URI can carry one handler, so the choice is made here rather than by
  * whichever component registered last: this file already has to know which
@@ -176,9 +184,8 @@ esp_err_t slate_api_refuse_and_close(httpd_req_t *req, const char *status,
  * Development verifier for #10, called by main only when built with
  * `-DSLATE_API_SELFTEST=1`. It checks public, missing, wrong and correct bearer
  * cases plus CORS preflight, logs only PASS/FAIL and returns ESP_FAIL if any
- * case failed. The pairing QR in #36 makes external authenticated curl tests
- * possible; until then this is the only test client that can obtain the token
- * without putting it in a serial log.
+ * case failed. This is the only test client that can inspect bearer behavior
+ * without putting the internal token in a serial log.
  */
 esp_err_t slate_api_selftest(void);
 

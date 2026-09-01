@@ -15,6 +15,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "driver/i2c_master.h"
 #include "esp_err.h"
@@ -30,6 +31,14 @@ extern "C" {
  * without also operating the tile under the finger.
  */
 typedef bool (*slate_touch_press_observer_t)(void *ctx);
+
+/**
+ * Called once when one uninterrupted physical press reaches its configured
+ * duration. The triggering press is consumed through release before this is
+ * called, so a recovery gesture cannot also activate the tile underneath it.
+ * The callback runs on the LVGL task and must only hand work to another task.
+ */
+typedef void (*slate_touch_hold_observer_t)(void *ctx);
 
 /**
  * @brief Reset the GT911, attach it to the bus and register an LVGL pointer.
@@ -59,6 +68,18 @@ bool slate_touch_ready(void);
  */
 esp_err_t slate_touch_set_press_observer(slate_touch_press_observer_t observer,
                                          void *ctx);
+
+/**
+ * @brief Replace the process-wide continuous-hold observer.
+ *
+ * Safe from any task. A non-NULL observer requires a non-zero duration. Passing
+ * NULL clears the observer and requires duration_ms and ctx to be zero/NULL.
+ * Registering a hold does not consume ordinary taps; only the press that
+ * actually reaches the threshold is removed from LVGL through its release.
+ */
+esp_err_t slate_touch_set_hold_observer(uint32_t duration_ms,
+                                        slate_touch_hold_observer_t observer,
+                                        void *ctx);
 
 #ifdef __cplusplus
 }

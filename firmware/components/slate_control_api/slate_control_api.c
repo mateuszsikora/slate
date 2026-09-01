@@ -3,7 +3,11 @@
 #include "slate_control_api.h"
 
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <string.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "cJSON.h"
 #include "esp_http_server.h"
@@ -14,14 +18,21 @@
 #include "slate_api.h"
 #include "slate_display.h"
 #include "slate_store.h"
+#include "slate_touch.h"
+#include "slate_ui.h"
 #include "slate_ws.h"
 
 static const char *TAG = "control_api";
 
 #define MODE_BODY_MAX       64
 #define FACTORY_REBOOT_US   (750 * 1000)
+#define PANEL_RESET_HOLD_MS 10000
+#define RESET_TASK_STACK    4096
+#define RESET_TASK_PRIORITY 6
 
 static esp_timer_handle_t s_reboot_timer;
+static TaskHandle_t s_reset_task;
+static atomic_bool s_resetting = ATOMIC_VAR_INIT(false);
 static bool s_initialized;
 
 static esp_err_t send_no_content(httpd_req_t *req)
@@ -122,17 +133,57 @@ static void schedule_reboot(void)
     esp_restart();
 }
 
+static esp_err_t perform_factory_reset(void)
+{
+    /* Suppression is synchronous even though its system-bar redraw is queued,
+     * so the held finger cannot become a provider action on its eventual lift. */
+    slate_ui_mode_set(true);
+    esp_err_t display_err = slate_display_factory_reset_show();
+    if (display_err != ESP_OK) {
+        ESP_LOGW(TAG, "factory-reset presentation: %s", esp_err_to_name(display_err));
+    }
+
+    esp_err_t reset_err = slate_store_factory_reset();
+    /* The store has invalidated handles held by other subsystems. From here a
+     * reboot is mandatory even when one erase or format reported a failure. */
+    schedule_reboot();
+    return reset_err;
+}
+
+static void reset_task(void *ctx)
+{
+    (void) ctx;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        ESP_LOGW(TAG, "factory reset requested by a ten-second panel hold");
+        esp_err_t err = perform_factory_reset();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "panel factory reset incomplete: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+static void panel_hold_complete(void *ctx)
+{
+    (void) ctx;
+    if (atomic_exchange_explicit(&s_resetting, true, memory_order_acq_rel)) {
+        return;
+    }
+    /* Called by the input reader on LVGL's task. Every erase and filesystem
+     * operation belongs on the dedicated worker, never on the renderer. */
+    xTaskNotifyGive(s_reset_task);
+}
+
 static esp_err_t factory_reset_handler(httpd_req_t *req)
 {
     if (req->content_len != 0) {
         return slate_api_refuse(req, "400 Bad Request", "unexpected_body");
     }
 
-    esp_err_t reset_err = slate_store_factory_reset();
-    /* Arm the reboot before touching response I/O. A peer that stopped reading
-     * can block httpd_resp_send() up to the server's socket timeout, but cannot
-     * be allowed to keep the device running with invalidated NVS handles. */
-    schedule_reboot();
+    if (atomic_exchange_explicit(&s_resetting, true, memory_order_acq_rel)) {
+        return slate_api_refuse(req, "409 Conflict", "reset_in_progress");
+    }
+    esp_err_t reset_err = perform_factory_reset();
 
     if (reset_err == ESP_OK) {
         return send_no_content(req);
@@ -153,6 +204,13 @@ esp_err_t slate_control_api_init(void)
     esp_err_t err = esp_timer_create(&timer_args, &s_reboot_timer);
     if (err != ESP_OK) {
         return err;
+    }
+
+    if (xTaskCreate(reset_task, "slate_reset", RESET_TASK_STACK, NULL,
+                    RESET_TASK_PRIORITY, &s_reset_task) != pdPASS) {
+        esp_timer_delete(s_reboot_timer);
+        s_reboot_timer = NULL;
+        return ESP_ERR_NO_MEM;
     }
 
     const httpd_uri_t mode = {
@@ -182,7 +240,13 @@ esp_err_t slate_control_api_init(void)
         return err;
     }
 
+    err = slate_touch_set_hold_observer(PANEL_RESET_HOLD_MS, panel_hold_complete, NULL);
+    if (err != ESP_OK) {
+        return err;
+    }
+
     s_initialized = true;
-    ESP_LOGI(TAG, "mode, identify and factory-reset controls ready");
+    ESP_LOGI(TAG, "mode, identify and factory-reset controls ready; panel hold %d s",
+             PANEL_RESET_HOLD_MS / 1000);
     return ESP_OK;
 }

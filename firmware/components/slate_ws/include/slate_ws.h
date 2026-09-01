@@ -133,6 +133,15 @@ bool slate_ws_provider_is_attached(const char *id);
 esp_err_t slate_ws_provider_send(const char *id, const char *text, size_t len);
 
 /**
+ * @brief Close External API sessions after the key set changes.
+ *
+ * Revocation must take effect for an already-attached action consumer, not
+ * merely for its next reconnect. Other External API clients reconnect with
+ * their still-valid keys; editor sessions are unaffected.
+ */
+void slate_ws_external_keys_changed(void);
+
+/**
  * @brief Publish the §4.2 `reloaded` event to authenticated clients.
  *
  * The latest pending reload replaces an older unsent one for a slow client:

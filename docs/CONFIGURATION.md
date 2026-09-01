@@ -266,7 +266,9 @@ rest of the API: `empty_body`, `invalid_json`, `too_large` (413) and
 ## Pushing a configuration
 
 The editor the panel serves does this for you, and can export and import the
-same document as a file. By hand:
+same document as a file. By hand, first call `POST /api/v1/session` with the
+optional administrator PIN and set `SLATE_TOKEN` to the returned in-memory
+session credential. Then:
 
 ```bash
 # Check it without touching the panel's current dashboard.

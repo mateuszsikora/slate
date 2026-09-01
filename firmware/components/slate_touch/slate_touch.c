@@ -72,11 +72,15 @@ static uint16_t s_last_x;
 static uint16_t s_last_y;
 static uint32_t s_press_samples;
 static int64_t s_press_started_us;
+static bool s_hold_fired;
 static uint32_t s_faults;
 static int64_t s_fault_logged_at_us;
 static portMUX_TYPE s_observer_lock = portMUX_INITIALIZER_UNLOCKED;
 static slate_touch_press_observer_t s_press_observer;
 static void *s_press_observer_ctx;
+static slate_touch_hold_observer_t s_hold_observer;
+static void *s_hold_observer_ctx;
+static uint32_t s_hold_duration_ms;
 
 /*
  * GT911 latches its I²C address from the state of the interrupt line at the
@@ -205,6 +209,7 @@ static void report_released(lv_indev_data_t *data, bool physical_release)
                  held_us > 0 ? (double) s_press_samples * 1000000.0 / (double) held_us : 0.0);
         s_pressed = false;
         s_press_consumed = false;
+        s_hold_fired = false;
     }
     if (physical_release) {
         s_block_until_lift = false;
@@ -221,6 +226,32 @@ static bool observe_press(void)
     ctx = s_press_observer_ctx;
     portEXIT_CRITICAL(&s_observer_lock);
     return observer != NULL && observer(ctx);
+}
+
+static void observe_hold(int64_t held_us)
+{
+    slate_touch_hold_observer_t observer;
+    void *ctx;
+    uint32_t duration_ms;
+
+    portENTER_CRITICAL(&s_observer_lock);
+    observer = s_hold_observer;
+    ctx = s_hold_observer_ctx;
+    duration_ms = s_hold_duration_ms;
+    portEXIT_CRITICAL(&s_observer_lock);
+
+    if (s_hold_fired || observer == NULL || duration_ms == 0 ||
+        held_us < (int64_t) duration_ms * 1000) {
+        return;
+    }
+
+    /* Set the input state before handing control away. The observer may wake a
+     * higher-priority reset task immediately; no later path may reinterpret
+     * this same finger as a release/click on the dashboard underneath it. */
+    s_hold_fired = true;
+    s_press_consumed = true;
+    s_block_until_lift = true;
+    observer(ctx);
 }
 
 static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
@@ -273,8 +304,11 @@ static void indev_read_cb(lv_indev_t *indev, lv_indev_data_t *data)
         s_block_until_lift = s_press_consumed;
         s_press_started_us = esp_timer_get_time();
         s_press_samples = 0;
+        s_hold_fired = false;
     }
     s_press_samples++;
+
+    observe_hold(esp_timer_get_time() - s_press_started_us);
 
     data->point.x = x;
     data->point.y = y;
@@ -345,6 +379,24 @@ esp_err_t slate_touch_set_press_observer(slate_touch_press_observer_t observer,
     portENTER_CRITICAL(&s_observer_lock);
     s_press_observer = observer;
     s_press_observer_ctx = ctx;
+    portEXIT_CRITICAL(&s_observer_lock);
+    return ESP_OK;
+}
+
+esp_err_t slate_touch_set_hold_observer(uint32_t duration_ms,
+                                        slate_touch_hold_observer_t observer,
+                                        void *ctx)
+{
+    bool clearing = observer == NULL;
+    if ((clearing && (duration_ms != 0 || ctx != NULL)) ||
+        (!clearing && duration_ms == 0)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    portENTER_CRITICAL(&s_observer_lock);
+    s_hold_observer = observer;
+    s_hold_observer_ctx = ctx;
+    s_hold_duration_ms = duration_ms;
     portEXIT_CRITICAL(&s_observer_lock);
     return ESP_OK;
 }

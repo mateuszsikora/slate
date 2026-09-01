@@ -53,12 +53,10 @@ document](docs/DESIGN.md):
   where it is being decided.
 - **M6 — done.** The web editor, served from the device, with the provider and
   resource pickers, JSON import/export, and a second theme.
-- **M7 — partly.** The setup access point and its browser page, the pairing QR,
-  the error screens and static addressing all work.
-  [#35](https://github.com/mateuszsikora/slate/issues/35) is what is left:
-  making those screens work for someone who has not read the design document,
-  and adding the recovery paths that are not a `curl` — a long press on the
-  panel to forget a network, factory reset without a browser.
+- **M7 — done.** First-run setup, optional administrator PIN protection, clear
+  network diagnostics, static addressing and the physical recovery gestures
+  are in. The panel's QR contains only its address; authentication happens in
+  the editor and never puts a credential in a URL.
 - **M8 — the release path exists; the first release has not been tagged.**
   Pushing a `v*` tag builds the image, publishes it with checksums and deploys
   the browser installer. Two pieces are still open: the panel does not fetch
@@ -107,9 +105,10 @@ the button, pick the port. It needs no toolchain, no ESP-IDF and no command
 line, and it writes the same four images `idf.py flash` would.
 
 It also offers to erase the flash first. On a panel that has never run Slate
-there is nothing to lose. On one that has, an erase takes the dashboard, the
-device token and the stored WiFi credentials with it — those live outside the
-firmware partitions and otherwise survive both a reflash and an update.
+there is nothing to lose. On one that has, an erase takes the dashboard,
+administrator security settings, External API keys and stored WiFi credentials
+with it — those live outside the firmware partitions and otherwise survive both
+a reflash and an update.
 
 Every release also carries the images for `esptool`, their SHA-256 checksums,
 and the `.elf` and `.map` that a crash report from that image is read against.
@@ -129,31 +128,35 @@ also the only path today, since nothing has been tagged yet.
 2. Join it and open `http://192.168.4.1`. Phones usually open the page
    themselves, because the device answers every DNS query with its own address,
    but the address is on the screen because that prompt is easy to dismiss.
-3. Pick a network, type the password, submit. **The result appears on the
+3. Pick a network, type its password, optionally set a 4–12 digit administrator
+   PIN, and submit. **The result appears on the
    panel, not in the browser:** both radios share one channel, so the access
    point drops its clients at the instant the station associates. On success the
-   screen shows the station address and the pairing QR; on failure the access
+   screen shows the station address and an address-only QR; on failure the access
    point comes back with a named reason — wrong password, out of range, no
    address from the router.
-4. Scan the pairing QR to open the editor already authenticated, choose a
-   provider, and arrange the first page.
+4. Scan the QR to open the editor. Enter the administrator PIN if one was set,
+   choose a provider, and arrange the first page. Without a PIN the editor is
+   intentionally open to anyone who can reach the panel on the LAN.
 
 If the router later changes, none of this needs a cable: the panel raises the
 access point again on its own whenever the station stays down. `DELETE
 /api/v1/wifi` forgets the credentials, and `POST /api/v1/factory_reset` — also
-a button in the editor — takes the tokens and the configuration with it.
+a physical panel gesture and a button in the editor — takes the security
+settings and configuration with it.
 
-### The device token
+### Administrator access
 
-Every write endpoint — including OTA — requires the device token that the panel
-generates on first boot and keeps in NVS. It reaches a browser through the
-pairing QR rendered on the screen, as a URL with the token in its fragment:
-scanning it opens the editor already authenticated. For a command line, read the
-token out of that same URL. The firmware never logs it and the API never returns
-it; the boot log prints only a fingerprint.
+The optional administrator PIN is the credential a person uses. A new browser
+page asks for it on every visit and keeps the resulting session credential only
+in memory. It is never shown, stored in `localStorage`, or added to the URL. In
+open mode the same session begins without a prompt.
 
-The token grants configuration and control of the panel. It changes on factory
-reset.
+Internally, `POST /api/v1/session` exchanges the PIN for a device-session
+credential used by the editor's authenticated requests. Command-line
+administration can call the same endpoint and keep the returned value in an
+environment variable for that shell. If the PIN is forgotten, use the physical
+factory-reset gesture; there is no irreplaceable recovery token to preserve.
 
 ## Building a dashboard
 
@@ -166,7 +169,8 @@ layout survives a reflash or moves to a second panel.
 The document behind the editor is the format described in
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) — the grid, the components and
 their size variants, the settings, and the validation vocabulary. Writing it by
-hand is a supported path and not a fallback:
+hand is a supported path and not a fallback. Set `SLATE_TOKEN` to the `token`
+returned by `POST /api/v1/session`, then:
 
 ```bash
 curl -sS -X PUT http://192.168.1.42/api/v1/config \
@@ -194,11 +198,18 @@ A long-lived token carries the full authority of its account. Slate stores it
 only in device NVS, never returns it from the API, and tests authentication
 before replacing working credentials.
 
-### direct — anything that can POST JSON
+Open **Integrations** in the editor to connect or disconnect Home Assistant.
+When a resource picker first opens, the panel relays the HA registries and
+current states to the browser in bounded responses. The browser assembles and
+caches that catalog once for all tile pickers, then refreshes a stale cache in
+the background. After publishing, the panel subscribes only to the small set of
+entities used by the active dashboard.
+
+### External API — anything that can POST JSON
 
 Home Assistant is the first production provider, not a dependency. The `direct`
-provider is always present, needs nothing but the device token, and is a
-complete round trip in three steps. Bind a tile to it:
+provider is always present and powers the editor's **External API** integration.
+Create a named key there, copy it once, and bind a tile to it:
 
 ```json
 {"id": "t1", "type": "light", "pos": [0, 0], "size": [2, 1],
@@ -209,10 +220,10 @@ Publish what that resource currently is — the panel holds state only for
 resources the active dashboard references, so this is the order that works:
 
 ```bash
-export SLATE_TOKEN=<device token>
+export SLATE_API_KEY=<external-api-key>
 
 curl -sS -X POST http://192.168.1.42/api/v1/direct/state \
-     -H "Authorization: Bearer $SLATE_TOKEN" \
+     -H "Authorization: Bearer $SLATE_API_KEY" \
      -H 'Content-Type: application/json' \
      -d '{"resource":"living-room","kind":"light","name":"Living room",
           "available":true,"state":{"power":"on","brightness":62},
@@ -229,7 +240,7 @@ tools/direct/agent.py 192.168.1.42
 
 `tools/direct/agent.py` is that consumer in one file of standard-library Python
 — attach, receive, apply, answer, publish — and `tools/direct/publish.sh`
-is the request above with the token kept out of the process list. Between them
+is the request above with the key kept out of the process list. Between them
 they are the reference adapter, and the shape a Node-RED flow or a home-grown
 script takes. The contract they implement is in
 [`docs/API.md`](docs/API.md#the-direct-provider).
@@ -244,7 +255,7 @@ the next published snapshot showing the new value.
 authenticated endpoint, which is what `tools/ota/upload.sh` posts to:
 
 ```bash
-SLATE_TOKEN=<device token> tools/ota/upload.sh 192.168.1.42
+SLATE_TOKEN=<administrator session credential> tools/ota/upload.sh 192.168.1.42
 ```
 
 The host can be an address, `slate-<mac6>.local`, or a full URL, and the image
@@ -255,8 +266,8 @@ successful exit means the image booted rather than merely uploaded. A freshly
 installed image that panics or never answers is rolled back to the previous one
 by the bootloader.
 
-The configuration, the device token and the WiFi credentials live outside the
-application partitions and are not touched by an update.
+The configuration, authentication state, External API keys and WiFi credentials
+live outside the application partitions and are not touched by an update.
 
 **The panel does not check for updates on its own.** There is no manifest, no
 signature and no HTTPS on this path; it is a development mechanism that a
@@ -269,10 +280,15 @@ Slate is built for a LAN and its security posture says so plainly. Nothing below
 is a gap waiting to be closed by a later version — these are the trades, and
 they are worth knowing before the panel goes on a wall.
 
-- **The device token is a secret, not a pairing convenience.** Whoever has it can
-  reconfigure the panel, drive every bound resource and upload firmware to it. It
-  is shown once, as a QR on the screen; the API never returns it and the firmware
-  never logs it. A factory reset issues a new one and invalidates the old.
+- **Administrator access is either PIN-protected or deliberately open.** A PIN
+  is a salted hash in NVS, is rate-limited after failed attempts, and is asked
+  for again on every new browser page. The internal session credential never
+  appears in the QR, URL or persistent browser storage. A physical factory reset
+  is the recovery path for a forgotten PIN.
+- **External API keys have narrow authority.** A named key can publish direct
+  state and receive direct actions, but cannot read or replace a dashboard,
+  configure Home Assistant, fetch logs, upload firmware or reset the panel.
+  Each key is shown once, stored only as a digest and individually revocable.
 - **A long-lived Home Assistant token carries the full authority of its
   account.** Create a dedicated account in the **`system-users`** group rather
   than reusing your own. Not an administrator, which grants more than Slate
@@ -288,12 +304,13 @@ they are worth knowing before the panel goes on a wall.
   ESP32 is a worse experience than its absence on a local network: browser
   warnings on every visit, and a private key on a device whose flash can be read
   over a cable. Anyone on your network can see the traffic between a browser and
-  the panel, which includes the token in the `Authorization` header. Do not put
+  the panel, which includes session or API credentials in authentication frames
+  and headers. Do not put
   the panel on a network you would not put a printer on, and do not expose it to
   the internet — there is no scenario in this design that requires it.
 - **The setup access point is open by default and its setup page needs no
-  token.** That is the one relaxation, and what it grants somebody in radio range
-  is the ability to move the panel to a different network. It does not grant
+  existing administrator session.** Someone in radio range can move the panel
+  to a different network and choose its future PIN. They do not gain
   provider credentials, the configuration, direct-provider publication or
   firmware upload: those answer `401` there exactly as they do everywhere else. A
   custom build can provision a WPA2 passphrase for the access point, which is
@@ -303,8 +320,8 @@ they are worth knowing before the panel goes on a wall.
   excludes DRAM from dumps, and the code paths that hold a credential on a stack
   zero it when they are done.
 
-There is no rate limiting and no origin allow-list; both would be added if a
-concrete scenario asked for them.
+PIN failures are rate-limited. There is no general API rate limit or origin
+allow-list; either would be added if a concrete scenario asked for it.
 
 ## Building from source
 
@@ -345,7 +362,7 @@ have no effect, delete `firmware/sdkconfig` and build again.
 
 ### The first flash, over a cable
 
-A blank device has no network and no token, so there is no other way in:
+A blank device has no network, so there is no other way in:
 
 ```bash
 cd firmware

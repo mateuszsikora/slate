@@ -24,28 +24,41 @@ http://<address>/api/v1
 ```
 
 `<address>` is the panel's IP, or `slate-<mac6>.local` — it advertises itself
-over mDNS, including on its own setup access point, because a stored token
-outlives a DHCP lease.
+over mDNS, including on its own setup access point, so a changed DHCP lease does
+not make the panel disappear.
 
-Every endpoint except `GET /info` requires the device token:
+`GET /info` and `POST /session` are the public browser bootstrap. The person
+configuring WiFi may choose a 4–12 digit administrator PIN; without one, the
+panel is deliberately open to anyone who can reach it on the LAN. Start a
+session with one of:
+
+```bash
+curl -sS -X POST http://<address>/api/v1/session
+curl -sS -X POST http://<address>/api/v1/session \
+     -H 'Content-Type: application/json' -d '{"pin":"1234"}'
+```
+
+The response is `{"token":"<32-character session credential>"}`. The editor
+keeps it only in page memory and sends it on authenticated requests:
 
 ```
-Authorization: Bearer <32-character device token>
+Authorization: Bearer <32-character session credential>
 ```
 
-The token is generated on first boot, stored in NVS, and reaches a browser
-through the pairing QR on the screen as a URL fragment (`http://192.168.1.42/#t=…`).
-A fragment is not sent to the server, so the token stays out of access logs and
-history entries; the editor claims it, keeps it in `localStorage`, and clears the
-address bar. For a command line, read it out of that same URL. The firmware
-never logs it and no endpoint ever returns it.
+It is an internal transport credential, not a recovery secret: it is never
+shown to the person, placed in a URL or stored in `localStorage`. A new page or
+mDNS-origin move starts a new session and asks for the PIN again. Five failed
+PIN attempts return `429 try_later` with `Retry-After: 30`. Changing the PIN or
+factory-resetting the panel rotates the credential.
 
-Possessing it grants configuration and control of the panel. It changes on
-factory reset. Requests without it get `401`.
+The editor can also create named External API keys. Those keys are accepted
+only by `POST /direct/state` and the direct action-consumer WebSocket role; they
+cannot administer the panel. Requests without an accepted credential get
+`401`.
 
 **One exception, on the setup access point only.** While the panel is offering
 its own network, the setup page and the three endpoints it needs —
-`GET /wifi/scan`, `POST /wifi`, `GET /info` — answer without a token on that
+`GET /wifi/scan`, `POST /wifi`, `GET /info` — answer without a session on that
 interface. Everything else answers `401` there exactly as it does on the
 station, so somebody in radio range can move the panel to another network and
 cannot read credentials, publish state, write a configuration or upload
@@ -63,13 +76,18 @@ any endpoint that takes a body are `empty_body`, `invalid_json`, `too_large`
 | Method | Path | |
 |--------|------|--|
 | GET | `/info` | identity and network state. **No authentication** |
+| POST | `/session` | exchange the optional administrator PIN for an in-memory session credential. **No authentication** |
 | GET | `/config` | the active dashboard document |
 | PUT | `/config` | replace it |
 | POST | `/config/validate` | check one without saving |
 | GET | `/resources?provider=<id>` | normalized resources for the picker |
 | POST | `/direct/state` | publish one resource snapshot |
+| GET | `/ha` | report whether Home Assistant is configured and its URL |
 | POST | `/ha` | configure Home Assistant |
+| DELETE | `/ha` | disconnect Home Assistant and erase its token |
 | GET | `/ha/discover` | find Home Assistant instances over mDNS |
+| POST, GET | `/ha/catalog` | relay one HA catalog stage to the editor |
+| GET, POST, DELETE | `/integration-keys` | list, create or revoke External API keys |
 | GET | `/wifi/scan` | nearby networks |
 | POST | `/wifi` | set station credentials and addressing |
 | DELETE | `/wifi` | forget them and raise the setup access point |
@@ -82,7 +100,7 @@ any endpoint that takes a body are `empty_body`, `invalid_json`, `too_large`
 
 ### `GET /info`
 
-The one endpoint a browser can reach before it has been paired, which is why it
+One of the endpoints a browser can reach before it has a session, which is why it
 carries the network state as well as the identity.
 
 ```json
@@ -92,15 +110,15 @@ carries the network state as well as the identity.
   "schema_max": 1,
   "name": "slate-a1b2c3",
   "themes": ["midnight", "minimal-light"],
-  "pairing": "ready",
+  "authentication": "pin",
   "network": {"mode": "sta", "ssid": "home", "ip": "192.168.1.42",
               "sta_ssid": "home", "ipv4": {"mode": "dhcp"}, "last_error": null}
 }
 ```
 
-`themes` is what this firmware actually carries. `pairing` is `ready` when a
-usable device token exists and `degraded` when one does not; it does not claim
-to know whether any particular browser has stored it.
+`themes` is what this firmware actually carries. `authentication` is `pin` or
+`open`; it tells a new editor whether it should show the PIN prompt before
+calling `/session`.
 
 `network.mode` is `sta` or `ap`. `ssid` is the network the panel is on or
 offering, `sta_ssid` the one it is configured for — which exists even while the
@@ -156,8 +174,11 @@ accept state but has no WebSocket consumer attached to answer actions.
 > the list. Asking for it returns `404 not_found`.
 
 `GET /resources?provider=<id>` returns `{"resources": [ … ]}` in the normalized
-vocabulary below. Home Assistant lists its full discovered catalog; `direct`
-lists only what has been published since boot. Missing, unknown and
+vocabulary below. It is the bounded runtime store: Home Assistant contains only
+entities referenced by the active dashboard, and `direct` contains only bound
+resources published since boot. The editor obtains the full HA picker catalog
+through `/ha/catalog`, assembles it in browser memory once, shares the cache
+between tile pickers and refreshes it in the background. Missing, unknown and
 unconfigured providers answer `400 provider_required`, `404 provider_not_found`
 and `409 provider_unconfigured`.
 
@@ -220,7 +241,7 @@ which would look like an exhausted allocator. `storage_reset` says boot recovery
 erased corrupt NVS or reformatted the filesystem, which is a different thing
 from a panel that was simply never configured.
 
-### `POST /ha`
+### Home Assistant
 
 ```json
 {"url": "http://homeassistant.local:8123", "token": "<long-lived access token>"}
@@ -238,10 +259,32 @@ is the credential boundary, not the first hop toward one.
 `{"instances": [{"name": …, "uuid": …, "url": …}]}`. An empty result is normal:
 multicast DNS does not always cross a VLAN, and manual entry remains available.
 
+`GET /ha` returns `{"configured":true,"url":"http://…"}` or an unconfigured
+response with a null URL. It never returns the long-lived token. `DELETE /ha`
+answers `204`, removes that token and clears HA runtime state.
+
+The editor fetches the full configuration catalog in four stages: `entities`,
+`devices`, `areas`, then `states`. `POST /ha/catalog` with `{"stage":"entities"}`
+returns a request id. `GET /ha/catalog?request=<id>` returns
+`{"status":"pending"}` until it can return the corresponding HA WebSocket
+result. Only one small response is resident on the ESP32 at a time; the browser
+joins the stages and caches the normalized catalog. Normal panel operation does
+not use this route and subscribes only to configured entity ids.
+
+### External API keys
+
+`GET /integration-keys` returns only non-secret metadata:
+`{"keys":[{"id":"…","name":"Node-RED"}]}`. `POST /integration-keys` with
+`{"name":"Node-RED"}` creates one and returns `201` with `id`, `name` and
+`token`. That plaintext is shown once; NVS stores only its SHA-256 digest. Up to
+four keys may exist. `DELETE /integration-keys?id=<id>` revokes one, answers
+`204`, and immediately closes an active WebSocket authenticated with it.
+
 ### `POST /wifi`
 
 ```json
-{"ssid": "home", "password": "…", "ipv4": {"mode": "dhcp"}}
+{"ssid": "home", "password": "…", "admin_pin": "1234",
+ "setup_password": "optional WPA2 passphrase", "ipv4": {"mode": "dhcp"}}
 
 {"ssid": "home", "password": "…",
  "ipv4": {"mode": "static", "address": "192.168.1.42/24",
@@ -252,7 +295,7 @@ Answers `202`, and **the outcome appears on the panel, not in the response.**
 There is one radio: at the instant the station associates, the setup access
 point moves to the router's channel and drops the browser that submitted the
 form. Polling for a result from that browser is not something that can be made
-to work, so the screen reports success with the address and the pairing QR, and
+to work, so the screen reports success with the address-only QR, and
 failure with a named reason.
 
 An absent or `null` password keeps the stored one, but only when the SSID is
@@ -285,7 +328,7 @@ ever been taken, which is not the same as a room with no networks in it.
 `POST /mode` takes `{"mode": "normal"|"edit"}`; edit mode falls back to normal
 after 60 s without a client. `POST /identify` and `POST /factory_reset` take no
 body and refuse one with `unexpected_body`. All three answer `204`. A factory
-reset erases NVS and LittleFS, issues a new device token, answers, and reboots.
+reset erases NVS and LittleFS, rotates authentication state, answers, and reboots.
 
 ### `POST /ota/upload`
 
@@ -331,13 +374,15 @@ access logs, and requiring a header would exclude the browser WebSocket API. The
 client authenticates with its first frame, within five seconds:
 
 ```json
-{"type": "auth", "token": "<32-character device token>"}
+{"type": "auth", "token": "<32-character session or External API credential>"}
 ```
 
-`{"type":"auth_ok"}` is followed by the retained log backlog and a current
-`status` frame. A bad token, a malformed first frame or silence for five seconds
-gets `{"type":"auth_invalid"}` and a 1008 close. Nothing else is accepted before
-`auth_ok`.
+With a device-session credential, `{"type":"auth_ok"}` is followed by the
+retained log backlog and a current `status` frame. An External API key receives
+only `auth_ok` and direct-provider `action` frames after it attaches; it cannot
+receive logs, status or editor events. A bad credential, a malformed first frame
+or silence for five seconds gets `{"type":"auth_invalid"}` and a 1008 close.
+Nothing else is accepted before `auth_ok`.
 
 Device → client:
 
@@ -368,8 +413,8 @@ does not disconnect a diagnostics client that is otherwise healthy.
 ## The direct provider
 
 `direct` is how anything that is not Home Assistant drives the same components:
-a shell script, a Node-RED flow, a test fixture. It is always present, needs no
-credentials beyond the device token, and is the reference adapter for the
+a shell script, a Node-RED flow, a test fixture. It is always present, uses a
+named External API key created by an administrator, and is the reference adapter for the
 provider contract — there is no broker, callback URL or discovery protocol in
 it, deliberately.
 
@@ -390,7 +435,7 @@ store:
 
 ```bash
 curl -sS -X POST http://192.168.1.42/api/v1/direct/state \
-     -H "Authorization: Bearer $SLATE_TOKEN" \
+     -H "Authorization: Bearer $SLATE_API_KEY" \
      -H 'Content-Type: application/json' \
      -d '{"resource":"living-room","kind":"light","name":"Living room",
           "available":true,"state":{"power":"on","brightness":62},
@@ -403,7 +448,7 @@ id, which is also the bound that stops a LAN client filling PSRAM),
 `409 kind_mismatch` (the tile expects a different kind), `400 invalid_state`.
 None of them disturbs the last confirmed value.
 
-`tools/direct/publish.sh` is this request with the token kept out of the process
+`tools/direct/publish.sh` is this request with the key kept out of the process
 list.
 
 **3. Answer actions over the WebSocket.** One authenticated client attaches:
@@ -436,8 +481,10 @@ light and every tap on that tile round-trips through it.
 - **No HTTPS.** A self-signed certificate on an ESP32 is a worse experience than
   its absence on a local network, and the threat model here is a LAN.
 - **No accounts, no cloud, no telemetry.** The browser talks to the device.
-- **No rate limiting or origin allow-list** until a concrete scenario needs one.
-- **No credential ever comes back out.** Not the device token, not the Home
-  Assistant token, not the WiFi passphrase — and the passphrase never enters the
-  configuration document either, because that document is something people
-  export, share and import.
+- **No general API rate limiting or origin allow-list** until a concrete
+  scenario needs one. PIN attempts are rate-limited separately.
+- **Upstream credentials only go in.** The Home Assistant token and WiFi
+  passphrase are never returned — and the passphrase never enters the
+  configuration document either. The two intentional credential responses are
+  narrow: `/session` returns the internal credential to the current page, and a
+  newly created External API key is returned once.

@@ -1,10 +1,10 @@
 /*
  * The editor shell and visual dashboard editor (design.md §10).
- * Pairing and connection state stay here beside #32's draft, preview and
+ * Session and connection state stay here beside #32's draft, preview and
  * publication lifecycle so a reconnect cannot silently publish stale work.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   ApiError,
@@ -16,11 +16,11 @@ import {
 } from './lib/api'
 import { deviceAnswersAt, mdnsOrigin, servedByDevice } from './lib/discovery'
 import { DeviceSocket, type ConnectionState, type LogFrame, type StatusFrame } from './lib/socket'
-import { claimTokenFromUrl, forgetToken, readStoredToken, storeToken } from './lib/token'
 import { DevicePanel } from './ui/DevicePanel'
+import { IntegrationsDialog } from './ui/IntegrationsDialog'
 import { LogPanel, type LogLine } from './ui/LogPanel'
-import { Pairing } from './ui/Pairing'
 import { TopBar } from './ui/TopBar'
+import { Unlock } from './ui/Unlock'
 import { Unreachable } from './ui/Unreachable'
 import { Workspace } from './ui/Workspace'
 
@@ -30,13 +30,12 @@ const LOG_LIMIT = 400
 /** `GET /status` carries what the 15 s heartbeat does not: uptime, reset reason, storage. */
 const STATUS_POLL_MS = 30000
 
-type Phase = 'starting' | 'pairing' | 'ready' | 'unreachable'
+type Phase = 'starting' | 'unlock' | 'ready' | 'unreachable'
 
 export function App() {
-  const [token, setToken] = useState<string | null>(() => claimTokenFromUrl() ?? readStoredToken())
+  const [token, setToken] = useState<string | null>(null)
   const [phase, setPhase] = useState<Phase>('starting')
-  const [pairingError, setPairingError] = useState<string | null>(null)
-  const [pairingNotice, setPairingNotice] = useState<string | null>(null)
+  const [unlockError, setUnlockError] = useState<string | null>(null)
   const [info, setInfo] = useState<DeviceInfo | null>(null)
   const [status, setStatus] = useState<DeviceStatus | null>(null)
   const [heartbeat, setHeartbeat] = useState<StatusFrame | null>(null)
@@ -53,6 +52,7 @@ export function App() {
   const [mode, setMode] = useState<'normal' | 'edit'>('normal')
   const [logs, setLogs] = useState<LogLine[]>([])
   const [movingTo, setMovingTo] = useState<string | null>(null)
+  const [integrationsOpen, setIntegrationsOpen] = useState(false)
 
   const socketRef = useRef<DeviceSocket | null>(null)
   const logSequence = useRef(0)
@@ -78,12 +78,11 @@ export function App() {
     })
   }, [])
 
-  /* --- Pairing ---------------------------------------------------------- */
+  /* --- Browser session -------------------------------------------------- */
 
   /*
-   * `GET /info` is the one route that answers without a token (§4.1), so it is
-   * both the reachability check and what the pairing view has to show: a panel
-   * nobody has paired with yet can still say which panel it is.
+   * `GET /info` answers before a session exists, so it is both the
+   * reachability check and what the PIN view has to show.
    */
   const loadInfo = useCallback(async (): Promise<DeviceInfo | null> => {
     try {
@@ -97,48 +96,45 @@ export function App() {
   }, [client])
 
   /*
-   * A token is accepted only after the device has answered with it — the
-   * alternative is an editor that looks paired and fails on the first request
-   * that matters.
-   *
-   * "Refused" and "did not answer" are separate outcomes and not one failure,
-   * because only the first is about the token. A panel too busy to answer
-   * `/status` for five seconds would otherwise throw away a credential that
-   * was never wrong, and send somebody to look for a QR code they do not need.
+   * The API still uses a high-entropy device token internally, but it is never
+   * shown, put in a URL or persisted by the browser. A new page load exchanges
+   * the optional administrator PIN for an in-memory session credential.
    */
-  const admit = useCallback(
-    async (candidate: string): Promise<'paired' | 'refused' | 'silent'> => {
-      setPairingNotice(null)
+  const startSession = useCallback(
+    async (pin?: string): Promise<boolean> => {
+      setUnlockError(null)
       try {
-        setStatus(await client(candidate).status())
+        const session = await client(null).session(pin)
+        setStatus(await client(session.token).status())
+        setToken(session.token)
+        setPhase('ready')
+        return true
       } catch (error) {
         if (error instanceof ApiError && error.isUnauthorized) {
-          setPairingError('The panel does not know that token. Scan the pairing QR again.')
-          return 'refused'
+          setUnlockError('That PIN is not correct.')
+          setPhase('unlock')
+          return false
         }
-        setPairingError('The panel did not answer. Check that it is on the network.')
-        return 'silent'
+        if (error instanceof ApiError && error.status === 429) {
+          setUnlockError('Too many attempts. Wait 30 seconds and try again.')
+          setPhase('unlock')
+          return false
+        }
+        setPhase('unreachable')
+        return false
       }
-
-      storeToken(candidate)
-      setToken(candidate)
-      setPairingError(null)
-      setPhase('ready')
-      return 'paired'
     },
     [client],
   )
 
-  const unpair = useCallback(() => {
-    if (dirtyRef.current && !window.confirm('Discard unpublished changes and unpair this browser?')) {
+  const lock = useCallback(() => {
+    if (dirtyRef.current && !window.confirm('Discard unpublished changes and lock the editor?')) {
       return
     }
     previewSequence.current += 1
     socketRef.current?.setMode('normal')
     socketRef.current?.stop()
     socketRef.current = null
-    forgetToken()
-    setPairingNotice(null)
     setToken(null)
     setStatus(null)
     setHeartbeat(null)
@@ -151,7 +147,9 @@ export function App() {
     setMode('normal')
     modeRef.current = 'normal'
     setLogs([])
-    setPhase('pairing')
+    setUnlockError(null)
+    setIntegrationsOpen(false)
+    setPhase('unlock')
   }, [])
 
   /**
@@ -165,23 +163,16 @@ export function App() {
     if (fetched === null) {
       return
     }
-    if (token === null) {
-      setPhase('pairing')
+    if (fetched.authentication === 'pin') {
+      setPhase('unlock')
       return
     }
-    const outcome = await admit(token)
-    if (outcome === 'refused') {
-      setPhase('pairing')
-    } else if (outcome === 'silent') {
-      /* The token is kept: the panel not answering says nothing about it. */
-      setPhase('unreachable')
-    }
-  }, [admit, loadInfo, token])
+    await startSession()
+  }, [loadInfo, startSession])
 
   useEffect(() => {
     void open()
-    /* Deliberately once, at start-up. Re-pairing goes through admit(), which
-     * sets the phase itself, and the retry button calls open() directly. */
+    /* Deliberately once, at start-up. The retry button calls open() directly. */
   }, [])
 
   /* --- The live connection (§4.2) --------------------------------------- */
@@ -195,8 +186,10 @@ export function App() {
       onState: (state) => {
         setConnection(state)
         if (state === 'unauthorized') {
-          setPairingError('The panel refused the token. Scan the pairing QR again.')
-          setPhase('pairing')
+          setToken(null)
+          setUnlockError('The session ended. Enter the administrator PIN again.')
+          setPhase(info?.authentication === 'pin' ? 'unlock' : 'starting')
+          if (info?.authentication !== 'pin') void open()
         }
         if (state !== 'online') {
           /* The panel returns to normal 60 s after the pings stop (§4.2), so
@@ -247,7 +240,7 @@ export function App() {
       socket.stop()
       socketRef.current = null
     }
-  }, [phase, token, client, acceptDeviceConfig])
+  }, [phase, token, client, acceptDeviceConfig, info, open])
 
   /* --- What the heartbeat does not carry -------------------------------- */
 
@@ -286,13 +279,13 @@ export function App() {
       .catch(() => undefined)
   }, [phase, token, client, acceptDeviceConfig])
 
-  /* --- §4.3's fallback to the mDNS name --------------------------------- */
+  /* --- Fallback to the mDNS name ---------------------------------------- */
 
   /*
    * The address in the bookmark stopped answering. The panel advertises
    * `slate-<mac6>.local` for exactly this, so the editor asks that name whether
-   * the same panel is there and moves the page — carrying the token, because
-   * the name is a different origin with a different localStorage.
+   * the same panel is there and moves the page. The new origin starts its own
+   * session, asking for the PIN again when one is configured.
    */
   useEffect(() => {
     const name = info?.name
@@ -314,8 +307,7 @@ export function App() {
       void deviceAnswersAt(origin, name).then((answered) => {
         if (answered && !cancelled) {
           setMovingTo(origin)
-          const target = token === null ? origin : `${origin}/#t=${encodeURIComponent(token)}`
-          window.location.assign(target)
+          window.location.assign(origin)
         }
       })
       /* Not immediately: §9.4's first reconnect attempt is a second away, and
@@ -327,7 +319,7 @@ export function App() {
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [phase, connection, dirty, info, token, movingTo])
+  }, [phase, connection, dirty, info, movingTo])
 
   /* --- Edit mode (§6.5) -------------------------------------------------- */
 
@@ -347,21 +339,20 @@ export function App() {
 
   const identifyPanel = useCallback(async () => {
     if (token === null) {
-      throw new Error('not paired')
+      throw new Error('no session')
     }
     await client(token).identify()
   }, [client, token])
 
   const factoryReset = useCallback(async () => {
     if (token === null) {
-      throw new Error('not paired')
+      throw new Error('no session')
     }
     await client(token).factoryReset()
 
     previewSequence.current += 1
     socketRef.current?.stop()
     socketRef.current = null
-    forgetToken()
     setToken(null)
     setInfo(null)
     setStatus(null)
@@ -373,11 +364,9 @@ export function App() {
     setMode('normal')
     modeRef.current = 'normal'
     setLogs([])
-    setPairingError(null)
-    setPairingNotice(
-      "Factory reset complete. Follow the panel's network setup screen to reconnect it to Wi-Fi, then scan the new pairing QR.",
-    )
-    setPhase('pairing')
+    setUnlockError(null)
+    setIntegrationsOpen(false)
+    setPhase('unreachable')
   }, [client, token])
 
   const changeDraft = useCallback((next: Config) => {
@@ -554,6 +543,21 @@ export function App() {
           id: providerStatus.id,
           status: providerStatus.status,
         })) ?? [])
+  const integrationClient = useMemo(
+    () => (token === null ? null : client(token)),
+    [client, token],
+  )
+
+  const integrationChanged = useCallback(() => {
+    if (token === null) return
+    /* The heartbeat may still contain the provider state from before the
+     * integration changed. Fall back to a fresh status response immediately. */
+    setHeartbeat(null)
+    void client(token)
+      .status()
+      .then(setStatus)
+      .catch(() => undefined)
+  }, [client, token])
 
   /* --- Views ------------------------------------------------------------- */
 
@@ -574,8 +578,8 @@ export function App() {
     return <Unreachable movingTo={null} onRetry={retry} />
   }
 
-  if (phase === 'pairing') {
-    return <Pairing info={info} error={pairingError} notice={pairingNotice} onSubmit={admit} />
+  if (phase === 'unlock') {
+    return <Unlock info={info} error={unlockError} onSubmit={startSession} />
   }
 
   return (
@@ -597,7 +601,8 @@ export function App() {
         onPublish={() => void publishDraft()}
         onDiscard={discardDraft}
         onToggleMode={toggleMode}
-        onUnpair={unpair}
+        onOpenIntegrations={() => setIntegrationsOpen(true)}
+        onLock={info?.authentication === 'pin' ? lock : undefined}
       />
       <div className="shell__body">
         <Workspace
@@ -625,6 +630,14 @@ export function App() {
           <LogPanel lines={logs} connection={connection} />
         </aside>
       </div>
+      {integrationsOpen && integrationClient !== null ? (
+        <IntegrationsDialog
+          client={integrationClient}
+          providers={providers}
+          onChanged={integrationChanged}
+          onClose={() => setIntegrationsOpen(false)}
+        />
+      ) : null}
     </div>
   )
 }

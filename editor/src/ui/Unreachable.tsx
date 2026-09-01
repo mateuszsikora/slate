@@ -14,7 +14,7 @@ interface Props {
 
 export function Unreachable({ movingTo, onRetry }: Props) {
   return (
-    <main className="pairing">
+    <main className="access-view">
       <div className="card">
         <h1 className="card__title">
           {movingTo === null ? 'The panel is not answering' : 'Found it — moving over'}

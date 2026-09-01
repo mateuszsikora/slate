@@ -211,23 +211,31 @@ Upgrading older configurations (an in-firmware migrator that rewrites and persis
 
 ## 4. Device API (contract v1)
 
-Base: `http://<ip>/api/v1`. Everything except `/info` requires `Authorization: Bearer <device_token>`, unless the narrow setup-access-point exception in section 4.3 applies.
+Base: `http://<ip>/api/v1`. `/info` and `/session` are the public browser bootstrap; every other route requires the in-memory device-session credential unless the route explicitly accepts a scoped External API key.
 
 ### 4.1 HTTP
 
 | Method | Path               | Description |
 |--------|--------------------|-------------|
-| GET    | `/info`            | model, firmware version, `schema_max`, name, available themes, pairing state, current network state. No auth. |
+| GET    | `/info`            | model, firmware version, `schema_max`, name, available themes, authentication mode, current network state. No auth. |
+| POST   | `/session`         | open an editor session with the optional administrator PIN; returns the internal bearer credential to the current page only |
 | GET    | `/config`          | current UI configuration |
 | PUT    | `/config`          | replace configuration; validates, rebuilds the UI, persists. With `?transient=1` (edit mode only) the rebuild happens in RAM and nothing is written to flash — this is what live preview uses, so a drag session does not wear the flash. |
 | POST   | `/config/validate` | validate without saving — `204` when valid, detailed `400` when invalid |
 | GET    | `/providers`       | available providers: id, status and resource count |
 | GET    | `/resources?provider=<id>` | normalized resources available from one provider; used by the picker |
-| POST   | `/direct/state`    | publish one normalized resource snapshot through the direct provider |
+| POST   | `/direct/state`    | publish one normalized resource snapshot through the External API (`direct`) provider; accepts a scoped integration key |
+| GET    | `/ha`              | whether HA is configured and its URL; never returns the token |
 | POST   | `/ha`              | configure the HA provider; connection is tested before saving |
+| DELETE | `/ha`              | disconnect HA and erase its URL and token |
 | GET    | `/ha/discover`     | discover local HA instances over mDNS; manual URL entry remains available |
+| POST   | `/ha/catalog`      | start one editor-only HA catalog relay stage (`entities`, `devices`, `areas` or `states`); returns a request id |
+| GET    | `/ha/catalog?request=<id>` | poll and consume the raw HA result for one catalog relay stage |
+| GET    | `/integration-keys` | list non-secret External API key metadata |
+| POST   | `/integration-keys` | create a named External API key; the plaintext is returned once |
+| DELETE | `/integration-keys?id=<id>` | revoke one External API key and close active integration WebSockets |
 | GET    | `/wifi/scan`       | nearby networks: `ssid`, `rssi`, `channel`, `auth`. Cached — see section 9.2 |
-| POST   | `/wifi`            | set station credentials and, optionally, the IPv4 addressing; persist, then apply. Answers before the result is known (section 9.3) |
+| POST   | `/wifi`            | set station credentials and, optionally, IPv4 addressing, setup-access-point password and administrator PIN; persist, then apply. Answers before the result is known (section 9.3) |
 | DELETE | `/wifi`            | forget the credentials and raise the setup access point |
 | GET    | `/status`          | network and provider states, RSSI, uptime, free heap, reset reason, reboot counter, resource count |
 | POST   | `/mode`            | `{"mode": "normal"\|"edit"}` |
@@ -271,6 +279,13 @@ with `unexpected_body`. Identify can also return `503 display_unavailable`.
 A successful factory reset erases NVS and LittleFS, issues a new device token,
 answers, and then reboots; an incomplete best-effort reset returns
 `500 reset_failed` and still reboots into the only supported post-reset state.
+A concurrent reset request returns `409 reset_in_progress`.
+
+`POST /wifi` accepts an optional `setup_password` alongside the station
+credentials. Omitting it preserves the recovery network's current security;
+an empty string makes that network open, and a non-empty value must contain
+8–63 characters. The setup page keeps this setting behind an advanced
+disclosure because an open recovery network is the residential default (§9.2).
 
 Document-wide errors and errors belonging to an identifiable tile are kept
 separate. `tile_errors` is keyed by `tile.id`, and each value is an array because
@@ -380,13 +395,13 @@ The complete M1 response shapes are:
   "schema_max": 1,
   "name": "slate-a1b2c3",
   "themes": [],
-  "pairing": "ready",
+  "authentication": "pin",
   "network": {"mode": "sta", "ssid": "home", "ip": "192.168.1.42", "sta_ssid": "home",
               "ipv4": {"mode": "dhcp"}, "last_error": null}
 }
 ```
 
-`themes` lists capabilities present in this firmware rather than work planned for a later milestone. The first capability is `midnight`; later theme ids appear only in firmware that actually contains their tokens and assets. `pairing` is `ready` when a usable device token is available and `degraded` when one is not. It does not mean that a particular browser has stored the token — the device cannot observe browser `localStorage` and does not invent a second pairing database to pretend otherwise.
+`themes` lists capabilities present in this firmware rather than work planned for a later milestone. The first capability is `midnight`; later theme ids appear only in firmware that actually contains their tokens and assets. `authentication` is `pin` when a new editor session needs the administrator PIN and `open` when anyone on the LAN may open one.
 
 ```json
 {
@@ -419,21 +434,20 @@ A transfer that stops part-way is the one outcome with no error document, becaus
 
 ### 4.2 WebSocket `/api/v1/ws`
 
-Event channel for the editor, remote diagnostics and direct-provider actions. The HTTP upgrade does not carry a
-credential: putting the device token in the WebSocket query string would expose it to access
+Event channel for the editor, remote diagnostics and External API actions. The HTTP upgrade does not carry a
+credential: putting it in the WebSocket query string would expose it to browser history and access
 logs, while requiring an `Authorization` header would exclude the browser WebSocket API. The
 client therefore authenticates with its first text frame, within five seconds of the upgrade:
 
 ```json
-{"type": "auth", "token": "<32-character device token>"}
+{"type": "auth", "token": "<32-character session or External API credential>"}
 ```
 
-Success is `{"type":"auth_ok"}` followed by the retained log backlog and a current `status`
-frame. A malformed first frame or a wrong token receives `{"type":"auth_invalid"}` and a
+Success is `{"type":"auth_ok"}`. A device-session credential is followed by the retained log backlog and a current `status` frame and may use editor controls. A scoped External API key receives only direct-provider actions and may send `ping`, `provider_attach` for `direct`, and `action_result`; it cannot receive logs or status, enter edit mode, or attach another provider. A malformed first frame or a wrong token receives `{"type":"auth_invalid"}` and a
 WebSocket policy-violation close (1008). The same close is sent if no first frame arrives within
 five seconds. No other application frame is accepted before `auth_ok`.
 
-An integration client that wants to receive direct-provider actions attaches after authentication;
+An External API client that wants to receive direct-provider actions attaches after authentication;
 only one such client may be attached at a time, so two processes cannot both operate the same light.
 
 Device → client:
@@ -465,24 +479,15 @@ integration is not necessarily a physical state change.
 
 ### 4.3 Authentication
 
-A 32-character random device token is generated on first boot and stored in NVS. It reaches the browser through a QR code rendered on screen:
+The person configuring WiFi may set an optional 4–12 digit administrator PIN. With a PIN, every newly opened or refreshed editor asks for it; without one, anyone on the same LAN can open the editor. The PIN is stored only as a randomly salted PBKDF2-SHA256 hash. Five failed attempts block new attempts for 30 seconds. Changing the PIN setting rotates the internal credential and ends existing sessions. A forgotten PIN is recovered by the panel's physical factory-reset gesture.
 
-```
-http://192.168.1.42/#t=Xk7p...
-```
+Internally, a 32-character random device token still protects the HTTP API and WebSocket. `POST /session` checks the PIN, or accepts an empty request in open mode, and returns that token to the current page. The editor keeps it only in memory: it is never shown to the user, put in a URL or stored in `localStorage`. A new token is issued after `factory_reset`.
 
-The token is in the URL fragment, which a browser does not send in the HTTP
-request. The editor claims it on load, persists it in `localStorage`, and
-immediately removes it from the address bar with `history.replaceState`. This
-keeps it out of device access logs, browser history entries and subsequent
-copied URLs. Requests without it receive 401. The editor continues to accept
-the old `?t=` form so pairing links generated by earlier firmware keep working.
-A new token is issued after `factory_reset` or on explicit request from the
-device screen.
+Scripts and Node-RED never receive that administrator credential. The editor can create up to four named External API keys. Their 32-character plaintext is returned once; NVS stores only a SHA-256 digest and non-secret id/name metadata. Each key is individually revocable and is accepted only for `POST /direct/state` and the direct action-consumer WebSocket role. Revocation closes active External API WebSockets immediately. Existing device-session credentials remain accepted on those two paths for backwards compatibility and development tools.
 
-This handles device discovery and authorization in a single step. Because the stored token outlives a DHCP lease, the device also advertises itself over mDNS as `slate-<mac6>.local`; the editor falls back to it when the remembered IP stops answering, and the error screen always shows the current address. mDNS is advertised on the setup access point too, so the same name works before the panel has ever joined a network.
+The QR on the panel contains only `http://<ip>/`. The device also advertises itself over mDNS as `slate-<mac6>.local`; the editor falls back to it when the remembered IP stops answering, and the new origin starts a new session. mDNS is advertised on the setup access point too, so the same name works before the panel has ever joined a network.
 
-There is one exception to the token, and it is narrow. While the setup access point is up, the setup page itself and the three endpoints it needs — `GET /wifi/scan`, `POST /wifi`, `GET /info` — are served **without a token, on the access point interface only**. Everything else answers 401 there exactly as it does on the station interface. The reasoning is that a token the browser must be told, when the browser has just joined an open network whose name is printed on the same screen as the token, is a step that buys nothing and costs the one flow that must not have steps. The exposure this accepts is bounded and worth stating plainly: someone within radio range can move the panel to a different network. They cannot read provider credentials, publish direct-provider state, write a configuration or upload firmware. Section 12 carries the same point from the security side.
+While the setup access point is up, the setup page and the endpoints it needs — `GET /wifi/scan`, `POST /wifi`, `GET /info` — are served **without a token, on the access point interface only**. Everything else answers 401 there. Someone within radio range can therefore move the panel to a different network and choose its future PIN; they cannot read provider credentials, publish direct-provider state, write a dashboard or upload firmware. Setting the optional WPA2 setup-network password narrows that exposure in shared buildings.
 
 ## 5. Provider integrations
 
@@ -541,7 +546,7 @@ Unknown state fields and capabilities are ignored. An unavailable resource keeps
 ]}
 ```
 
-`GET /resources?provider=<id>` returns this normalized vocabulary for the picker as `{"resources":[...]}`. The HA provider can list its full discovered catalog; `direct` lists only resources already referenced and published since boot. A provider-specific detail may be added under an `extensions` object namespaced by provider, but components and the generic picker cannot depend on it. Missing, unknown and unconfigured provider queries return `400 provider_required`, `404 provider_not_found` and `409 provider_unconfigured` respectively.
+`GET /resources?provider=<id>` returns this normalized vocabulary for the picker as `{"resources":[...]}`. `direct` lists only resources already referenced and published since boot. Home Assistant discovery uses the editor-only relay in §5.7 because assembling its full catalog on the ESP32 would consume memory in proportion to the whole HA instance. A provider-specific detail may be added under an `extensions` object namespaced by provider, but components and the generic picker cannot depend on it. Missing, unknown and unconfigured provider queries return `400 provider_required`, `404 provider_not_found` and `409 provider_unconfigured` respectively.
 
 ### 5.3 Actions and optimistic state
 
@@ -556,13 +561,13 @@ The action bus validates the action against the resource capabilities and routes
 
 Optimistic updates are mandatory. A valid action immediately applies its expected normalized state and marks the tile pending with a subtle pulse. A matching real state update confirms it. Explicit failure or no confirmation within 3 s reverts to the last confirmed state and shows a brief error. A provider reporting success means only that it accepted the request; it does not confirm physical state. Late confirmations become ordinary state updates, duplicate results are ignored, and a real update that disagrees with the optimistic value wins immediately.
 
-### 5.4 Direct provider
+### 5.4 External API (`direct`) provider
 
-The direct provider makes the neutral contract usable without Home Assistant and proves that provider neutrality is more than a mock. A script or Node-RED flow first pushes the configuration, then publishes complete snapshots for its bound resource ids:
+The stable provider id is `direct`; the user-facing editor calls it **External API** so its transport direction is not mistaken for a generic HTTP polling engine. It makes the neutral contract usable without Home Assistant and proves that provider neutrality is more than a mock. A script or Node-RED flow binds a resource in the editor, publishes the dashboard, then publishes complete snapshots for that resource id:
 
 ```http
 POST /api/v1/direct/state
-Authorization: Bearer <device_token>
+Authorization: Bearer <external_api_key>
 Content-Type: application/json
 ```
 
@@ -578,7 +583,7 @@ After validation and enqueueing, the endpoint returns `202 {"resource":"living-r
 
 To receive actions, one authenticated device-WebSocket client sends `{"type":"provider_attach","provider":"direct"}`. A second attachment receives `{"type":"error","error":"provider_busy"}`. An attachment that names no provider, or one this firmware does not implement, is refused in the same shape with §5.2's `provider_required` and `provider_not_found` — the question is the same one `GET /resources` asks, so the answer keeps the same name rather than growing a second vocabulary for the WebSocket. Re-attaching is not an error for the client that already holds the attachment; the rule is that two processes cannot both operate the same light, and a repeat from the one that holds it is not a second process. There is deliberately no acknowledgement frame: attaching moves the provider from `degraded` to `online`, so the `status` frame that follows carries the fact a consumer was asking about. The device then sends the `action` event from §4.2. `action_result` with `success:false` and an optional stable `error` string reverts immediately; `success:true` acknowledges delivery, and the next published snapshot confirms state. If the attached client disconnects, the provider becomes `degraded`: published state remains valid, while new actions fail immediately rather than waiting three seconds.
 
-This path deliberately has no broker, callback URL, persistence or discovery protocol. It is sufficient for scripts, test fixtures and Node-RED, and is the reference adapter for M2. A richer standard such as MQTT is added only when a real integration needs it.
+This path deliberately has no broker, callback URL, persistence, arbitrary HTTP polling or discovery protocol. The Integrations view explains the direction, creates/revokes scoped keys and gives a concrete publish example. A future REST polling source is a separate provider because intervals, HTTP credentials, JSON selection and transformation are a different contract rather than options on this one. MQTT is likewise added only when a real integration needs it.
 
 ### 5.5 Home Assistant connection
 
@@ -609,21 +614,27 @@ credential boundary, not merely the first hop toward one.
 A full configuration-work queue returns `503 ha_busy`, and an unexpected
 manager handoff failure after persistence returns `500 reload_failed`.
 
+`GET /ha` returns `{"configured":true,"url":"..."}` or the same shape with
+`configured:false` and a null URL. It never returns the token. `DELETE /ha`
+erases both values, tears down the live connection and returns `204`.
+
 Reconnect with exponential backoff: 1 s → 2 → 4 → 8 → 15 → 30 s (ceiling). `auth_invalid` is not retried forever: it moves the provider to `error` until credentials change. A network or HA restart moves it through `offline` and `connecting` while the last confirmed states remain visible as stale.
 
 ### 5.6 Home Assistant state mapping
 
 Use `subscribe_entities` with the explicit HA entity ids in the HA provider's subscription set — never the full instance state. It returns compressed diffs, which keeps bandwidth and parsing cost negligible at typical dashboard sizes. The adapter expands those diffs, maps HA domains, states and attributes into §5.2, and only then updates the common store.
 
-Re-subscription follows any successful `PUT /config` that changes the HA binding set and every reconnect. The existing UI tree does not care why a fresh snapshot arrived.
+Re-subscription follows any successful `PUT /config` that changes the HA binding set and every reconnect. With no HA bindings, firmware deliberately sends no subscription: Home Assistant treats a missing or empty `entity_ids` filter as the full instance. The existing UI tree does not care why a fresh snapshot arrived.
 
 ### 5.7 Home Assistant resource picker
 
-`GET /resources?provider=ha` requires `config/entity_registry/list_for_display`, `config/area_registry/list`, `config/device_registry/list` and `get_states`. None needs an administrator — S-4 measured the underlying registry reads from a `system-users` and a `system-read-only` token and got payloads byte-identical to the administrator's. Only mutating registry commands are gated. `list_for_display` is used instead of the full entity registry: on the measured instance it was 83 KB rather than 635 KB and had already removed disabled entities that cannot back a tile.
+Opening the HA picker makes the browser request four relay stages in sequence: `config/entity_registry/list_for_display`, `config/device_registry/list`, `config/area_registry/list` and `get_states`. None needs an administrator — S-4 measured the underlying registry reads from a `system-users` and a `system-read-only` token and got payloads byte-identical to the administrator's. Only mutating registry commands are gated. `list_for_display` is used instead of the full entity registry: on the measured instance it was 83 KB rather than 635 KB and had already removed disabled entities that cannot back a tile.
 
-The normalized `name` comes from the already-composed `friendly_name` in live state, not from the sparse registry name fields. HA domain and state attributes map to `kind`, state and capabilities inside the adapter. This discovery fetch is deliberately broader than the runtime subscription in §5.6: it happens for the picker, not continuously.
+For each stage, `POST /ha/catalog` queues one command on the existing authenticated HA WebSocket and returns `202 {"request":N}`. The browser polls `GET /ha/catalog?request=N`: pending work remains `202`, success returns the original HA result frame, and reading the result consumes it. Only one stage may be in flight, and an unconsumed stage expires after 30 seconds. The relay is deliberately narrow: callers select one of four fixed commands and cannot use it as a generic authenticated HA proxy.
 
-The picker degrades on **failure, not on privilege**: firmware issues the registry commands and falls back if they fail, for whatever reason — an older or unusual instance, a transport error, a future Home Assistant that tightens this. It does not predict a permission in advance. `get_states` still yields a flat normalized list with no `area`, so registry failure changes grouping rather than the public API shape.
+Firmware reassembles each WebSocket message into a PSRAM buffer but treats a catalog result as opaque JSON: it reads only the top-level command id, hands the raw response to HTTP, and neither builds a cJSON tree nor retains a normalized catalog. The browser owns the four decoded payloads, joins them and creates the provider-neutral picker entries. The normalized `name` comes from the already-composed `friendly_name` in live state, not from the sparse registry name fields. This discovery fetch is deliberately broader than the runtime subscription in §5.6: it happens on demand while configuring, not at connection time or continuously.
+
+The picker degrades on **failure, not on privilege**: the browser falls back when a registry stage fails, for whatever reason — an older or unusual instance, a transport error, a future Home Assistant that tightens this. It does not predict a permission in advance. `get_states` is required and still yields a flat normalized list with no `area`, so registry failure changes grouping rather than the picker vocabulary.
 
 This path must be implemented, not assumed away — and it is needed more often than that reads. On the instance S-4 measured, 63 % of registry entries resolve to no area at all, so the flat ungrouped list is what the picker shows for the majority of a real installation regardless of permissions. It is a first-class presentation, not an error state, and the editor (§10) must make it look deliberate.
 
@@ -637,7 +648,7 @@ entity_registry.area_id
 
 Zero of 1 045 entities on the measured instance carried `area_id` directly; all 387 area assignments came from the device. Omitting the device registry therefore produces a null normalized `area` for every entity and looks like a generic-picker bug.
 
-Registries are fetched once per connection and cached in PSRAM, not NVS. The registry, device and state payloads together are hundreds of kilobytes on the wire and several times that once parsed, which does not fit internal RAM.
+Catalog data is never written to NVS and is not cached by firmware. During configuration, the browser holds one assembled catalog for the editor session while the panel holds at most one raw HA result in PSRAM. Every tile picker reuses that browser cache immediately; after five minutes it may start one deduplicated refresh in the background, without making the picker wait. Reconfiguring or disconnecting HA invalidates the cache. After the editor closes, the browser catalog disappears and the firmware stores only the dashboard's selected ids; §5.6 then requests small state diffs for exactly those ids. The registry, device and state payloads together are hundreds of kilobytes on the wire and several times that once parsed, which is precisely why the join belongs in the browser.
 
 ### 5.8 Home Assistant action mapping
 
@@ -665,7 +676,7 @@ All LVGL access happens on one task; API handlers and every provider post normal
 - Bounce buffer in internal SRAM — required, otherwise WiFi activity causes visible artifacts. The artifact is worth naming, because no counter on the CPU side shows it: the picture rolls vertically, with the bottom of the screen appearing at the top. That is the DMA losing its race to read the framebuffer out of PSRAM while the radio and the renderer compete for the same bus. S-2 measured frames as 4 % *cheaper* without the bounce buffer, and the display unusable.
 - LVGL draw buffer: ~1/10 screen, internal SRAM — but only in a single-framebuffer configuration, which is not the one above. LVGL wants two such buffers so rendering and flushing overlap, and 2 × 76 800 B does not fit: S-2 measured 104 167 B of internal DMA-capable memory free once WiFi is up. Size any internal draw buffer from what is actually free after `esp_wifi_start()`, not from the screen.
 - LVGL heap: 2 MB in PSRAM — the entire widget tree budget.
-- State store: sized from the configuration, ~256 B per bound resource plus kind-specific state. Even a config saturating the 64 KB limit stays in the tens of KB. Discovery catalogs used by the editor live separately in PSRAM and may be much larger.
+- State store: sized from the configuration, ~256 B per bound resource plus kind-specific state. Even a config saturating the 64 KB limit stays in the tens of KB. During HA discovery, one opaque WebSocket result may temporarily occupy PSRAM; the browser, not the panel, owns the assembled catalog.
 - Configuration: ≤64 KB, parsed into structs then freed.
 - The setup access point (§9) costs internal SRAM where there is least of it. S-2 measured 104 167 B of internal DMA-capable memory free with the station alone; `WIFI_MODE_APSTA` adds a second interface's buffers on top. It is raised on demand and torn down as soon as the station associates, never left running as a permanent second interface. `APSTA` is the intended mode and §9.4 depends on it: the station must keep trying while the access point is up, which is what lets an unattended panel recover on its own. If it does not fit, that is a budget problem to solve — not a behaviour to drop; §9.4 names the degraded shape it may not fall below.
 
@@ -717,7 +728,7 @@ Rebuilds must be memory-idempotent. After 500 cycles the free LVGL heap returns 
 
 | Mode    | Behaviour |
 |---------|-----------|
-| setup   | the device runs its own access point and serves the setup page. The screen shows the SSID, the password if one is set, the address and a WiFi join QR; the pairing QR appears after the station connects — section 9 |
+| setup   | the device runs its own access point and serves the setup page. The screen shows the SSID, the password if one is set, the address and a WiFi QR — section 9 |
 | normal  | dashboard; touch emits semantic actions for bound resources |
 | edit    | top bar reads "edit mode", touch emits no provider actions, live preview of changes |
 | offline | one or more providers unreachable: only their tiles are dimmed, indicators identify them, last known values remain visible but clearly stale |
@@ -815,15 +826,15 @@ This replaces the on-screen WiFi wizard the design originally called for. A phon
 ### 9.1 The flow
 
 1. Flash from the browser using ESP Web Tools (Chromium-based browsers).
-2. The device boots, finds no credentials in NVS, and comes up in setup mode. The screen shows the access point's SSID, its password if one is set, the address to open, and a `WIFI:` QR that joins the network in one scan. This is a different QR from the pairing one of §4.3 — that one carries a URL and a token, and there is nothing to pair with until there is a network.
+2. The device boots, finds no credentials in NVS, and comes up in setup mode. The screen shows the access point's SSID, its password if one is set, the address to open, and a `WIFI:` QR that joins the network in one scan.
 3. Join `slate-<mac6>` from a phone or laptop and open `http://192.168.4.1`.
-4. The setup page lists nearby networks. Pick one, type the password, submit.
-5. The panel reports the outcome **on its own screen** — see §9.3 for why the browser cannot. On success it shows the station address and the pairing QR with the device token; on failure the access point comes back with the reason.
-6. Scanning the pairing QR, or typing the address, opens the editor.
-7. The editor asks which provider to use. `direct` needs no setup; choosing Home Assistant asks for its URL and long-lived token, and `POST /ha` verifies the connection before persisting.
+4. The setup page lists nearby networks. Pick one, type its password, optionally choose an administrator PIN, and submit.
+5. The panel reports the outcome **on its own screen** — see §9.3 for why the browser cannot. On success it shows the station address and a QR containing only that URL; on failure the access point comes back with the reason.
+6. Scanning the URL QR, or typing the address, opens the editor. It asks for the PIN when one was configured and opens immediately otherwise.
+7. The editor opens Integrations. Home Assistant offers discovery, manual URL and long-lived-token entry and verifies the connection before persisting. External API explains its push-state/action-return direction and creates a named, scoped key.
 8. The provider's resource picker populates and the first page can be arranged.
 
-Steps 6–8 are M6 and later. From M1 the setup page carries the WiFi form and nothing else; it grows into the editor's pairing view rather than being replaced by it.
+Steps 6–8 are M6 and later. From M1 the setup page carries the WiFi form and nothing else; the editor replaces it on the station interface.
 
 ### 9.2 The access point
 
@@ -1009,14 +1020,16 @@ Configuration and tokens must survive updates. They live in NVS and LittleFS, ou
 Minimal by design — the device sits on a LAN, not on the internet.
 
 - Provider credentials live only in NVS and are never returned by the API. The Home Assistant token is the first such credential and carries the account's authority.
-- The device token guards write endpoints, direct-provider state publication and provider attachment on the WebSocket. Possessing it grants configuration and control access to the panel; it is a secret, not merely a pairing convenience.
+- The device token guards administrative endpoints and the full editor WebSocket. It is an internal transport credential obtained by the current editor page through `/session`, never a user-facing recovery secret.
+- Named External API keys are stored only as SHA-256 digests, shown once, individually revocable and accepted only for direct-provider state publication and its action-consumer WebSocket role. They cannot read or replace a dashboard, configure HA, receive logs, upload firmware or factory-reset the panel.
+- The optional administrator PIN is stored only as a salted PBKDF2-SHA256 hash. Open mode is explicit: anyone who can reach the panel on the LAN can control it. PIN mode rate-limits failed attempts, asks again for every new page session, and uses physical factory reset as recovery.
 - Documentation states plainly that a long-lived HA token carries full account privileges, and recommends a dedicated account in Home Assistant's **`system-users`** group. Not `system-admin`, which grants more than Slate needs, and explicitly **not `system-read-only`**, which does not work: S-4 measured that group reading every registry Slate needs while being refused `call_service`, so the panel renders a perfect dashboard on which nothing responds to a tap. The group has to be named, because "restricted" reads like "read-only" to anyone skimming. The failure is also quiet: a denied service call comes back as `home_assistant_error`, not `unauthorized`, so the HA adapter must classify it before the common optimistic update (§5.3) reverts, or every tap fails forever with no hint that the account is the cause.
 - The WiFi passphrase written by `POST /wifi` lives in NVS and is never returned by the API, and it never enters the configuration JSON — §10 makes that file something people export, import and share, and a credential does not belong in a document with those properties.
-- **The setup access point is open by default**, and the setup page on it is served without a token (§4.3). This is the one place the token rule is relaxed, and the trade is worth naming rather than discovering. What an attacker in radio range gets is the ability to move the panel to a different network. What they do not get is provider credentials, direct-provider publication/attachment, the configuration, or `/ota/upload` — those answer 401 on the access point exactly as they do on the station, and a panel moved to a hostile network still holds every secret behind a token that only the screen has shown. The threat model is a room, and the mitigation is the same one the whole pairing scheme rests on: the screen is in that room and the attacker is not. A custom build may provision the WPA2 passphrase from §9.2 when radio range extends beyond that threat model; it is then displayed on the setup screen, which is the same trade one layer down.
+- **The setup access point is open by default**, and its setup page can change WiFi and administrator-PIN settings. The threat model is a room: a WPA2 passphrase can be set when radio range extends into a shared building, and is then displayed on the setup screen beside the SSID.
 - No HTTPS on the device. A deliberate trade-off: a self-signed certificate on an ESP32 is a worse experience than its absence on a local network.
 - **`GET /coredump` (§11.3) returns memory, so it is the one endpoint whose body is not a curated document.** An ELF core dump carries task stacks, which is where a secret is on its way to or from NVS. Three things keep the two rules above true rather than approximately true. The dump is token-gated like every write, with no setup-access-point exception. `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` stays off, so `.bss`, `.data` and the heap are not in the dump — and the device token, which lives in `.bss`, is therefore not in it either. And the code paths that hold a passphrase or any provider credential on a stack zero it as soon as they are done, for this reason and with this section named at the call site; that is a habit the firmware has to keep, not a property of the endpoint. Enabling `CAPTURE_DRAM` would break the arrangement, which is a second reason it is off.
 
-Rate limiting and origin allow-lists will be added if a concrete scenario requires them.
+Origin allow-lists will be added if a concrete scenario requires them.
 
 ## 13. Spikes
 
@@ -1085,7 +1098,7 @@ M5 outranks the editor because a wall panel without a brightness schedule gets u
 | | Scope | Done when |
 |--|-------|-----------|
 | M6 | Web editor, provider/resource picker, second theme | someone unfamiliar builds a page without reading the JSON format |
-| M7 | Setup screen and portal polish, pairing QR, error mode, factory reset from the panel, static addressing (9.6) | the section 9 flow works with no cable and no ESP-IDF, for someone who has not read this document |
+| M7 | Setup screen and portal polish, editor URL QR, optional administrator PIN, error mode, factory reset from the panel, static addressing (9.6) | the section 9 flow works with no cable and no ESP-IDF, for someone who has not read this document |
 | M8 | Release OTA with manifest, prebuilt binary, browser flasher, README, enclosure files | someone without ESP-IDF gets a running panel and receives updates |
 
 M0 is a weekend. M1–M3 carry the technical risk. M4–M5 are the bulk of the hours at the lowest risk. M6–M8 are conditional — they determine whether anyone else can use this.
