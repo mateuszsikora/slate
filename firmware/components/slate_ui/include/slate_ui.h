@@ -41,8 +41,10 @@ esp_err_t slate_ui_init(void);
  * This call is synchronous. The caller retains ownership of @p config and may
  * free it as soon as the function returns. A replacement is built off-screen
  * on the LVGL task, then slate_state_bind() activates its provider-qualified
- * binding set. Only after both succeed is the new screen loaded and the old
- * tree destroyed. Any failure leaves the current tree and subscriptions live.
+ * binding set. The visible page id survives when the replacement still has it,
+ * otherwise the replacement's home_page is selected. Only after both succeed
+ * is the new screen loaded and the old tree destroyed. Any failure leaves the
+ * current tree and subscriptions live.
  */
 esp_err_t slate_ui_rebuild(const slate_config_t *config);
 
