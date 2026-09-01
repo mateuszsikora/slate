@@ -1055,7 +1055,7 @@ summary:focus-visible,
   font-size: 0.8rem;
 }
 
-/* --- Integrations ------------------------------------------------------- */
+/* --- Settings and integrations ----------------------------------------- */
 
 .dialog-backdrop {
   position: fixed;
@@ -1076,6 +1076,37 @@ summary:focus-visible,
   border: 1px solid var(--line);
   border-radius: 14px;
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+}
+
+.settings-dialog {
+  width: min(620px, 100%);
+  max-height: min(680px, calc(100vh - 48px));
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+}
+
+.settings-dialog__body {
+  display: grid;
+  gap: 14px;
+  padding: 22px;
+}
+
+.settings-dialog__field {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-dialog__field select {
+  width: 100%;
+}
+
+.settings-dialog__body p {
+  margin: 0;
+  color: var(--text-lo);
+  font-size: 0.84rem;
 }
 
 .dialog-header {
@@ -1319,7 +1350,8 @@ summary:focus-visible,
     padding: 0;
   }
 
-  .integrations-dialog {
+  .integrations-dialog,
+  .settings-dialog {
     max-height: 100vh;
     border: 0;
     border-radius: 0;

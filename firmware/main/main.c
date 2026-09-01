@@ -49,6 +49,54 @@
 
 static const char *TAG = "slate";
 
+#ifdef SLATE_TIME_SELFTEST
+typedef struct {
+    time_t epoch;
+    int month;
+    int day;
+    int hour;
+    int minute;
+    int is_dst;
+} time_case_t;
+
+static esp_err_t time_selftest(void)
+{
+    static const time_case_t CASES[] = {
+        /* Europe/Warsaw jumps 01:59 -> 03:00 at 01:00 UTC in spring. */
+        {1774745940, 3, 29, 1, 59, 0},
+        {1774746000, 3, 29, 3, 0, 1},
+        /* And repeats 02:00 after 02:59 when summer time ends. */
+        {1792889940, 10, 25, 2, 59, 1},
+        {1792890000, 10, 25, 2, 0, 0},
+    };
+
+    char previous[SLATE_TIME_ZONE_MAX_LEN];
+    strlcpy(previous, slate_time_timezone(), sizeof(previous));
+    esp_err_t err = slate_time_set_timezone("Europe/Warsaw");
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    for (size_t i = 0; i < sizeof(CASES) / sizeof(CASES[0]); ++i) {
+        struct tm local;
+        if (!slate_time_localtime(CASES[i].epoch, &local) ||
+            local.tm_mon + 1 != CASES[i].month || local.tm_mday != CASES[i].day ||
+            local.tm_hour != CASES[i].hour || local.tm_min != CASES[i].minute ||
+            local.tm_isdst != CASES[i].is_dst) {
+            ESP_LOGE(TAG, "timezone selftest case %u failed", (unsigned) i);
+            slate_time_set_timezone(previous);
+            return ESP_FAIL;
+        }
+    }
+
+    err = slate_time_set_timezone(previous);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "timezone selftest passed: Europe/Warsaw DST boundaries");
+    }
+    return err;
+}
+#endif
+
 /*
  * cJSON represents a large Home Assistant catalog as thousands of small
  * allocations. ESP-IDF's default 16 KiB external-memory threshold puts every
@@ -767,6 +815,13 @@ void app_main(void)
     start_api();
     start_ui();
     start_network();
+
+#ifdef SLATE_TIME_SELFTEST
+    esp_err_t time_test_err = time_selftest();
+    if (time_test_err != ESP_OK) {
+        ESP_LOGE(TAG, "timezone selftest failed: %s", esp_err_to_name(time_test_err));
+    }
+#endif
 
 #ifdef SLATE_BRIGHTNESS_SELFTEST
     esp_err_t brightness_test_err = slate_brightness_selftest();

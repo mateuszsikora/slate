@@ -1,7 +1,7 @@
 /*
  * IANA zone name -> POSIX TZ rule. GENERATED - do not edit.
  *
- * tools/tz/generate.sh, from tzdata 2026b.
+ * tools/tz/generate.sh, from tzdata 2026c.
  *
  * Sorted by zone name: slate_time.c binary-searches this table, and an
  * unsorted row would not fail to build, it would fail to be found.
@@ -20,14 +20,14 @@
 {"Africa/Brazzaville", "WAT-1"},
 {"Africa/Bujumbura", "CAT-2"},
 {"Africa/Cairo", "EET-2EEST,M4.5.5/0,M10.5.4/24"},
-{"Africa/Casablanca", "XXX-2<+01>-1,0/0,J365/23"},
+{"Africa/Casablanca", "<+00>0"},
 {"Africa/Ceuta", "CET-1CEST,M3.5.0,M10.5.0/3"},
 {"Africa/Conakry", "GMT0"},
 {"Africa/Dakar", "GMT0"},
 {"Africa/Dar_es_Salaam", "EAT-3"},
 {"Africa/Djibouti", "EAT-3"},
 {"Africa/Douala", "WAT-1"},
-{"Africa/El_Aaiun", "XXX-2<+01>-1,0/0,J365/23"},
+{"Africa/El_Aaiun", "<+00>0"},
 {"Africa/Freetown", "GMT0"},
 {"Africa/Gaborone", "CAT-2"},
 {"Africa/Harare", "CAT-2"},
@@ -115,7 +115,7 @@
 {"America/Denver", "MST7MDT,M3.2.0,M11.1.0"},
 {"America/Detroit", "EST5EDT,M3.2.0,M11.1.0"},
 {"America/Dominica", "AST4"},
-{"America/Edmonton", "MST7MDT,M3.2.0,M11.1.0"},
+{"America/Edmonton", "CST6"},
 {"America/Eirunepe", "<-05>5"},
 {"America/El_Salvador", "CST6"},
 {"America/Ensenada", "PST8PDT,M3.2.0,M11.1.0"},
@@ -228,7 +228,7 @@
 {"America/Whitehorse", "MST7"},
 {"America/Winnipeg", "CST6CDT,M3.2.0,M11.1.0"},
 {"America/Yakutat", "AKST9AKDT,M3.2.0,M11.1.0"},
-{"America/Yellowknife", "MST7MDT,M3.2.0,M11.1.0"},
+{"America/Yellowknife", "CST6"},
 {"Antarctica/Casey", "<+08>-8"},
 {"Antarctica/Davis", "<+07>-7"},
 {"Antarctica/DumontDUrville", "<+10>-10"},
@@ -385,7 +385,7 @@
 {"Canada/Atlantic", "AST4ADT,M3.2.0,M11.1.0"},
 {"Canada/Central", "CST6CDT,M3.2.0,M11.1.0"},
 {"Canada/Eastern", "EST5EDT,M3.2.0,M11.1.0"},
-{"Canada/Mountain", "MST7MDT,M3.2.0,M11.1.0"},
+{"Canada/Mountain", "CST6"},
 {"Canada/Newfoundland", "NST3:30NDT,M3.2.0,M11.1.0"},
 {"Canada/Pacific", "MST7"},
 {"Canada/Saskatchewan", "CST6"},

@@ -26,6 +26,7 @@ interface Props {
   onPublish: () => void
   onDiscard: () => void
   onToggleMode: () => void
+  onOpenSettings: () => void
   onOpenIntegrations: () => void
   onLock?: () => void
 }
@@ -45,6 +46,7 @@ export function TopBar({
   onPublish,
   onDiscard,
   onToggleMode,
+  onOpenSettings,
   onOpenIntegrations,
   onLock,
 }: Props) {
@@ -78,6 +80,9 @@ export function TopBar({
       </nav>
 
       <div className="topbar__controls">
+        <button type="button" className="button button--secondary" onClick={onOpenSettings}>
+          Settings
+        </button>
         <button type="button" className="button button--secondary" onClick={onOpenIntegrations}>
           Integrations
         </button>
