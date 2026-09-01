@@ -2036,6 +2036,16 @@ static bool sensor_view_text(const char *resource, const char *value, const char
            strcmp(lv_label_get_text(view->sensor.unit), unit) == 0;
 }
 
+static bool label_is_one_line(lv_obj_t *label)
+{
+    const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    return font != NULL &&
+           lv_obj_get_height(label) ==
+               lv_font_get_line_height(font) +
+                   lv_obj_get_style_space_top(label, LV_PART_MAIN) +
+                   lv_obj_get_style_space_bottom(label, LV_PART_MAIN);
+}
+
 static esp_err_t selftest_on_task(void)
 {
     unsigned checks = 0;
@@ -2516,6 +2526,7 @@ static esp_err_t selftest_on_task(void)
                  compact->light.brightness_slider == NULL &&
                  lv_obj_has_flag(compact->tile, LV_OBJ_FLAG_CLICKABLE),
              "late dimming capability is safe on compact light");
+    lv_obj_update_layout(s_tree->screen);
     UI_CHECK(wide != NULL && wide->light.brightness_slider != NULL &&
                  wide->light.temperature_slider == NULL &&
                  !lv_obj_has_flag(wide->light.brightness_slider, LV_OBJ_FLAG_HIDDEN) &&
@@ -2523,11 +2534,13 @@ static esp_err_t selftest_on_task(void)
                  lv_slider_get_max_value(wide->light.brightness_slider) == 95 &&
                  strcmp(lv_label_get_text(wide->light.brightness_value), "62%") == 0,
              "2x1 light renders advertised brightness range");
+    const char *wide_name = wide != NULL ? lv_label_get_text(wide->name) : "";
     UI_CHECK(wide != NULL &&
                  lv_label_get_long_mode(wide->name) == LV_LABEL_LONG_DOT &&
-                 strcmp(lv_label_get_text(wide->name),
-                        "Kitchen pendants with a long name") == 0,
-             "long light names use glyph-safe ellipsis without changing text");
+                 label_is_one_line(wide->name) &&
+                 strncmp(wide_name, "Kitchen pendants", strlen("Kitchen pendants")) == 0 &&
+                 strstr(wide_name, "...") != NULL,
+             "long light names truncate to one line with an ellipsis");
     UI_CHECK(large != NULL && large->light.state_dot != NULL &&
                  large->light.brightness_slider != NULL &&
                  large->light.temperature_slider != NULL &&

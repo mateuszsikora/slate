@@ -753,7 +753,7 @@ Reads normalized capabilities and hides controls the resource does not support. 
 | Size | Content | Action |
 |------|---------|--------|
 | 1×1  | position-aware icon, name | tap → `toggle` |
-| 1×2  | icon, up / stop / down buttons, position % | `open` / `stop` / `close` |
+| 1×2  | icon, name, up / stop / down buttons, position % | `open` / `stop` / `close` |
 | 2×1  | as above, horizontal | as above |
 
 Movement shows an animated indicator until the state settles.
