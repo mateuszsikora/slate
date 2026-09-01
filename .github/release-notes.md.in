@@ -1,0 +1,49 @@
+Firmware for the Waveshare ESP32-S3-Touch-LCD-7 carrying the
+**ESP32-S3-WROOM-1-N16R8** module — 16 MB of flash, 8 MB of PSRAM. The partition
+table does not fit an 8 MB module, and vendor documentation for this board
+describes one that at least some units are not, so trust the marking printed on
+the module.
+
+## Install
+
+On a panel that has never run Slate, from a Chromium-based desktop browser with
+the board on a USB cable: **[{{PAGE}}]({{PAGE}})**. No toolchain, no ESP-IDF, no
+command line. What happens after the flash is on the screen, and the walkthrough
+is in [the README](https://github.com/{{REPO}}#first-run).
+
+The same four images with `esptool` instead:
+
+```
+esptool.py --chip esp32s3 write_flash \
+  0x0     bootloader-{{VERSION}}.bin \
+  0x8000  partition-table-{{VERSION}}.bin \
+  0x1d000 ota-data-initial-{{VERSION}}.bin \
+  0x20000 slate-{{VERSION}}.bin
+```
+
+On a panel that is **already running Slate**, only the application image is
+needed and no cable is:
+
+```
+SLATE_TOKEN=<device token> tools/ota/upload.sh <address> slate-{{VERSION}}.bin
+```
+
+That path keeps the dashboard, the device token and the WiFi credentials, which
+live outside the application partitions. A full flash keeps them too unless the
+flash is erased first — the browser installer offers that as a checkbox and says
+what it costs.
+
+The panel does not check for updates on its own. The signed release channel is
+https://github.com/{{REPO}}/issues/37; until it exists, installing a new version
+is one of the two commands above.
+
+## Verify
+
+```
+{{CHECKSUMS}}
+```
+
+`slate-{{VERSION}}.elf` and `slate-{{VERSION}}.map` are what a core dump from
+this image symbolicates against, and `sdkconfig-{{VERSION}}.txt` is the exact
+configuration it was built from. Neither is needed to run the firmware; both are
+needed to read a crash report about it.

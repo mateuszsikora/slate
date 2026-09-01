@@ -28,4 +28,15 @@ tools/fonts/.work/
 editor/node_modules/
 editor/dist/
 
+# The flashing page's vendored ESP Web Tools bundle and the directory
+# tools/flasher/build.sh assembles for deployment. dist/ contains a copy of the
+# firmware images as well, so it is build output twice over: flasher/index.html
+# and flasher/package-lock.json are the sources of truth, and
+# .github/workflows/release.yml regenerates the rest on every tag.
+flasher/node_modules/
+flasher/dist/
+
 .DS_Store
+
+# Python bytecode from the helpers in tools/
+__pycache__/
