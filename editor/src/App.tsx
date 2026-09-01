@@ -283,7 +283,7 @@ export function App() {
 
   /*
    * The address in the bookmark stopped answering. The panel advertises
-   * `slate-<mac>.local` for exactly this, so the editor asks that name whether
+   * `slate-<mac6>.local` for exactly this, so the editor asks that name whether
    * the same panel is there and moves the page. The new origin starts its own
    * session, asking for the PIN again when one is configured.
    */

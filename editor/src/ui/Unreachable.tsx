@@ -2,7 +2,7 @@
  * The panel is not answering at this address.
  *
  * §4.3: the token outlives a DHCP lease, so the address this page was opened
- * at may simply have moved. The editor probes `slate-<mac>.local` in the
+ * at may simply have moved. The editor probes `slate-<mac6>.local` in the
  * background; this view is what the person sees while that happens.
  */
 

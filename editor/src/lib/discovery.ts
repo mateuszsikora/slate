@@ -2,7 +2,7 @@
  * Finding the panel again after its address changed (design.md §4.3).
  *
  * The address in a bookmark does not have to be the address the panel has
- * today. The device advertises itself as `slate-<mac>.local`, and that name is
+ * today. The device advertises itself as `slate-<mac6>.local`, and that name is
  * what this editor falls back to when the origin it was served from stops
  * answering.
  */
@@ -18,9 +18,8 @@ export function mdnsOrigin(deviceName: string): string {
  * Whether the panel with this name answers at `origin`.
  *
  * The name is checked, not just the response: a bare 200 from something at
- * that address is not evidence that it is the same panel, and moving a session
- * with a device token to the wrong device is exactly the mistake worth one
- * extra comparison.
+ * that address is not evidence that it is the same panel. Moving the editor to
+ * a different device is exactly the mistake worth one extra comparison.
  */
 export async function deviceAnswersAt(origin: string, name: string, timeoutMs = 4000): Promise<boolean> {
   const controller = new AbortController()

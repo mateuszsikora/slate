@@ -450,7 +450,7 @@ static void start_network(void)
     }
 
     /*
-     * §4.3's `slate-<mac>.local`, before the adapter below queries the
+     * §4.3's `slate-<mac6>.local`, before the adapter below queries the
      * responder it starts. Here rather than in start_api() because mDNS needs
      * the default event loop and the interfaces, and both are this function's.
      * The responder attaches to the station and to the setup access point, so

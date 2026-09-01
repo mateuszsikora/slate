@@ -1119,7 +1119,7 @@ static void show_factory_reset(void *ctx)
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
 
     lv_obj_t *body = setup_label(
-        overlay, "Erasing the dashboard, credentials and device token.\n"
+        overlay, "Erasing the dashboard, credentials and security settings.\n"
                  "The panel will restart in network setup mode.",
         theme->text_hi, theme->body, 700);
     lv_obj_align(body, LV_ALIGN_CENTER, 0, 44);

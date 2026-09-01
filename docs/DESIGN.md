@@ -114,7 +114,11 @@ The display is 800×480. A fixed 56 px system bar at the top shows the clock, pa
 
 The content area is 800×424, divided into a 4 × 3 grid with a 12 px gap and 14 px margin. Each cell is 184×124 px — enough for an icon, a value and a label, with room for a comfortable touch target.
 
-Permitted tile sizes: 1×1, 2×1, 1×2, 2×2, 4×1.
+The grid can represent tile sizes 1×1, 2×1, 1×2, 2×2 and 4×1. A
+known component accepts only the variants listed in section 7; for example, a
+4×1 light is invalid even though that rectangle fits the grid. An unknown
+component type may use any grid-level size and renders the forward-compatible
+placeholder from section 3.1.
 
 Position is `[column, row]`. Pixel coordinates do not exist in the format.
 
@@ -182,7 +186,18 @@ Twelve cells is also the performance answer, not only a layout choice: S-2 measu
 
 Fields common to every tile: `id`, `type`, `pos`, `size`, plus optional `label` (overrides the normalized resource name) and `icon` (overrides the component default). Where a component variant renders an icon, the override is a stable Material Design Icons name from `tools/fonts/icons.txt`, such as `fire` or `thermometer-low`; a name unavailable in the running firmware renders the broken-image placeholder instead of an empty glyph.
 
+Page ids are unique within the document. Tile ids are also unique across the
+whole document, not merely within one page, because they key validation errors
+and editor selection. Empty ids are invalid.
+
 Most tiles carry one `binding`; a component such as the scene bar carries `bindings`. A binding is always the pair `provider` + `resource`. Resource ids are opaque outside their provider: `light.living_room` has meaning to the HA adapter, while `living-room` may name the same light in the direct provider. The pair is stored and compared as two strings; firmware never infers a provider from punctuation or from a component type.
+
+Provider ids are at most 15 UTF-8 bytes and resource ids at most 63. The same
+pair may feed several tiles only when all known component types agree on its
+normalized kind; binding `direct:living-room` as both a `light` and a `sensor`
+is invalid. One active configuration may reference at most 256 distinct pairs.
+Unknown component types do not reserve provider state until firmware learns
+how to interpret them.
 
 The provider owns the mapping between its native data and the semantic type named by the component. A `light` tile therefore renders an incompatible-binding placeholder if its resource arrives with normalized kind `sensor`, but neither the parser nor the component needs to know how that mismatch was represented upstream. A malformed binding is a validation error; an unknown provider id is accepted and renders a missing-provider placeholder, preserving forward compatibility with configurations created on newer firmware.
 
@@ -302,6 +317,10 @@ so the editor can localize it. The schema-1 validation vocabulary is
 an id and a duplicate tile id are document-wide errors because neither has an
 unambiguous `tile.id` bucket. Unknown fields, component types and provider ids
 retain section 3's forward-compatible behavior and are not validation errors.
+`provider_required` and `resource_required` also cover a wrong JSON type, an
+empty string or the length limits from section 3.3. `binding_required` also
+covers reuse of one provider/resource pair by conflicting known component
+kinds and exceeding the 256-resource bound.
 
 An empty body and malformed JSON return the standard `400` documents
 `{"error":"empty_body"}` and `{"error":"invalid_json"}`. A body above the
@@ -416,7 +435,7 @@ A transfer that stops part-way is the one outcome with no error document, becaus
 ### 4.2 WebSocket `/api/v1/ws`
 
 Event channel for the editor, remote diagnostics and External API actions. The HTTP upgrade does not carry a
-credential: putting the device token in the URL would leave it in browser history and access
+credential: putting it in the WebSocket query string would expose it to browser history and access
 logs, while requiring an `Authorization` header would exclude the browser WebSocket API. The
 client therefore authenticates with its first text frame, within five seconds of the upgrade:
 
@@ -466,7 +485,7 @@ Internally, a 32-character random device token still protects the HTTP API and W
 
 Scripts and Node-RED never receive that administrator credential. The editor can create up to four named External API keys. Their 32-character plaintext is returned once; NVS stores only a SHA-256 digest and non-secret id/name metadata. Each key is individually revocable and is accepted only for `POST /direct/state` and the direct action-consumer WebSocket role. Revocation closes active External API WebSockets immediately. Existing device-session credentials remain accepted on those two paths for backwards compatibility and development tools.
 
-The QR on the panel contains only `http://<ip>/`. The device also advertises itself over mDNS as `slate-<mac>.local`; the editor falls back to it when the remembered IP stops answering, and the new origin starts a new session. mDNS is advertised on the setup access point too, so the same name works before the panel has ever joined a network.
+The QR on the panel contains only `http://<ip>/`. The device also advertises itself over mDNS as `slate-<mac6>.local`; the editor falls back to it when the remembered IP stops answering, and the new origin starts a new session. mDNS is advertised on the setup access point too, so the same name works before the panel has ever joined a network.
 
 While the setup access point is up, the setup page and the endpoints it needs — `GET /wifi/scan`, `POST /wifi`, `GET /info` — are served **without a token, on the access point interface only**. Everything else answers 401 there. Someone within radio range can therefore move the panel to a different network and choose its future PIN; they cannot read provider credentials, publish direct-provider state, write a dashboard or upload firmware. Setting the optional WPA2 setup-network password narrows that exposure in shared buildings.
 
@@ -771,7 +790,7 @@ These determine whether dashboards look good on someone else's data, and are man
 
 ## 8. Theming
 
-Appearance derives from tokens. Users choose a theme and optionally an accent colour; they do not set forty colours individually.
+Appearance derives from tokens. Users choose a theme; they do not set forty colours individually. The accent and its contrasting foreground are part of that theme.
 
 ```json
 {
@@ -821,8 +840,8 @@ Steps 6–8 are M6 and later. From M1 the setup page carries the WiFi form and n
 
 | | |
 |---|---|
-| SSID | `slate-<mac6>` — the last three bytes of the base MAC in lowercase hex, the same suffix as `slate-<mac>.local` (§4.3) and the device name (§16), so one panel is called one thing everywhere |
-| Password | **none by default.** WPA2 can be set and is then printed on the setup screen next to the SSID. The 8-character floor is the standard's, not ours |
+| SSID | `slate-<mac6>` — the last three bytes of the base MAC in lowercase hex, the same name as `slate-<mac6>.local` (§4.3) without its `.local` suffix, so one panel is called one thing everywhere |
+| Password | **none by default.** WPA2 can be provisioned in a custom build with `SLATE_SETUP_AP_PASSWORD`; there is no runtime setter in API v1. A configured value lives in NVS and is printed on the setup screen next to the SSID. The 8-character floor is the standard's, not ours |
 | Address | `192.168.4.1`, the `esp_netif` default, kept because it is the address people already recognise from every other device that does this |
 | DHCP | served by the device, which is also the gateway |
 | Portal | a DNS responder answering every query with the device address, so phones open the page unprompted |
@@ -1101,4 +1120,3 @@ Ordered by when each is likely to become the limiting factor:
 - **Backlight dimming.** On this board the CH422G controls the backlight as a binary output; smooth dimming requires bridging one pin to a GPIO. The firmware should detect both variants: the schedule works in on/off mode unmodified and dims smoothly after the modification, which is documented as optional. Decided before M5.
 - **Power and mounting.** Budget roughly 1 A at 5 V with adequate conductor cross-section. Settled before M3, since it constrains where the panel can hang — harder to change than code.
 - **Multiple panels.** Device name suffixed with the MAC address; `POST /identify` to distinguish them. Whether the editor manages several panels from one view is deferred until a second one exists.
-- **Name collisions.** Before the repository goes public, check for an active project of the same name near ESP32 or Home Assistant. Slack's Slate and the editor libraries are unrelated fields and pose no practical conflict.

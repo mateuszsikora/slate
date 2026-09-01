@@ -1,0 +1,261 @@
+<!doctype html>
+<!--
+  The browser flasher (design.md §9.1 step 1, §14 M8).
+
+  This page is the whole of "someone without ESP-IDF gets a running panel". It
+  is deployed to GitHub Pages by .github/workflows/release.yml together with the
+  images of the release being published, and tools/flasher/build.sh is what
+  assembles the two into a directory.
+
+  Three things about it are deliberate.
+
+  It is one static document with no build step of its own. What it needs from a
+  release is the manifest beside it, so the page in the repository is byte for
+  byte the page that is deployed and the only generated file is manifest.json.
+  The version below is read from that manifest at load rather than substituted
+  at build time, for the same reason: one source for it.
+
+  esp-web-tools is vendored into the deployment rather than loaded from a CDN.
+  A flashing page is the one document that has to work on a machine that has
+  just been carried to a bench, and unpkg being slow or gone is not a failure
+  anybody debugging a blank panel should have to consider. The pinned version
+  lives in flasher/package.json.
+
+  It asks for no analytics, no account and no network beyond this origin. The
+  panel it produces talks to a LAN and nothing else (§2), and a first-run page
+  that phoned somewhere would contradict that before the device was even on.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Install Slate</title>
+    <meta
+      name="description"
+      content="Install Slate on a Waveshare ESP32-S3-Touch-LCD-7 from the browser."
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0f1115;
+        --panel: #171a21;
+        --line: #262b36;
+        --text: #e6e8ee;
+        --muted: #9aa3b2;
+        --accent: #6ea8fe;
+        --warn: #ffb454;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 3rem 1.25rem 5rem;
+        background: var(--bg);
+        color: var(--text);
+        font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      main {
+        max-width: 44rem;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 2rem;
+        margin: 0 0 0.25rem;
+        letter-spacing: -0.02em;
+      }
+      h2 {
+        font-size: 1.05rem;
+        margin: 2.5rem 0 0.75rem;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      p,
+      li {
+        color: var(--text);
+      }
+      .lede {
+        color: var(--muted);
+        margin: 0 0 2rem;
+      }
+      a {
+        color: var(--accent);
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.9em;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 0.1em 0.35em;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 1.5rem;
+      }
+      .install {
+        text-align: center;
+      }
+      button {
+        font: inherit;
+        font-weight: 600;
+        color: #0f1115;
+        background: var(--accent);
+        border: 0;
+        border-radius: 8px;
+        padding: 0.7rem 1.6rem;
+        cursor: pointer;
+      }
+      button:hover {
+        filter: brightness(1.08);
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 0.9rem;
+        margin: 0.9rem 0 0;
+      }
+      .unsupported {
+        color: var(--warn);
+      }
+      ol,
+      ul {
+        padding-left: 1.25rem;
+      }
+      li + li {
+        margin-top: 0.4rem;
+      }
+      .note {
+        border-left: 3px solid var(--warn);
+        padding-left: 1rem;
+        color: var(--muted);
+      }
+      footer {
+        margin-top: 3rem;
+        padding-top: 1.5rem;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Slate</h1>
+      <p class="lede">
+        A wall dashboard for the Waveshare ESP32-S3-Touch-LCD-7 that renders
+        from JSON fetched at runtime. Flash once, from this page; everything
+        afterwards happens over WiFi.
+      </p>
+
+      <div class="card install">
+        <esp-web-install-button manifest="manifest.json">
+          <button slot="activate">Install Slate</button>
+          <p slot="unsupported" class="unsupported">
+            This browser cannot open a serial port. Chrome, Edge or another
+            Chromium-based browser on a desktop can; Firefox and Safari do not
+            implement Web Serial, and neither does any browser on iOS.
+          </p>
+          <p slot="not-allowed" class="unsupported">
+            This page has to be served over HTTPS or from localhost before a
+            browser will allow it near a serial port.
+          </p>
+        </esp-web-install-button>
+        <p class="meta">
+          Version <span id="version">…</span> · release build ·
+          <a id="release" href="https://github.com/mateuszsikora/slate/releases"
+            >release notes and checksums</a
+          >
+        </p>
+      </div>
+
+      <h2>Before you press it</h2>
+      <ul>
+        <li>
+          The board must be the
+          <strong>ESP32-S3-WROOM-1-N16R8</strong> variant — 16 MB of flash,
+          8 MB of PSRAM. The partition table is drawn for 16 MB and an 8 MB
+          module cannot hold it. Vendor documentation for this board describes
+          an N8R8 that at least some units are not, so trust the marking printed
+          on the module rather than the datasheet.
+        </li>
+        <li>
+          Connect the panel to this computer with a USB-C cable that carries
+          data, and power it from something that can deliver about 1 A at 5 V.
+        </li>
+        <li>
+          Close anything else holding the port — a serial monitor, the Arduino
+          IDE, <code>idf.py monitor</code>. Only one program can own it.
+        </li>
+      </ul>
+
+      <p class="note">
+        Erasing the device during installation also erases its configuration,
+        administrator security settings, External API keys and stored WiFi
+        credentials, which live outside the firmware partitions and otherwise
+        survive an update. On a panel that has never run Slate there is nothing
+        to lose; on one that has, export the dashboard from the editor first.
+      </p>
+
+      <h2>What happens next</h2>
+      <ol>
+        <li>
+          The panel boots, finds no WiFi credentials, and raises its own access
+          point called <code>slate-</code><em>xxxxxx</em>. Its name, the address
+          to open and a QR that joins it are printed on the screen.
+        </li>
+        <li>
+          Join that network from a phone or laptop and open
+          <code>http://192.168.4.1</code>. Pick your WiFi, type the password,
+          optionally set a 4–12 digit administrator PIN, and submit.
+        </li>
+        <li>
+          <strong>The result appears on the panel, not in the browser.</strong>
+          The device has one radio, so joining your network drops the setup
+          network at the instant it succeeds. On success the screen shows the
+          panel's address and an address-only QR.
+        </li>
+        <li>
+          Scan the QR to open the editor served by the panel. Enter the
+          administrator PIN if one was configured, then choose a provider and
+          arrange the first page.
+        </li>
+      </ol>
+
+      <h2>Updates</h2>
+      <p>
+        This page installs a fixed version over a cable. The panel does not yet
+        check for updates on its own — the signed release channel is
+        <a href="https://github.com/mateuszsikora/slate/issues/37">#37</a>. Until
+        it lands, a later version is installed either from this page again or
+        over WiFi with the tool in the repository, and neither disturbs the
+        configuration.
+      </p>
+
+      <footer>
+        <a href="https://github.com/mateuszsikora/slate">Source, documentation and issues</a>
+        · MIT licensed · this page uses
+        <a href="https://esphome.github.io/esp-web-tools/">ESP Web Tools</a>
+        (Apache-2.0), which talks to the board from your browser and sends
+        nothing anywhere.
+      </footer>
+    </main>
+
+    <script type="module" src="esp-web-tools/install-button.js"></script>
+    <script type="module">
+      // The version is the manifest's, not a constant in this file. A page that
+      // carried its own copy could disagree with the images sitting next to it,
+      // and the number people quote in a bug report is this one.
+      try {
+        const manifest = await (await fetch("manifest.json")).json();
+        document.getElementById("version").textContent = manifest.version;
+        document.getElementById("release").href =
+          `https://github.com/mateuszsikora/slate/releases/tag/v${manifest.version}`;
+      } catch {
+        document.getElementById("version").textContent = "unknown";
+      }
+    </script>
+  </body>
+</html>
