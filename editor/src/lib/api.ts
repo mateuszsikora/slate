@@ -132,11 +132,20 @@ export interface Page {
   tiles: Tile[]
 }
 
+export interface BarItem {
+  type: string
+  slot: number
+  span: number
+  provider?: string
+  label?: string
+}
+
 export interface Config {
   schema: number
   theme?: string
   home_page?: string
   settings?: Record<string, unknown>
+  bar?: BarItem[]
   pages: Page[]
 }
 

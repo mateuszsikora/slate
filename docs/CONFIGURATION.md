@@ -12,6 +12,7 @@ The endpoints that carry the document are in [`API.md`](API.md).
 
 - [The document](#the-document)
 - [Settings](#settings)
+- [The system bar](#the-system-bar)
 - [The grid](#the-grid)
 - [Tiles](#tiles)
 - [Components](#components)
@@ -37,6 +38,12 @@ The endpoints that carry the document are in [`API.md`](API.md).
     "screen_off_after": 0,
     "wake_on_touch": true
   },
+  "bar": [
+    {"type": "clock", "slot": 0, "span": 2},
+    {"type": "title", "slot": 2, "span": 6},
+    {"type": "page_indicator", "slot": 8, "span": 1},
+    {"type": "badge", "slot": 9, "span": 3, "provider": "ha", "label": "Home"}
+  ],
   "pages": [
     {
       "id": "home",
@@ -62,6 +69,7 @@ The endpoints that carry the document are in [`API.md`](API.md).
 | `theme` | string | yes | a theme id the running firmware carries; `GET /api/v1/info` lists them |
 | `home_page` | string | yes | the page shown on boot, and the fallback after a replacement removes the page that was visible |
 | `settings` | object | no | below |
+| `bar` | array | no | optional twelve-slot system-bar layout; omitting it keeps the compatible layout described below |
 | `pages` | array | yes | at least one page |
 
 UTF-8, and at most **64 KB** on the wire. A page has an `id` unique in the
@@ -93,13 +101,34 @@ as specified; a night brightness of 20 % lights the panel exactly as brightly as
 The screen never blanks while the panel is in setup mode — the whole point of
 that mode is an address somebody can read.
 
+## The system bar
+
+The top 56 px of the 800×480 display is reserved for a non-interactive system
+bar. After 16 px margins on both sides, its usable 768 px are twelve gapless
+64 px slots. Each configured item has a zero-based `slot` from 0 to 11 and a
+`span` from 1 to 12; it must fit and may not overlap another item.
+
+| Item `type` | Extra fields | Renders |
+|-------------|--------------|---------|
+| `clock` | none | local time from `settings.timezone` |
+| `title` | none | current page title, falling back to its id |
+| `page_indicator` | none | exact `current/total` text on multi-page dashboards; empty on one page |
+| `badge` | `provider` required, `label` optional | provider caption and status dot |
+
+A badge uses the theme accent while its provider is online, warning colour
+while connecting, degraded or in error, and muted colour while offline or not
+configured. `label` replaces the normal provider name.
+
+Omitting `bar` keeps the original clock, title, connection-status and page
+number arrangement. Setting `"bar": []` deliberately leaves the whole bar
+blank. An unknown item type is valid and reserves its slots while rendering
+nothing; this keeps later layouts geometrically stable on older firmware. Bar
+items never receive touch events.
+
 ## The grid
 
-The screen is 800×480. A fixed 56 px system bar carries the clock, the current
-page title and a connection indicator. Multi-page dashboards add a compact
-current/total page number; single-page dashboards do not show it. The bar
-arrangement is fixed. What is left is a **4 columns × 3 rows** grid of 184×124
-px cells.
+Below the fixed 56 px system bar is a **4 columns × 3 rows** grid of 184×124 px
+cells.
 
 `pos` is `[column, row]`, zero-based from the top left. `size` is
 `[width, height]` in cells. Pixel coordinates do not exist in this format, and
@@ -217,6 +246,7 @@ against a newer firmware degrades instead of being rejected:
 - **Unknown fields are ignored.** Anywhere.
 - **An unknown `type`** renders a placeholder tile at whatever grid-level size it
   asked for. It is not a validation error and it reserves no provider state.
+- **An unknown system-bar item `type`** renders empty but reserves its slots.
 - **An unknown `provider`** is accepted and renders a missing-provider
   placeholder.
 
@@ -256,6 +286,11 @@ returns no presentation text, so the editor can phrase and translate its own.
 | `pages_required` | missing, not an array, or empty |
 | `duplicate_page_id` | two pages share an `id` |
 | `home_page_not_found` | `home_page` names no page |
+| `bar_required` | `bar` is present but is not an array |
+| `bar_item_required` | an item is not an object or has no non-empty string `type` |
+| `bar_slot_invalid` | `slot` is not an integer from 0 to 11 |
+| `bar_span_invalid` | `span` is not an integer from 1 to 12 or the item extends past slot 11 |
+| `bar_overlap` | two bar items reserve at least one of the same slots |
 | `tile_id_required`, `duplicate_tile_id` | document-wide, because neither has an unambiguous tile to blame |
 | `invalid_position` | `pos` is not two integers |
 | `invalid_size` | `size` is not one of the five rectangles, or not one this component renders |

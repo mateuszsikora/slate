@@ -46,12 +46,17 @@ static const char *TAG = "slate_ui";
 #define UI_CELL_HEIGHT  124
 #define UI_GAP           12
 #define UI_MARGIN        14
+#define UI_BAR_MARGIN    16
+#define UI_BAR_SLOT_WIDTH 64
 
 #define UI_REBUILD_POST_TIMEOUT_MS 1000
 #define UI_LABEL_LIMIT             64
 #define UI_PROVIDER_SUMMARY_MAX    128
 #define UI_EDITOR_URL_MAX          32
 #define UI_EDITOR_QR_SIZE          220
+
+_Static_assert(UI_BAR_MARGIN * 2 + SLATE_BAR_SLOT_COUNT * UI_BAR_SLOT_WIDTH == UI_WIDTH,
+               "the twelve bar slots must exactly fill the decided usable width");
 
 typedef struct {
     char provider[SLATE_PROVIDER_ID_MAX + 1];
@@ -73,7 +78,15 @@ typedef struct {
 } ui_model_t;
 
 typedef struct {
+    const slate_config_bar_item_t *config;
+    lv_obj_t *container;
+    lv_obj_t *label;
+    lv_obj_t *dot;
+} bar_item_view_t;
+
+typedef struct {
     lv_obj_t *screen;
+    lv_obj_t *bar;
     lv_obj_t *content;
     lv_obj_t *clock;
     lv_obj_t *provider;
@@ -81,6 +94,9 @@ typedef struct {
     lv_timer_t *bar_timer;
     binding_view_t *views;
     size_t view_count;
+    bar_item_view_t *bar_views;
+    size_t bar_view_count;
+    bool configured_bar;
     const slate_theme_t *theme;
     ui_model_t *model;
     size_t page_index;
@@ -169,6 +185,30 @@ static slate_config_t *clone_config(const slate_config_t *source)
         !clone_string(source->settings.night_end, &copy->settings.night_end)) {
         slate_config_free(copy);
         return NULL;
+    }
+
+    copy->has_bar = source->has_bar;
+    if (source->bar_item_count > 0) {
+        copy->bar_items = ui_calloc(source->bar_item_count,
+                                    sizeof(*copy->bar_items));
+        if (copy->bar_items == NULL) {
+            slate_config_free(copy);
+            return NULL;
+        }
+    }
+    copy->bar_item_count = source->bar_item_count;
+    for (size_t i = 0; i < source->bar_item_count; ++i) {
+        const slate_config_bar_item_t *from = &source->bar_items[i];
+        slate_config_bar_item_t *to = &copy->bar_items[i];
+        to->item_type = from->item_type;
+        to->slot = from->slot;
+        to->span = from->span;
+        if (!clone_string(from->type, &to->type) ||
+            !clone_string(from->provider, &to->provider) ||
+            !clone_string(from->label, &to->label)) {
+            slate_config_free(copy);
+            return NULL;
+        }
     }
 
     if (source->page_count > 0) {
@@ -431,6 +471,37 @@ static void provider_summary(char *out, size_t size, uint32_t *color,
                  : theme->text_lo;
 }
 
+static const char *provider_display_name(const slate_config_bar_item_t *item)
+{
+    if (item->label != NULL) {
+        return item->label;
+    }
+    if (strcmp(item->provider, "ha") == 0) {
+        return "Home Assistant";
+    }
+    if (strcmp(item->provider, "direct") == 0) {
+        return "Direct";
+    }
+    return item->provider;
+}
+
+static uint32_t badge_status_color(slate_provider_status_t status,
+                                   const slate_theme_t *theme)
+{
+    switch (status) {
+    case SLATE_PROVIDER_ONLINE:
+        return theme->accent;
+    case SLATE_PROVIDER_CONNECTING:
+    case SLATE_PROVIDER_DEGRADED:
+    case SLATE_PROVIDER_ERROR:
+        return theme->warn;
+    case SLATE_PROVIDER_UNCONFIGURED:
+    case SLATE_PROVIDER_OFFLINE:
+        return theme->text_lo;
+    }
+    return theme->text_lo;
+}
+
 static void update_bar(ui_tree_t *tree)
 {
     if (tree == NULL) {
@@ -445,6 +516,21 @@ static void update_bar(ui_tree_t *tree)
             strftime(clock, sizeof(clock), "%H:%M", &local);
         }
     }
+    if (tree->configured_bar) {
+        for (size_t i = 0; i < tree->bar_view_count; ++i) {
+            bar_item_view_t *view = &tree->bar_views[i];
+            if (view->config->item_type == SLATE_BAR_ITEM_CLOCK && view->label != NULL) {
+                lv_label_set_text(view->label, clock);
+            } else if (view->config->item_type == SLATE_BAR_ITEM_BADGE &&
+                       view->dot != NULL) {
+                uint32_t color = badge_status_color(
+                    slate_state_provider_status(view->config->provider), tree->theme);
+                lv_obj_set_style_bg_color(view->dot, lv_color_hex(color), LV_PART_MAIN);
+            }
+        }
+        return;
+    }
+
     lv_label_set_text(tree->clock, clock);
 
     char text[UI_PROVIDER_SUMMARY_MAX];
@@ -603,8 +689,152 @@ static void bar_timer_cb(lv_timer_t *timer)
     update_all();
 }
 
+static bool build_legacy_bar(ui_tree_t *tree, const char *title,
+                             size_t page_count, size_t page_index)
+{
+    const slate_theme_t *theme = tree->theme;
+    lv_obj_set_style_pad_hor(tree->bar, UI_MARGIN, LV_PART_MAIN);
+
+    tree->clock = make_label(tree->bar, "--:--", theme->body, theme->text_hi);
+    if (tree->clock == NULL) {
+        return false;
+    }
+    lv_obj_align(tree->clock, LV_ALIGN_LEFT_MID, 0, 0);
+
+    lv_obj_t *page_title = make_label(tree->bar, title != NULL ? title : "Slate",
+                                      theme->body, theme->text_hi);
+    if (page_title == NULL) {
+        return false;
+    }
+    lv_obj_set_width(page_title, 320);
+    slate_component_label_one_line(page_title);
+    lv_obj_align(page_title, LV_ALIGN_CENTER, 0, page_count > 1 ? -6 : 0);
+
+    if (page_count > 1) {
+        char position[48];
+        snprintf(position, sizeof(position), "%u / %u",
+                 (unsigned) page_index + 1, (unsigned) page_count);
+        tree->page_indicator = make_label(tree->bar, position, theme->caption,
+                                          theme->text_lo);
+        if (tree->page_indicator == NULL) {
+            return false;
+        }
+        lv_obj_set_width(tree->page_indicator, 96);
+        slate_component_label_one_line(tree->page_indicator);
+        lv_obj_set_style_text_align(tree->page_indicator, LV_TEXT_ALIGN_CENTER,
+                                    LV_PART_MAIN);
+        lv_obj_align(tree->page_indicator, LV_ALIGN_BOTTOM_MID, 0, -2);
+    }
+
+    tree->provider = make_label(tree->bar, "PROVIDERS DEGRADED", theme->caption,
+                                theme->text_lo);
+    if (tree->provider == NULL) {
+        return false;
+    }
+    lv_obj_set_width(tree->provider, 220);
+    slate_component_label_one_line(tree->provider);
+    lv_obj_set_style_text_align(tree->provider, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_obj_align(tree->provider, LV_ALIGN_RIGHT_MID, 0, 0);
+    return true;
+}
+
+static bool build_configured_bar(ui_tree_t *tree, const slate_config_t *config,
+                                 const char *title, size_t page_count,
+                                 size_t page_index)
+{
+    tree->configured_bar = true;
+    tree->bar_view_count = config->bar_item_count;
+    if (tree->bar_view_count > 0) {
+        tree->bar_views = ui_calloc(tree->bar_view_count, sizeof(*tree->bar_views));
+        if (tree->bar_views == NULL) {
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < tree->bar_view_count; ++i) {
+        bar_item_view_t *view = &tree->bar_views[i];
+        view->config = &config->bar_items[i];
+        view->container = lv_obj_create(tree->bar);
+        if (view->container == NULL) {
+            return false;
+        }
+        style_plain(view->container);
+        lv_obj_remove_flag(view->container, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_pos(view->container,
+                       UI_BAR_MARGIN + view->config->slot * UI_BAR_SLOT_WIDTH, 0);
+        lv_obj_set_size(view->container,
+                        view->config->span * UI_BAR_SLOT_WIDTH, UI_BAR_HEIGHT);
+
+        int32_t label_width = view->config->span * UI_BAR_SLOT_WIDTH - 16;
+        if (view->config->item_type == SLATE_BAR_ITEM_CLOCK) {
+            view->label = make_label(view->container, "--:--", tree->theme->body,
+                                     tree->theme->text_hi);
+            if (view->label != NULL) {
+                lv_obj_set_width(view->label, label_width);
+                lv_obj_align(view->label, LV_ALIGN_LEFT_MID, 8, 0);
+            }
+        } else if (view->config->item_type == SLATE_BAR_ITEM_TITLE) {
+            view->label = make_label(view->container, title != NULL ? title : "Slate",
+                                     tree->theme->body, tree->theme->text_hi);
+            if (view->label != NULL) {
+                lv_obj_set_width(view->label, label_width);
+                slate_component_label_one_line(view->label);
+                lv_obj_set_style_text_align(view->label, LV_TEXT_ALIGN_CENTER,
+                                            LV_PART_MAIN);
+                lv_obj_center(view->label);
+            }
+        } else if (view->config->item_type == SLATE_BAR_ITEM_PAGE_INDICATOR &&
+                   page_count > 1) {
+            char position[48];
+            snprintf(position, sizeof(position), "%u / %u",
+                     (unsigned) page_index + 1, (unsigned) page_count);
+            view->label = make_label(view->container, position, tree->theme->caption,
+                                     tree->theme->text_lo);
+            if (view->label != NULL) {
+                lv_obj_set_width(view->label, label_width);
+                slate_component_label_one_line(view->label);
+                lv_obj_set_style_text_align(view->label, LV_TEXT_ALIGN_CENTER,
+                                            LV_PART_MAIN);
+                lv_obj_center(view->label);
+            }
+        } else if (view->config->item_type == SLATE_BAR_ITEM_BADGE) {
+            view->dot = lv_obj_create(view->container);
+            if (view->dot != NULL) {
+                style_plain(view->dot);
+                lv_obj_remove_flag(view->dot, LV_OBJ_FLAG_CLICKABLE);
+                lv_obj_set_size(view->dot, 8, 8);
+                lv_obj_set_style_radius(view->dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+                lv_obj_set_style_bg_opa(view->dot, LV_OPA_COVER, LV_PART_MAIN);
+                lv_obj_align(view->dot, LV_ALIGN_LEFT_MID, 8, 0);
+            }
+            view->label = make_label(view->container,
+                                     provider_display_name(view->config),
+                                     tree->theme->caption, tree->theme->text_hi);
+            if (view->label != NULL) {
+                lv_obj_set_width(view->label,
+                                 view->config->span * UI_BAR_SLOT_WIDTH - 32);
+                slate_component_label_one_line(view->label);
+                lv_obj_align(view->label, LV_ALIGN_LEFT_MID, 24, 0);
+            }
+        }
+
+        if (view->config->item_type != SLATE_BAR_ITEM_UNKNOWN &&
+            ((view->config->item_type == SLATE_BAR_ITEM_BADGE && view->dot == NULL) ||
+             (view->config->item_type != SLATE_BAR_ITEM_BADGE &&
+              view->config->item_type != SLATE_BAR_ITEM_PAGE_INDICATOR &&
+              view->label == NULL) ||
+             (view->config->item_type == SLATE_BAR_ITEM_PAGE_INDICATOR &&
+              page_count > 1 && view->label == NULL) ||
+             (view->config->item_type == SLATE_BAR_ITEM_BADGE && view->label == NULL))) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title,
-                            size_t page_count, size_t page_index)
+                            size_t page_count, size_t page_index,
+                            const slate_config_t *config)
 {
     ui_tree_t *tree = ui_calloc(1, sizeof(*tree));
     if (tree == NULL) {
@@ -620,59 +850,25 @@ static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title,
     lv_obj_set_style_bg_color(tree->screen, lv_color_hex(theme->bg), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(tree->screen, LV_OPA_COVER, LV_PART_MAIN);
 
-    lv_obj_t *bar = lv_obj_create(tree->screen);
-    if (bar == NULL) {
+    tree->bar = lv_obj_create(tree->screen);
+    if (tree->bar == NULL) {
         tree_destroy(tree);
         return NULL;
     }
-    style_plain(bar);
-    lv_obj_set_pos(bar, 0, 0);
-    lv_obj_set_size(bar, UI_WIDTH, UI_BAR_HEIGHT);
-    lv_obj_set_style_bg_color(bar, lv_color_hex(theme->surface), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_pad_hor(bar, UI_MARGIN, LV_PART_MAIN);
+    style_plain(tree->bar);
+    lv_obj_remove_flag(tree->bar, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_pos(tree->bar, 0, 0);
+    lv_obj_set_size(tree->bar, UI_WIDTH, UI_BAR_HEIGHT);
+    lv_obj_set_style_bg_color(tree->bar, lv_color_hex(theme->surface), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(tree->bar, LV_OPA_COVER, LV_PART_MAIN);
 
-    tree->clock = make_label(bar, "--:--", theme->body, theme->text_hi);
-    if (tree->clock == NULL) {
+    bool bar_ok = config != NULL && config->has_bar
+                      ? build_configured_bar(tree, config, title, page_count, page_index)
+                      : build_legacy_bar(tree, title, page_count, page_index);
+    if (!bar_ok) {
         tree_destroy(tree);
         return NULL;
     }
-    lv_obj_align(tree->clock, LV_ALIGN_LEFT_MID, 0, 0);
-
-    lv_obj_t *page_title = make_label(bar, title != NULL ? title : "Slate",
-                                      theme->body, theme->text_hi);
-    if (page_title == NULL) {
-        tree_destroy(tree);
-        return NULL;
-    }
-    lv_obj_set_width(page_title, 320);
-    slate_component_label_one_line(page_title);
-    lv_obj_align(page_title, LV_ALIGN_CENTER, 0, page_count > 1 ? -6 : 0);
-
-    if (page_count > 1) {
-        char position[48];
-        snprintf(position, sizeof(position), "%u / %u",
-                 (unsigned) page_index + 1, (unsigned) page_count);
-        tree->page_indicator = make_label(bar, position, theme->caption, theme->text_lo);
-        if (tree->page_indicator == NULL) {
-            tree_destroy(tree);
-            return NULL;
-        }
-        lv_obj_set_width(tree->page_indicator, 96);
-        slate_component_label_one_line(tree->page_indicator);
-        lv_obj_set_style_text_align(tree->page_indicator, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_align(tree->page_indicator, LV_ALIGN_BOTTOM_MID, 0, -2);
-    }
-
-    tree->provider = make_label(bar, "PROVIDERS DEGRADED", theme->caption, theme->text_lo);
-    if (tree->provider == NULL) {
-        tree_destroy(tree);
-        return NULL;
-    }
-    lv_obj_set_width(tree->provider, 220);
-    slate_component_label_one_line(tree->provider);
-    lv_obj_set_style_text_align(tree->provider, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
-    lv_obj_align(tree->provider, LV_ALIGN_RIGHT_MID, 0, 0);
 
     if (page_count > 0) {
         tree->content = lv_obj_create(tree->screen);
@@ -711,6 +907,7 @@ static void tree_destroy(ui_tree_t *tree)
         lv_obj_delete(tree->screen);
     }
     free(tree->views);
+    free(tree->bar_views);
     model_release(tree->model);
     free(tree);
 }
@@ -928,7 +1125,7 @@ static ui_tree_t *build_page_tree(ui_model_t *model, size_t page_index)
     }
 
     ui_tree_t *tree = tree_base(theme, page->title != NULL ? page->title : page->id,
-                                config->page_count, page_index);
+                                config->page_count, page_index, config);
     if (tree == NULL) {
         return NULL;
     }
@@ -1240,7 +1437,7 @@ static bool editor_url(char *out, size_t out_len, char *address, size_t address_
 static ui_tree_t *build_message_tree(const char *title, const char *message)
 {
     const slate_theme_t *theme = slate_theme_default();
-    ui_tree_t *tree = tree_base(theme, title, 0, 0);
+    ui_tree_t *tree = tree_base(theme, title, 0, 0, NULL);
     if (tree == NULL) {
         return NULL;
     }
@@ -1693,21 +1890,28 @@ static char *test_config_json(int cycle)
     };
 
     const char *layout = layouts[(unsigned) cycle % (sizeof(layouts) / sizeof(layouts[0]))];
-    size_t capacity = strlen(layout) + 512;
+    const char *bar = cycle % 5 == 4
+                          ? "\"bar\":[{\"type\":\"clock\",\"slot\":0,\"span\":2},"
+                            "{\"type\":\"title\",\"slot\":2,\"span\":6},"
+                            "{\"type\":\"badge\",\"provider\":\"ui-fixture\","
+                            "\"slot\":8,\"span\":3},{\"type\":\"page_indicator\","
+                            "\"slot\":11,\"span\":1}],"
+                          : "";
+    size_t capacity = strlen(layout) + strlen(bar) + 512;
     char *json = malloc(capacity);
     if (json == NULL) {
         return NULL;
     }
     const char *theme = cycle % 2 == 0 ? "midnight" : "minimal-light";
     int written = snprintf(json, capacity,
-                           "{\"schema\":1,\"theme\":\"%s\","
+                           "{\"schema\":1,\"theme\":\"%s\",%s"
                            "\"home_page\":\"home\",\"pages\":[{\"id\":\"home\","
                            "\"title\":\"Runtime cycle %d\",\"tiles\":[%s]},"
                            "{\"id\":\"secondary\",\"title\":\"Secondary\",\"tiles\":["
                            "{\"id\":\"offscreen\",\"type\":\"sensor\","
                            "\"pos\":[0,0],\"size\":[1,1],\"binding\":{"
                            "\"provider\":\"ui-fixture\",\"resource\":\"offscreen\"}}]}]}",
-                           theme, cycle, layout);
+                           theme, bar, cycle, layout);
     if (written < 0 || (size_t) written >= capacity) {
         free(json);
         return NULL;
@@ -1757,6 +1961,76 @@ static slate_config_t *sensor_test_config(void)
         slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
     slate_config_report_free(&report);
     return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
+static slate_config_t *bar_test_config(bool multiple_pages)
+{
+    static const char PREFIX[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"bar\":["
+        "{\"type\":\"clock\",\"slot\":0,\"span\":2},"
+        "{\"type\":\"title\",\"slot\":2,\"span\":5},"
+        "{\"type\":\"future_item\",\"slot\":7,\"span\":1},"
+        "{\"type\":\"page_indicator\",\"slot\":8,\"span\":1},"
+        "{\"type\":\"badge\",\"provider\":\"ui-fixture\",\"label\":\"Fixture\","
+        "\"slot\":9,\"span\":3}],\"pages\":[{\"id\":\"home\",\"title\":\"Home\","
+        "\"tiles\":[{\"id\":\"temperature\",\"type\":\"sensor\",\"pos\":[0,0],"
+        "\"size\":[1,1],\"binding\":{\"provider\":\"ui-fixture\","
+        "\"resource\":\"temperature\"}}]}";
+    static const char SECONDARY[] =
+        ",{\"id\":\"secondary\",\"title\":\"Secondary\",\"tiles\":[]}";
+    static const char SUFFIX[] = "]}";
+
+    size_t length = sizeof(PREFIX) - 1 + (multiple_pages ? sizeof(SECONDARY) - 1 : 0) +
+                    sizeof(SUFFIX);
+    char *json = malloc(length);
+    if (json == NULL) {
+        return NULL;
+    }
+    int written = snprintf(json, length, "%s%s%s", PREFIX,
+                           multiple_pages ? SECONDARY : "", SUFFIX);
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status = written > 0 && (size_t) written < length
+                                             ? slate_config_parse(json, (size_t) written,
+                                                                  &config, &report)
+                                             : SLATE_CONFIG_PARSE_INVALID_JSON;
+    free(json);
+    if (written > 0 && (size_t) written < length) {
+        slate_config_report_free(&report);
+    }
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
+static slate_config_t *empty_bar_test_config(void)
+{
+    static const char JSON[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\","
+        "\"bar\":[],\"pages\":[{\"id\":\"home\",\"tiles\":[]}]}";
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
+static bool config_has_error(const char *json, const char *code, const char *path)
+{
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(json, strlen(json), &config, &report);
+    bool found = false;
+    for (size_t i = 0; i < report.error_count; ++i) {
+        if (strcmp(report.errors[i].code, code) == 0 &&
+            strcmp(report.errors[i].path, path) == 0) {
+            found = true;
+            break;
+        }
+    }
+    slate_config_free(config);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_INVALID_CONFIG && found;
 }
 
 static slate_config_t *sensor_icon_test_config(void)
@@ -2068,6 +2342,40 @@ static bool page_indicator_at(size_t index, size_t count)
              (unsigned) index + 1, (unsigned) count);
     return s_tree != NULL && s_tree->page_indicator != NULL &&
            strcmp(lv_label_get_text(s_tree->page_indicator), expected) == 0;
+}
+
+static bar_item_view_t *find_bar_item(const char *type)
+{
+    if (s_tree == NULL) {
+        return NULL;
+    }
+    for (size_t i = 0; i < s_tree->bar_view_count; ++i) {
+        if (strcmp(s_tree->bar_views[i].config->type, type) == 0) {
+            return &s_tree->bar_views[i];
+        }
+    }
+    return NULL;
+}
+
+static bool configured_bar_geometry(void)
+{
+    if (s_tree == NULL || !s_tree->configured_bar ||
+        s_tree->bar_view_count != s_tree->model->config->bar_item_count) {
+        return false;
+    }
+    lv_obj_update_layout(s_tree->screen);
+    for (size_t i = 0; i < s_tree->bar_view_count; ++i) {
+        const bar_item_view_t *view = &s_tree->bar_views[i];
+        if (lv_obj_get_x(view->container) !=
+                UI_BAR_MARGIN + view->config->slot * UI_BAR_SLOT_WIDTH ||
+            lv_obj_get_y(view->container) != 0 ||
+            lv_obj_get_width(view->container) !=
+                view->config->span * UI_BAR_SLOT_WIDTH ||
+            lv_obj_get_height(view->container) != UI_BAR_HEIGHT) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static esp_err_t publish_test_states(void)
@@ -2764,6 +3072,114 @@ static esp_err_t selftest_on_task(void)
     ESP_LOGI(TAG, "selftest: page switch build/update next=%" PRIi64
                   " us previous=%" PRIi64 " us",
              next_page_us, previous_page_us);
+
+    slate_config_t *bar_config = bar_test_config(true);
+    UI_CHECK(bar_config != NULL &&
+                 slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_ONLINE) == ESP_OK &&
+                 rebuild_on_task(bar_config) == ESP_OK && configured_bar_geometry(),
+             "configured bar uses twelve exact 64 px slots");
+    bar_item_view_t *bar_clock = find_bar_item("clock");
+    bar_item_view_t *bar_title = find_bar_item("title");
+    bar_item_view_t *bar_future = find_bar_item("future_item");
+    bar_item_view_t *bar_pages = find_bar_item("page_indicator");
+    bar_item_view_t *bar_badge = find_bar_item("badge");
+    UI_CHECK(bar_clock != NULL && bar_clock->label != NULL &&
+                 bar_title != NULL && bar_title->label != NULL &&
+                 strcmp(lv_label_get_text(bar_title->label), "Home") == 0 &&
+                 bar_future != NULL && bar_future->label == NULL &&
+                 bar_future->dot == NULL &&
+                 !lv_obj_has_flag(bar_future->container, LV_OBJ_FLAG_CLICKABLE),
+             "known bar items render and unknown items reserve empty slots");
+    UI_CHECK(bar_pages != NULL && bar_pages->label != NULL &&
+                 strcmp(lv_label_get_text(bar_pages->label), "1 / 2") == 0,
+             "configured page indicator consumes the navigation counter");
+    UI_CHECK(bar_badge != NULL && bar_badge->label != NULL &&
+                 strcmp(lv_label_get_text(bar_badge->label), "Fixture") == 0 &&
+                 bar_badge->dot != NULL &&
+                 lv_color_eq(lv_obj_get_style_bg_color(bar_badge->dot, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->accent)) &&
+                 !lv_obj_has_flag(bar_badge->container, LV_OBJ_FLAG_CLICKABLE) &&
+                 !lv_obj_has_flag(bar_badge->dot, LV_OBJ_FLAG_CLICKABLE),
+             "online provider badge is legible and non-interactive");
+    esp_err_t badge_degraded =
+        slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_DEGRADED);
+    update_all();
+    UI_CHECK(badge_degraded == ESP_OK && bar_badge != NULL &&
+                 lv_color_eq(lv_obj_get_style_bg_color(bar_badge->dot, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->warn)),
+             "degraded provider badge uses the warning colour");
+    esp_err_t badge_offline =
+        slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_OFFLINE);
+    update_all();
+    UI_CHECK(badge_offline == ESP_OK && bar_badge != NULL &&
+                 lv_color_eq(lv_obj_get_style_bg_color(bar_badge->dot, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->text_lo)),
+             "offline provider badge uses the muted colour");
+    UI_CHECK(navigate_page(s_tree, LV_DIR_LEFT) == ESP_OK &&
+                 (bar_pages = find_bar_item("page_indicator")) != NULL &&
+                 bar_pages->label != NULL &&
+                 strcmp(lv_label_get_text(bar_pages->label), "2 / 2") == 0,
+             "configured page counter follows a swipe");
+    if (bar_config != NULL) {
+        slate_config_free(bar_config);
+    }
+
+    slate_config_t *single_bar = bar_test_config(false);
+    UI_CHECK(single_bar != NULL && rebuild_on_task(single_bar) == ESP_OK &&
+                 (bar_pages = find_bar_item("page_indicator")) != NULL &&
+                 bar_pages->label == NULL,
+             "single-page configured bar leaves its counter slot empty");
+    if (single_bar != NULL) {
+        slate_config_free(single_bar);
+    }
+
+    slate_config_t *empty_bar = empty_bar_test_config();
+    UI_CHECK(empty_bar != NULL && rebuild_on_task(empty_bar) == ESP_OK &&
+                 s_tree->configured_bar && s_tree->bar_view_count == 0 &&
+                 s_tree->clock == NULL && s_tree->provider == NULL,
+             "an explicit empty bar remains intentionally blank");
+    if (empty_bar != NULL) {
+        slate_config_free(empty_bar);
+    }
+
+    static const char INVALID_BAR[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\","
+        "\"bar\":{},\"pages\":[{\"id\":\"home\"}]}";
+    static const char OVERLAPPING_BAR[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"bar\":["
+        "{\"type\":\"clock\",\"slot\":0,\"span\":3},"
+        "{\"type\":\"title\",\"slot\":2,\"span\":4}],"
+        "\"pages\":[{\"id\":\"home\"}]}";
+    static const char MISSING_BADGE_PROVIDER[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"bar\":["
+        "{\"type\":\"badge\",\"slot\":0,\"span\":2}],"
+        "\"pages\":[{\"id\":\"home\"}]}";
+    static const char INVALID_BAR_ITEM[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\","
+        "\"bar\":[null],\"pages\":[{\"id\":\"home\"}]}";
+    static const char INVALID_BAR_SLOT[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\","
+        "\"bar\":[{\"type\":\"clock\",\"slot\":12,\"span\":1}],"
+        "\"pages\":[{\"id\":\"home\"}]}";
+    static const char INVALID_BAR_SPAN[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\","
+        "\"bar\":[{\"type\":\"clock\",\"slot\":11,\"span\":2}],"
+        "\"pages\":[{\"id\":\"home\"}]}";
+    UI_CHECK(config_has_error(INVALID_BAR, "bar_required", "/bar") &&
+                 config_has_error(INVALID_BAR_ITEM, "bar_item_required", "/bar/0") &&
+                 config_has_error(INVALID_BAR_SLOT, "bar_slot_invalid", "/bar/0/slot") &&
+                 config_has_error(INVALID_BAR_SPAN, "bar_span_invalid", "/bar/0/span") &&
+                 config_has_error(OVERLAPPING_BAR, "bar_overlap", "/bar/1/slot") &&
+                 config_has_error(MISSING_BADGE_PROVIDER, "provider_required",
+                                  "/bar/0/provider"),
+             "invalid bar shape, geometry, overlap and badge binding are rejected");
+
+    slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_ONLINE);
+    UI_CHECK(final != NULL && rebuild_on_task(final) == ESP_OK &&
+                 !s_tree->configured_bar && s_tree->clock != NULL &&
+                 s_tree->provider != NULL && page_indicator_at(0, 2) &&
+                 publish_test_states() == ESP_OK,
+             "an absent bar preserves the complete legacy layout");
     if (final != NULL) {
         slate_config_free(final);
     }

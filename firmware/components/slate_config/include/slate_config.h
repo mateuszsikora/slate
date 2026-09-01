@@ -19,6 +19,7 @@ extern "C" {
 #endif
 
 #define SLATE_CONFIG_SCHEMA_MAX 1
+#define SLATE_BAR_SLOT_COUNT    12
 
 typedef enum {
     SLATE_COMPONENT_UNKNOWN = 0,
@@ -54,6 +55,23 @@ typedef struct {
     size_t tile_count;
 } slate_config_page_t;
 
+typedef enum {
+    SLATE_BAR_ITEM_UNKNOWN = 0,
+    SLATE_BAR_ITEM_CLOCK,
+    SLATE_BAR_ITEM_TITLE,
+    SLATE_BAR_ITEM_BADGE,
+    SLATE_BAR_ITEM_PAGE_INDICATOR,
+} slate_bar_item_type_t;
+
+typedef struct {
+    char *type;
+    char *provider;
+    char *label;
+    slate_bar_item_type_t item_type;
+    uint8_t slot;
+    uint8_t span;
+} slate_config_bar_item_t;
+
 /* Settings are copied when they have the documented JSON type. Later issues
  * own their product defaults and range validation; presence bits keep an
  * omitted setting distinct from an explicit zero or false without inventing a
@@ -77,6 +95,9 @@ typedef struct {
     char *theme;
     char *home_page;
     slate_config_settings_t settings;
+    bool has_bar;
+    slate_config_bar_item_t *bar_items;
+    size_t bar_item_count;
     slate_config_page_t *pages;
     size_t page_count;
 } slate_config_t;
