@@ -38,6 +38,16 @@ bool slate_component_is_placeholder(slate_presentation_t presentation)
            presentation == SLATE_PRESENT_INCOMPATIBLE;
 }
 
+void slate_component_label_one_line(lv_obj_t *label)
+{
+    if (label == NULL) {
+        return;
+    }
+    const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(label, lv_font_get_line_height(font));
+}
+
 void slate_component_placeholder_text(const slate_resource_t *resource,
                                       char *out, size_t size)
 {

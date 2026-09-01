@@ -157,7 +157,7 @@ bool slate_sensor_build(lv_obj_t *tile, const slate_config_tile_t *config,
     if (view->value == NULL) {
         return false;
     }
-    lv_label_set_long_mode(view->value, LV_LABEL_LONG_DOT);
+    slate_component_label_one_line(view->value);
     lv_obj_set_flex_grow(view->value, 1);
 
     view->unit = make_label(reading, "", theme->caption, theme->text_lo);
@@ -171,8 +171,8 @@ bool slate_sensor_build(lv_obj_t *tile, const slate_config_tile_t *config,
     if (view->name == NULL) {
         return false;
     }
-    lv_label_set_long_mode(view->name, LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->name, lv_pct(100));
+    slate_component_label_one_line(view->name);
     lv_obj_align(view->name, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
     view->identity = make_label(tile, "", theme->caption, theme->warn);
@@ -222,6 +222,9 @@ void slate_sensor_update(const slate_sensor_view_t *view, const slate_resource_t
     }
     lv_label_set_text(view->value, value);
     lv_obj_set_style_text_font(view->value, value_font(theme, value), LV_PART_MAIN);
+    /* The reading picks its own font, so the one-line height has to follow it
+     * rather than stay at whatever the tile was built with. */
+    slate_component_label_one_line(view->value);
     lv_label_set_text(view->unit, state_present ? sensor->unit : "");
     if (view->icon != NULL) {
         lv_label_set_text(

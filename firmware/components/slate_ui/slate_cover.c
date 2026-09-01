@@ -179,7 +179,7 @@ static bool build_common(lv_obj_t *tile, const slate_config_tile_t *config,
         return false;
     }
 
-    lv_label_set_long_mode(view->name, LV_LABEL_LONG_DOT);
+    slate_component_label_one_line(view->name);
     lv_obj_set_style_text_align(view->position, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_label_set_long_mode(view->identity, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(view->identity, lv_pct(100));
@@ -223,12 +223,17 @@ static bool build_extended(lv_obj_t *tile, const slate_theme_t *theme,
         lv_obj_set_pos(view->icon, 0, 0);
         lv_obj_set_size(view->icon, 42, 42);
         lv_obj_set_style_text_align(view->icon, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_set_pos(view->name, 50, 0);
-        lv_obj_set_width(view->name, 78);
-        lv_obj_set_pos(view->position, 50, 28);
+        /* The name gets a row of its own under the icon rather than a 78 px
+         * column beside it. Half the tile width holds about seven characters,
+         * so every ordinary cover name was reaching the truncation this file
+         * now applies; a 1x2 tile has the height to spare and does not need to
+         * spend legibility on it. */
+        lv_obj_set_pos(view->position, 50, 8);
         lv_obj_set_width(view->position, 78);
-        lv_obj_set_pos(view->motion, 128, 22);
+        lv_obj_set_pos(view->motion, 128, 8);
         lv_obj_set_size(view->motion, 28, 28);
+        lv_obj_set_pos(view->name, 0, 44);
+        lv_obj_set_width(view->name, lv_pct(100));
         lv_obj_set_width(view->open_button, lv_pct(100));
         lv_obj_set_pos(view->open_button, 0, 72);
         lv_obj_set_width(view->stop_button, lv_pct(100));
