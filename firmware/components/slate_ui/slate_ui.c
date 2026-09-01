@@ -2106,6 +2106,26 @@ static esp_err_t selftest_on_task(void)
         return ESP_ERR_NO_MEM;
     }
 
+    lv_obj_t *padded_label = make_label(anchor, "Short label", midnight->body,
+                                        midnight->text_hi);
+    if (padded_label != NULL) {
+        lv_obj_set_width(padded_label, 180);
+        lv_obj_set_style_pad_top(padded_label, 3, LV_PART_MAIN);
+        lv_obj_set_style_pad_bottom(padded_label, 5, LV_PART_MAIN);
+        slate_component_label_one_line(padded_label);
+        lv_obj_update_layout(anchor);
+    }
+    UI_CHECK(padded_label != NULL &&
+                 strcmp(lv_label_get_text(padded_label), "Short label") == 0 &&
+                 lv_obj_get_height(padded_label) ==
+                     lv_font_get_line_height(midnight->body) +
+                         lv_obj_get_style_space_top(padded_label, LV_PART_MAIN) +
+                         lv_obj_get_style_space_bottom(padded_label, LV_PART_MAIN),
+             "one-line labels retain a full content row with padding");
+    if (padded_label != NULL) {
+        lv_obj_delete(padded_label);
+    }
+
     for (int i = -UI_TEST_WARMUP; i < 0; i++) {
         heap_sample_t built;
         heap_sample_t after;
@@ -2318,6 +2338,7 @@ static esp_err_t selftest_on_task(void)
                  pressure != NULL &&
                  lv_label_get_long_mode(pressure->name) == LV_LABEL_LONG_DOT,
              "sensor names use glyph-safe ellipsis");
+    lv_obj_update_layout(s_tree->screen);
     UI_CHECK(temperature != NULL &&
                  lv_obj_get_style_text_font(temperature->sensor.value, LV_PART_MAIN) ==
                      s_tree->theme->hero &&
@@ -2328,6 +2349,13 @@ static esp_err_t selftest_on_task(void)
                  lv_obj_get_style_text_font(status->sensor.value, LV_PART_MAIN) ==
                      s_tree->theme->caption,
              "sensor type scale steps down as rendered values grow");
+    UI_CHECK(status != NULL &&
+                 lv_label_get_long_mode(status->sensor.value) == LV_LABEL_LONG_DOT &&
+                 lv_obj_get_height(status->sensor.value) ==
+                     lv_font_get_line_height(s_tree->theme->caption) +
+                         lv_obj_get_style_space_top(status->sensor.value, LV_PART_MAIN) +
+                         lv_obj_get_style_space_bottom(status->sensor.value, LV_PART_MAIN),
+             "long textual sensor recomputes one-line height after changing font");
     UI_CHECK(temperature != NULL && temperature->sensor.icon == NULL && humidity != NULL &&
                  humidity->sensor.icon == NULL,
              "1x1 sensors omit the leading icon");
@@ -2457,11 +2485,8 @@ static esp_err_t selftest_on_task(void)
              "1x1 light exposes toggle without a dead state-dot target");
 
     lv_obj_update_layout(s_tree->screen);
-    const lv_font_t *compact_name_font =
-        compact != NULL ? lv_obj_get_style_text_font(compact->name, LV_PART_MAIN) : NULL;
-    UI_CHECK(compact != NULL && compact_name_font != NULL &&
-                 lv_obj_get_height(compact->name) ==
-                     lv_font_get_line_height(compact_name_font) &&
+    UI_CHECK(compact != NULL &&
+                 lv_label_get_long_mode(compact->name) == LV_LABEL_LONG_DOT &&
                  lv_obj_get_y(compact->name) >=
                      lv_obj_get_y(compact->light.icon) +
                          lv_obj_get_height(compact->light.icon),
@@ -2825,17 +2850,23 @@ static esp_err_t selftest_on_task(void)
                             lv_obj_get_width(vertical_cover->cover.close_button) >= 48 &&
                             lv_obj_get_height(vertical_cover->cover.close_button) >= 48;
     UI_CHECK(cover_targets_ok, "1x2 and 2x1 cover controls meet the 48 px target");
+    UI_CHECK(vertical_cover != NULL &&
+                 lv_obj_get_y(vertical_cover->cover.name) +
+                         lv_obj_get_height(vertical_cover->cover.name) <=
+                     lv_obj_get_y(vertical_cover->cover.open_button),
+             "vertical cover name keeps clear of its first control");
     UI_CHECK(compact_cover != NULL && compact_cover->cover.compact &&
                  strcmp(lv_label_get_text(compact_cover->cover.icon),
                         SLATE_ICON_WINDOW_SHUTTER) == 0 &&
                  strcmp(lv_label_get_text(compact_cover->cover.position), "0%") == 0 &&
-                 lv_obj_has_flag(compact_cover->tile, LV_OBJ_FLAG_CLICKABLE) &&
-                 vertical_cover != NULL && vertical_cover->cover.vertical &&
+                 lv_obj_has_flag(compact_cover->tile, LV_OBJ_FLAG_CLICKABLE),
+             "compact cover icon follows position and remains actionable");
+    UI_CHECK(vertical_cover != NULL && vertical_cover->cover.vertical &&
                  strcmp(lv_label_get_text(vertical_cover->cover.name),
                         "Bedroom curtain") == 0 &&
                  strcmp(lv_label_get_text(vertical_cover->cover.icon),
                         SLATE_ICON_CURTAINS) == 0,
-             "compact icon follows position and configured overrides survive state");
+             "vertical cover keeps configured label and icon overrides");
     UI_CHECK(horizontal_cover != NULL && horizontal_cover->cover.motion_animation &&
                  !lv_obj_has_flag(horizontal_cover->cover.motion, LV_OBJ_FLAG_HIDDEN) &&
                  strcmp(lv_label_get_text(horizontal_cover->cover.motion),

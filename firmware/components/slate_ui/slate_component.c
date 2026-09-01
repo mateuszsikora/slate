@@ -45,7 +45,12 @@ void slate_component_label_one_line(lv_obj_t *label)
     }
     const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-    lv_obj_set_height(label, lv_font_get_line_height(font));
+    /* LVGL compares the rendered text against the label's content box, not
+     * its outer bounds. Include any future padding or border so a short label
+     * still has exactly one full line available instead of becoming dots. */
+    int32_t vertical_space = lv_obj_get_style_space_top(label, LV_PART_MAIN) +
+                             lv_obj_get_style_space_bottom(label, LV_PART_MAIN);
+    lv_obj_set_height(label, lv_font_get_line_height(font) + vertical_space);
 }
 
 void slate_component_placeholder_text(const slate_resource_t *resource,

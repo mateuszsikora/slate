@@ -179,7 +179,6 @@ static bool build_common(lv_obj_t *tile, const slate_config_tile_t *config,
         return false;
     }
 
-    slate_component_label_one_line(view->name);
     lv_obj_set_style_text_align(view->position, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_label_set_long_mode(view->identity, LV_LABEL_LONG_WRAP);
     lv_obj_set_width(view->identity, lv_pct(100));
@@ -202,6 +201,7 @@ static bool build_compact(lv_obj_t *tile, const slate_theme_t *theme,
     lv_obj_set_pos(view->position, 96, 8);
     lv_obj_set_width(view->position, 60);
     lv_obj_set_width(view->name, lv_pct(100));
+    slate_component_label_one_line(view->name);
     lv_obj_align(view->name, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_obj_add_event_cb(tile, toggle_event, LV_EVENT_CLICKED, view);
     (void) theme;
@@ -234,6 +234,8 @@ static bool build_extended(lv_obj_t *tile, const slate_theme_t *theme,
         lv_obj_set_size(view->motion, 28, 28);
         lv_obj_set_pos(view->name, 0, 44);
         lv_obj_set_width(view->name, lv_pct(100));
+        lv_obj_set_style_text_font(view->name, theme->caption, LV_PART_MAIN);
+        slate_component_label_one_line(view->name);
         lv_obj_set_width(view->open_button, lv_pct(100));
         lv_obj_set_pos(view->open_button, 0, 72);
         lv_obj_set_width(view->stop_button, lv_pct(100));
@@ -252,6 +254,7 @@ static bool build_extended(lv_obj_t *tile, const slate_theme_t *theme,
         lv_obj_set_style_text_align(view->icon, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
         lv_obj_set_pos(view->name, 52, 0);
         lv_obj_set_width(view->name, content_width - 202);
+        slate_component_label_one_line(view->name);
         lv_obj_set_pos(view->position, content_width - 140, 0);
         lv_obj_set_width(view->position, 100);
         lv_obj_set_pos(view->motion, content_width - 32, 0);
