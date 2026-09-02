@@ -110,10 +110,20 @@ The direct provider is the smallest useful interoperability path: a script or No
 
 ### 3.2 Grid
 
-The display is 800×480. A fixed 56 px system bar at the top shows the clock,
-current page title and connection indicator. A dashboard with more than one
-page also shows the current and total page numbers. The bar arrangement is
-fixed.
+The display is 800×480. A fixed 56 px system bar at the top has 16 px outer
+margins and twelve gapless 64 px slots. The optional top-level `bar` array
+places non-interactive items with a zero-based `slot` and a `span`: `clock`,
+`title`, `page_indicator`, or a provider `badge`. Items may not overlap or
+extend beyond slot 11. A badge names its `provider` and may override its
+caption with `label`; its dot uses the theme accent while online, warning while
+connecting or degraded, and muted colour while offline or unconfigured.
+
+Omitting `bar` preserves the schema-1 compatible arrangement: clock, current
+page title, connection status and, on multi-page dashboards, an exact
+current/total page number. An explicit empty array makes the bar blank. Unknown
+bar item types reserve their declared slots but render empty, so a document
+from newer firmware degrades without rearranging its known items. The page
+indicator is empty for a single-page dashboard in either arrangement.
 
 A horizontal swipe inside the content area moves one page left or right without
 wrapping at either end. A single-page dashboard has no position indicator. When
@@ -148,6 +158,12 @@ Twelve cells is also the performance answer, not only a layout choice: S-2 measu
     "screen_off_after": 0,
     "wake_on_touch": true
   },
+  "bar": [
+    {"type": "clock", "slot": 0, "span": 2},
+    {"type": "title", "slot": 2, "span": 6},
+    {"type": "page_indicator", "slot": 8, "span": 1},
+    {"type": "badge", "slot": 9, "span": 3, "provider": "ha", "label": "Home"}
+  ],
   "pages": [
     {
       "id": "home",
@@ -318,13 +334,15 @@ one tile may violate more than one rule:
 public machine-readable contract; firmware does not return presentation text,
 so the editor can localize it. The schema-1 validation vocabulary is
 `schema_required`, `schema_invalid`, `schema_too_new`, `theme_required`,
-`theme_not_found`, `pages_required`, `duplicate_page_id`,
+`theme_not_found`, `bar_required`, `bar_item_required`, `bar_slot_invalid`,
+`bar_span_invalid`, `bar_overlap`, `pages_required`, `duplicate_page_id`,
 `home_page_not_found`, `tile_id_required`, `duplicate_tile_id`,
 `invalid_position`, `invalid_size`, `tile_out_of_bounds`, `tile_overlap`,
 `binding_required`, `provider_required` and `resource_required`. A tile without
 an id and a duplicate tile id are document-wide errors because neither has an
-unambiguous `tile.id` bucket. Unknown fields, component types and provider ids
-retain section 3's forward-compatible behavior and are not validation errors.
+unambiguous `tile.id` bucket. Unknown fields, component types, bar item types
+and provider ids retain section 3's forward-compatible behavior and are not
+validation errors.
 `provider_required` and `resource_required` also cover a wrong JSON type, an
 empty string or the length limits from section 3.3. `binding_required` also
 covers reuse of one provider/resource pair by conflicting known component

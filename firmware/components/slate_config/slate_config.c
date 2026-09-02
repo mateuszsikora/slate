@@ -159,6 +159,23 @@ static slate_component_type_t component_type(const cJSON *tile)
     return SLATE_COMPONENT_UNKNOWN;
 }
 
+static slate_bar_item_type_t bar_item_type(const char *type)
+{
+    if (strcmp(type, "clock") == 0) {
+        return SLATE_BAR_ITEM_CLOCK;
+    }
+    if (strcmp(type, "title") == 0) {
+        return SLATE_BAR_ITEM_TITLE;
+    }
+    if (strcmp(type, "badge") == 0) {
+        return SLATE_BAR_ITEM_BADGE;
+    }
+    if (strcmp(type, "page_indicator") == 0) {
+        return SLATE_BAR_ITEM_PAGE_INDICATOR;
+    }
+    return SLATE_BAR_ITEM_UNKNOWN;
+}
+
 static bool grid_pair(const cJSON *tile, const char *name, int *first, int *second)
 {
     const cJSON *pair = cJSON_GetObjectItemCaseSensitive(tile, name);
@@ -313,6 +330,73 @@ static void validate_binding(validation_t *validation, const cJSON *binding,
     }
 }
 
+static void validate_bar(const cJSON *root, slate_config_report_t *report)
+{
+    const cJSON *bar = cJSON_GetObjectItemCaseSensitive(root, "bar");
+    if (bar == NULL) {
+        return;
+    }
+    if (!cJSON_IsArray(bar)) {
+        add_error(report, "bar_required", "/bar", NULL);
+        return;
+    }
+
+    uint16_t occupied = 0;
+    for (int i = 0; i < cJSON_GetArraySize(bar); ++i) {
+        const cJSON *item = cJSON_GetArrayItem(bar, i);
+        char item_path[64];
+        snprintf(item_path, sizeof(item_path), "/bar/%d", i);
+        if (!cJSON_IsObject(item)) {
+            add_error(report, "bar_item_required", item_path, NULL);
+            continue;
+        }
+
+        const cJSON *type = cJSON_GetObjectItemCaseSensitive(item, "type");
+        char field_path[96];
+        if (!cJSON_IsString(type) || type->valuestring[0] == '\0') {
+            snprintf(field_path, sizeof(field_path), "%s/type", item_path);
+            add_error(report, "bar_item_required", field_path, NULL);
+        }
+
+        int slot = 0;
+        const cJSON *slot_json = cJSON_GetObjectItemCaseSensitive(item, "slot");
+        bool slot_ok = json_integer(slot_json, &slot) && slot >= 0 &&
+                       slot < SLATE_BAR_SLOT_COUNT;
+        if (!slot_ok) {
+            snprintf(field_path, sizeof(field_path), "%s/slot", item_path);
+            add_error(report, "bar_slot_invalid", field_path, NULL);
+        }
+
+        int span = 0;
+        const cJSON *span_json = cJSON_GetObjectItemCaseSensitive(item, "span");
+        bool span_ok = json_integer(span_json, &span) && span >= 1 &&
+                       span <= SLATE_BAR_SLOT_COUNT &&
+                       (!slot_ok || slot + span <= SLATE_BAR_SLOT_COUNT);
+        if (!span_ok) {
+            snprintf(field_path, sizeof(field_path), "%s/span", item_path);
+            add_error(report, "bar_span_invalid", field_path, NULL);
+        }
+
+        if (slot_ok && span_ok) {
+            uint16_t mask = (uint16_t) (((1u << span) - 1u) << slot);
+            if ((occupied & mask) != 0) {
+                snprintf(field_path, sizeof(field_path), "%s/slot", item_path);
+                add_error(report, "bar_overlap", field_path, NULL);
+            }
+            occupied |= mask;
+        }
+
+        if (cJSON_IsString(type) && strcmp(type->valuestring, "badge") == 0) {
+            const cJSON *provider = cJSON_GetObjectItemCaseSensitive(item, "provider");
+            if (!cJSON_IsString(provider) || provider->valuestring[0] == '\0' ||
+                strlen(provider->valuestring) > SLATE_PROVIDER_ID_MAX) {
+                snprintf(field_path, sizeof(field_path), "%s/provider", item_path);
+                add_error(report, "provider_required", field_path, NULL);
+            }
+        }
+    }
+}
+
 static bool rectangles_overlap(const cJSON *left, const cJSON *right)
 {
     int lx, ly, lw, lh;
@@ -454,6 +538,8 @@ static void validate_document(const cJSON *root, validation_t *validation)
         add_error(report, "theme_not_found", "/theme", NULL);
     }
 
+    validate_bar(root, report);
+
     const cJSON *pages = cJSON_GetObjectItemCaseSensitive(root, "pages");
     if (!cJSON_IsArray(pages)) {
         add_error(report, "pages_required", "/pages", NULL);
@@ -531,6 +617,12 @@ void slate_config_free(slate_config_t *config)
     free(config->settings.timezone);
     free(config->settings.night_start);
     free(config->settings.night_end);
+    for (size_t i = 0; i < config->bar_item_count; ++i) {
+        free(config->bar_items[i].type);
+        free(config->bar_items[i].provider);
+        free(config->bar_items[i].label);
+    }
+    free(config->bar_items);
     for (size_t p = 0; p < config->page_count; p++) {
         slate_config_page_t *page = &config->pages[p];
         free(page->id);
@@ -593,6 +685,45 @@ static bool build_settings(const cJSON *root, slate_config_settings_t *settings)
     if (cJSON_IsBool(item)) {
         settings->has_wake_on_touch = true;
         settings->wake_on_touch = cJSON_IsTrue(item);
+    }
+    return true;
+}
+
+static bool build_bar(const cJSON *root, slate_config_t *config)
+{
+    const cJSON *bar = cJSON_GetObjectItemCaseSensitive(root, "bar");
+    if (bar == NULL) {
+        return true;
+    }
+    config->has_bar = true;
+    size_t bar_item_count = (size_t) cJSON_GetArraySize(bar);
+    if (bar_item_count == 0) {
+        return true;
+    }
+    slate_config_bar_item_t *bar_items =
+        config_calloc(bar_item_count, sizeof(*bar_items));
+    if (bar_items == NULL) {
+        return false;
+    }
+    config->bar_items = bar_items;
+    config->bar_item_count = bar_item_count;
+    for (size_t i = 0; i < config->bar_item_count; ++i) {
+        const cJSON *json = cJSON_GetArrayItem(bar, (int) i);
+        const cJSON *type = cJSON_GetObjectItemCaseSensitive(json, "type");
+        int slot = 0;
+        int span = 0;
+        json_integer(cJSON_GetObjectItemCaseSensitive(json, "slot"), &slot);
+        json_integer(cJSON_GetObjectItemCaseSensitive(json, "span"), &span);
+        slate_config_bar_item_t *item = &config->bar_items[i];
+        item->type = config_strdup(type->valuestring);
+        item->item_type = bar_item_type(type->valuestring);
+        item->slot = (uint8_t) slot;
+        item->span = (uint8_t) span;
+        if (item->type == NULL ||
+            !copy_optional_string(json, "provider", &item->provider) ||
+            !copy_optional_string(json, "label", &item->label)) {
+            return false;
+        }
     }
     return true;
 }
@@ -660,7 +791,8 @@ static slate_config_t *build_config(const cJSON *root)
     config->theme = config_strdup(theme->valuestring);
     config->home_page = config_strdup(home_page->valuestring);
     config->page_count = (size_t) cJSON_GetArraySize(pages);
-    if (config->theme == NULL || config->home_page == NULL || !build_settings(root, &config->settings)) {
+    if (config->theme == NULL || config->home_page == NULL ||
+        !build_settings(root, &config->settings) || !build_bar(root, config)) {
         slate_config_free(config);
         return NULL;
     }

@@ -10,6 +10,7 @@ import {
   type TileSize,
 } from '../lib/editor'
 import { ComponentLibrary } from './ComponentLibrary'
+import { BarEditor } from './BarEditor'
 import { ConfigTransfer } from './ConfigTransfer'
 import { DashboardGrid } from './DashboardGrid'
 import { Inspector } from './Inspector'
@@ -187,6 +188,17 @@ export function Workspace({
           {notice}
         </p>
       ) : null}
+
+      <BarEditor
+        bar={config.bar}
+        providers={providers}
+        onChange={(bar) => {
+          const next = { ...config }
+          if (bar === undefined) delete next.bar
+          else next.bar = bar
+          onChange(next)
+        }}
+      />
 
       <div className="editor-layout">
         <ComponentLibrary onAdd={(type) => addTile(type)} />
