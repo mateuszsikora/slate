@@ -207,6 +207,20 @@ static void provider_summary(char *out, size_t size, uint32_t *color,
         unavailable = unavailable || provider_status_unavailable(info.status);
     }
 
+    /* The fixed-width bar may ellipsize a multi-provider summary. Give the
+     * most important outage the available width first and retain registration
+     * order for peers with the same severity. */
+    for (size_t i = 1; i < active_count; i++) {
+        slate_state_provider_info_t info = providers[i];
+        unsigned rank = provider_status_rank(info.status);
+        size_t j = i;
+        while (j > 0 && provider_status_rank(providers[j - 1].status) < rank) {
+            providers[j] = providers[j - 1];
+            j--;
+        }
+        providers[j] = info;
+    }
+
     for (size_t i = 0; i < active_count; i++) {
         slate_state_provider_info_t info = providers[i];
         unsigned rank = provider_status_rank(info.status);
@@ -275,10 +289,15 @@ static void style_presentation(binding_view_t *view, slate_presentation_t presen
                 presentation == SLATE_PRESENT_INCOMPATIBLE || phase == SLATE_ACTION_ERROR;
 
     lv_obj_set_style_opa(view->tile, dim ? LV_OPA_50 : LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_border_width(view->tile,
-                                  warn || phase == SLATE_ACTION_PENDING ? 2 : 0,
-                                  LV_PART_MAIN);
-    lv_obj_set_style_border_color(
+    /* An outline, not a border. LVGL counts border width into the content area
+     * (lv_obj_get_style_space_left()), so raising a 2 px border on touch moved
+     * every child of the tile 2 px down and right — the name visibly jumped
+     * when a light was tapped, which read as the panel mis-registering the
+     * touch. An outline is drawn outside the tile and owns no layout. */
+    lv_obj_set_style_outline_width(view->tile,
+                                   warn || phase == SLATE_ACTION_PENDING ? 2 : 0,
+                                   LV_PART_MAIN);
+    lv_obj_set_style_outline_color(
         view->tile,
         lv_color_hex(warn ? theme->warn : theme->accent),
         LV_PART_MAIN);
@@ -445,8 +464,8 @@ static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title)
         tree_destroy(tree);
         return NULL;
     }
-    lv_label_set_long_mode(page_title, LV_LABEL_LONG_DOT);
     lv_obj_set_width(page_title, 320);
+    slate_component_label_one_line(page_title);
     lv_obj_align(page_title, LV_ALIGN_CENTER, 0, 0);
 
     tree->provider = make_label(bar, "PROVIDERS DEGRADED", theme->caption, theme->text_lo);
@@ -454,8 +473,8 @@ static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title)
         tree_destroy(tree);
         return NULL;
     }
-    lv_label_set_long_mode(tree->provider, LV_LABEL_LONG_DOT);
     lv_obj_set_width(tree->provider, 220);
+    slate_component_label_one_line(tree->provider);
     lv_obj_set_style_text_align(tree->provider, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_obj_align(tree->provider, LV_ALIGN_RIGHT_MID, 0, 0);
 
@@ -626,8 +645,8 @@ static bool build_known_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
     if (name_label == NULL) {
         return false;
     }
-    lv_label_set_long_mode(name_label, LV_LABEL_LONG_DOT);
     lv_obj_set_width(name_label, lv_pct(100));
+    slate_component_label_one_line(name_label);
     lv_obj_align(name_label, LV_ALIGN_TOP_LEFT, 0, 0);
 
     char identity[SLATE_PROVIDER_ID_MAX + SLATE_RESOURCE_ID_MAX + 16];
@@ -636,8 +655,8 @@ static bool build_known_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
     if (detail == NULL) {
         return false;
     }
-    lv_label_set_long_mode(detail, LV_LABEL_LONG_DOT);
     lv_obj_set_width(detail, lv_pct(100));
+    slate_component_label_one_line(detail);
     lv_obj_align(detail, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
     /* Every binding enters the state store. Generic multi-binding components
@@ -1440,7 +1459,11 @@ static slate_config_t *light_test_config(void)
     static const char JSON[] =
         "{\"schema\":1,\"theme\":\"minimal-light\",\"home_page\":\"lights\",\"pages\":[{"
         "\"id\":\"lights\",\"title\":\"Light component #22\",\"tiles\":["
-        "{\"id\":\"compact\",\"type\":\"light\",\"pos\":[0,0],\"size\":[1,1],"
+        /* The compact tile carries a name far too long for a 1x1 cell on
+         * purpose: it is the fixture for the truncation check below. */
+        "{\"id\":\"compact\",\"type\":\"light\","
+        "\"label\":\"Upstairs landing reading lamp by the window\","
+        "\"pos\":[0,0],\"size\":[1,1],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"living-room\"}},"
         "{\"id\":\"wide\",\"type\":\"light\",\"pos\":[1,0],\"size\":[2,1],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"kitchen\"}},"
@@ -2027,6 +2050,16 @@ static bool sensor_view_text(const char *resource, const char *value, const char
            strcmp(lv_label_get_text(view->sensor.unit), unit) == 0;
 }
 
+static bool label_is_one_line(lv_obj_t *label)
+{
+    const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    return font != NULL &&
+           lv_obj_get_height(label) ==
+               lv_font_get_line_height(font) +
+                   lv_obj_get_style_space_top(label, LV_PART_MAIN) +
+                   lv_obj_get_style_space_bottom(label, LV_PART_MAIN);
+}
+
 static esp_err_t selftest_on_task(void)
 {
     unsigned checks = 0;
@@ -2095,6 +2128,26 @@ static esp_err_t selftest_on_task(void)
     if (anchor == NULL) {
         UI_CHECK(false, "persistent heap baseline activated");
         return ESP_ERR_NO_MEM;
+    }
+
+    lv_obj_t *padded_label = make_label(anchor, "Short label", midnight->body,
+                                        midnight->text_hi);
+    if (padded_label != NULL) {
+        lv_obj_set_width(padded_label, 180);
+        lv_obj_set_style_pad_top(padded_label, 3, LV_PART_MAIN);
+        lv_obj_set_style_pad_bottom(padded_label, 5, LV_PART_MAIN);
+        slate_component_label_one_line(padded_label);
+        lv_obj_update_layout(anchor);
+    }
+    UI_CHECK(padded_label != NULL &&
+                 strcmp(lv_label_get_text(padded_label), "Short label") == 0 &&
+                 lv_obj_get_height(padded_label) ==
+                     lv_font_get_line_height(midnight->body) +
+                         lv_obj_get_style_space_top(padded_label, LV_PART_MAIN) +
+                         lv_obj_get_style_space_bottom(padded_label, LV_PART_MAIN),
+             "one-line labels retain a full content row with padding");
+    if (padded_label != NULL) {
+        lv_obj_delete(padded_label);
     }
 
     for (int i = -UI_TEST_WARMUP; i < 0; i++) {
@@ -2219,14 +2272,18 @@ static esp_err_t selftest_on_task(void)
         slate_state_drain(discard_changed, NULL);
         update_all();
     }
+    lv_obj_update_layout(s_tree->screen);
+    const char *provider_text = lv_label_get_text(s_tree->provider);
     UI_CHECK(fixture_offline_err == ESP_OK && s_tree == mixed_tree &&
                  direct_view != NULL &&
                  lv_obj_get_style_opa(direct_view->tile, LV_PART_MAIN) == LV_OPA_50 &&
                  fixture_view != NULL &&
                  lv_obj_get_style_opa(fixture_view->tile, LV_PART_MAIN) == LV_OPA_50 &&
-                 strcmp(lv_label_get_text(s_tree->provider),
-                        "DIRECT CONNECTING + UI-FIXTURE OFFLINE") == 0,
-             "the bar names simultaneous unavailable providers");
+                 label_is_one_line(s_tree->provider) &&
+                 strncmp(provider_text, "UI-FIXTURE OFFLINE",
+                         strlen("UI-FIXTURE OFFLINE")) == 0 &&
+                 strstr(provider_text, "...") != NULL,
+             "the bar prioritizes and truncates a multi-provider outage");
 
     esp_err_t direct_degraded_err =
         slate_state_provider_set_status("direct", SLATE_PROVIDER_DEGRADED);
@@ -2309,6 +2366,7 @@ static esp_err_t selftest_on_task(void)
                  pressure != NULL &&
                  lv_label_get_long_mode(pressure->name) == LV_LABEL_LONG_DOT,
              "sensor names use glyph-safe ellipsis");
+    lv_obj_update_layout(s_tree->screen);
     UI_CHECK(temperature != NULL &&
                  lv_obj_get_style_text_font(temperature->sensor.value, LV_PART_MAIN) ==
                      s_tree->theme->hero &&
@@ -2319,6 +2377,13 @@ static esp_err_t selftest_on_task(void)
                  lv_obj_get_style_text_font(status->sensor.value, LV_PART_MAIN) ==
                      s_tree->theme->caption,
              "sensor type scale steps down as rendered values grow");
+    UI_CHECK(status != NULL &&
+                 lv_label_get_long_mode(status->sensor.value) == LV_LABEL_LONG_DOT &&
+                 lv_obj_get_height(status->sensor.value) ==
+                     lv_font_get_line_height(s_tree->theme->caption) +
+                         lv_obj_get_style_space_top(status->sensor.value, LV_PART_MAIN) +
+                         lv_obj_get_style_space_bottom(status->sensor.value, LV_PART_MAIN),
+             "long textual sensor recomputes one-line height after changing font");
     UI_CHECK(temperature != NULL && temperature->sensor.icon == NULL && humidity != NULL &&
                  humidity->sensor.icon == NULL,
              "1x1 sensors omit the leading icon");
@@ -2447,6 +2512,14 @@ static esp_err_t selftest_on_task(void)
                         SLATE_ICON_LIGHTBULB_ON) == 0,
              "1x1 light exposes toggle without a dead state-dot target");
 
+    lv_obj_update_layout(s_tree->screen);
+    UI_CHECK(compact != NULL &&
+                 lv_label_get_long_mode(compact->name) == LV_LABEL_LONG_DOT &&
+                 lv_obj_get_y(compact->name) >=
+                     lv_obj_get_y(compact->light.icon) +
+                         lv_obj_get_height(compact->light.icon),
+             "a name longer than its cell is truncated, not wrapped over the icon");
+
     const slate_snapshot_t compact_with_late_dimming = {
         .resource = "living-room",
         .kind = SLATE_KIND_LIGHT,
@@ -2471,6 +2544,7 @@ static esp_err_t selftest_on_task(void)
                  compact->light.brightness_slider == NULL &&
                  lv_obj_has_flag(compact->tile, LV_OBJ_FLAG_CLICKABLE),
              "late dimming capability is safe on compact light");
+    lv_obj_update_layout(s_tree->screen);
     UI_CHECK(wide != NULL && wide->light.brightness_slider != NULL &&
                  wide->light.temperature_slider == NULL &&
                  !lv_obj_has_flag(wide->light.brightness_slider, LV_OBJ_FLAG_HIDDEN) &&
@@ -2478,11 +2552,13 @@ static esp_err_t selftest_on_task(void)
                  lv_slider_get_max_value(wide->light.brightness_slider) == 95 &&
                  strcmp(lv_label_get_text(wide->light.brightness_value), "62%") == 0,
              "2x1 light renders advertised brightness range");
+    const char *wide_name = wide != NULL ? lv_label_get_text(wide->name) : "";
     UI_CHECK(wide != NULL &&
                  lv_label_get_long_mode(wide->name) == LV_LABEL_LONG_DOT &&
-                 strcmp(lv_label_get_text(wide->name),
-                        "Kitchen pendants with a long name") == 0,
-             "long light names use glyph-safe ellipsis without changing text");
+                 label_is_one_line(wide->name) &&
+                 strncmp(wide_name, "Kitchen pendants", strlen("Kitchen pendants")) == 0 &&
+                 strstr(wide_name, "...") != NULL,
+             "long light names truncate to one line with an ellipsis");
     UI_CHECK(large != NULL && large->light.state_dot != NULL &&
                  large->light.brightness_slider != NULL &&
                  large->light.temperature_slider != NULL &&
@@ -2646,6 +2722,12 @@ static esp_err_t selftest_on_task(void)
     binding_view_t *action_dimmer = find_view("ui-fixture", "action-dimmer");
     binding_view_t *action_temperature = find_view("ui-fixture", "action-temperature");
     unsigned calls_before = s_fixture.action_calls;
+    /* Where the tile's name sits before it is touched. The pending pulse must
+     * not move it: a border would, because LVGL counts border width into the
+     * content area every child is placed against. */
+    lv_obj_update_layout(s_tree->screen);
+    int32_t idle_name_x = action_toggle != NULL ? lv_obj_get_x(action_toggle->name) : 0;
+    int32_t idle_name_y = action_toggle != NULL ? lv_obj_get_y(action_toggle->name) : 0;
     lv_result_t toggle_result = action_toggle != NULL
                                     ? lv_obj_send_event(action_toggle->tile,
                                                         LV_EVENT_CLICKED, NULL)
@@ -2663,9 +2745,16 @@ static esp_err_t selftest_on_task(void)
                  toggle_feedback.phase == SLATE_ACTION_PENDING &&
                  !toggle_feedback.optimistic.light.on &&
                  action_toggle->light.pending_animation &&
+                 lv_obj_get_style_outline_width(action_toggle->tile,
+                                                LV_PART_MAIN) == 2 &&
                  lv_obj_get_style_border_width(action_toggle->tile,
-                                               LV_PART_MAIN) == 2,
+                                               LV_PART_MAIN) == 0,
              "1x1 tap emits optimistic toggle with a pending pulse");
+    lv_obj_update_layout(s_tree->screen);
+    UI_CHECK(action_toggle != NULL &&
+                 lv_obj_get_x(action_toggle->name) == idle_name_x &&
+                 lv_obj_get_y(action_toggle->name) == idle_name_y,
+             "the pending pulse leaves tile content where it was");
     UI_CHECK(publish_action_test_states(false, 62, 3200) == ESP_OK,
              "matching state confirms optimistic toggle");
     UI_CHECK(slate_action_feedback("ui-fixture", "action-toggle", &toggle_feedback) == ESP_OK &&
@@ -2703,7 +2792,7 @@ static esp_err_t selftest_on_task(void)
     update_all();
     UI_CHECK(action_dimmer != NULL &&
                  strcmp(lv_label_get_text(action_dimmer->light.brightness_value), "62%") == 0 &&
-                 lv_obj_get_style_border_width(action_dimmer->tile, LV_PART_MAIN) == 2 &&
+                 lv_obj_get_style_outline_width(action_dimmer->tile, LV_PART_MAIN) == 2 &&
                  !action_dimmer->light.pending_animation,
              "failed brightness action reverts and renders error state");
 
@@ -2792,17 +2881,23 @@ static esp_err_t selftest_on_task(void)
                             lv_obj_get_width(vertical_cover->cover.close_button) >= 48 &&
                             lv_obj_get_height(vertical_cover->cover.close_button) >= 48;
     UI_CHECK(cover_targets_ok, "1x2 and 2x1 cover controls meet the 48 px target");
+    UI_CHECK(vertical_cover != NULL &&
+                 lv_obj_get_y(vertical_cover->cover.name) +
+                         lv_obj_get_height(vertical_cover->cover.name) <=
+                     lv_obj_get_y(vertical_cover->cover.open_button),
+             "vertical cover name keeps clear of its first control");
     UI_CHECK(compact_cover != NULL && compact_cover->cover.compact &&
                  strcmp(lv_label_get_text(compact_cover->cover.icon),
                         SLATE_ICON_WINDOW_SHUTTER) == 0 &&
                  strcmp(lv_label_get_text(compact_cover->cover.position), "0%") == 0 &&
-                 lv_obj_has_flag(compact_cover->tile, LV_OBJ_FLAG_CLICKABLE) &&
-                 vertical_cover != NULL && vertical_cover->cover.vertical &&
+                 lv_obj_has_flag(compact_cover->tile, LV_OBJ_FLAG_CLICKABLE),
+             "compact cover icon follows position and remains actionable");
+    UI_CHECK(vertical_cover != NULL && vertical_cover->cover.vertical &&
                  strcmp(lv_label_get_text(vertical_cover->cover.name),
                         "Bedroom curtain") == 0 &&
                  strcmp(lv_label_get_text(vertical_cover->cover.icon),
                         SLATE_ICON_CURTAINS) == 0,
-             "compact icon follows position and configured overrides survive state");
+             "vertical cover keeps configured label and icon overrides");
     UI_CHECK(horizontal_cover != NULL && horizontal_cover->cover.motion_animation &&
                  !lv_obj_has_flag(horizontal_cover->cover.motion, LV_OBJ_FLAG_HIDDEN) &&
                  strcmp(lv_label_get_text(horizontal_cover->cover.motion),
@@ -2850,8 +2945,8 @@ static esp_err_t selftest_on_task(void)
                  cover_feedback.phase == SLATE_ACTION_PENDING &&
                  cover_feedback.optimistic.cover.motion == SLATE_COVER_OPENING &&
                  compact_cover != NULL &&
-                 lv_obj_get_style_border_width(compact_cover->tile,
-                                               LV_PART_MAIN) == 2,
+                 lv_obj_get_style_outline_width(compact_cover->tile,
+                                                LV_PART_MAIN) == 2,
              "1x1 cover tap emits an optimistic semantic toggle");
     UI_CHECK(publish_cover_state("cover-compact", 0, SLATE_COVER_OPENING, true) == ESP_OK &&
                  slate_action_feedback("ui-fixture", "cover-compact", &cover_feedback) ==
@@ -2961,10 +3056,10 @@ static esp_err_t selftest_on_task(void)
         esp_err_t scene_feedback_err = slate_action_feedback(
             "ui-fixture", SCENE_RESOURCES[i], &scene_feedback);
         update_all();
-        unsigned pending_border = scene_view != NULL
-                                      ? lv_obj_get_style_border_width(
-                                            scene_view->scene.button, LV_PART_MAIN)
-                                      : 0;
+        unsigned pending_outline = scene_view != NULL
+                                       ? lv_obj_get_style_outline_width(
+                                             scene_view->scene.button, LV_PART_MAIN)
+                                       : 0;
         all_activated = all_activated && scene_result == LV_RESULT_OK &&
                         s_fixture.action_calls == scene_calls + 1 &&
                         strcmp(s_fixture.action_resource, SCENE_RESOURCES[i]) == 0 &&
@@ -2973,7 +3068,7 @@ static esp_err_t selftest_on_task(void)
                         scene_feedback_err == ESP_OK &&
                         scene_feedback.phase == SLATE_ACTION_PENDING &&
                         scene_view != NULL &&
-                        pending_border == 2;
+                        pending_outline == 2;
 
         slate_action_result("ui-fixture", s_fixture.action_id, true, NULL);
         update_all();
@@ -3041,13 +3136,13 @@ static esp_err_t selftest_on_task(void)
                  missing_scene->scene.button != peer_scene->scene.button &&
                  strcmp(lv_label_get_text(missing_scene->scene.identity),
                         "ui-fixture:scene-missing\nExpected scene, got light") == 0 &&
-                 lv_obj_get_style_border_width(missing_scene->scene.button,
-                                               LV_PART_MAIN) == 2 &&
-                 lv_color_eq(lv_obj_get_style_border_color(
+                 lv_obj_get_style_outline_width(missing_scene->scene.button,
+                                                LV_PART_MAIN) == 2 &&
+                 lv_color_eq(lv_obj_get_style_outline_color(
                                  missing_scene->scene.button, LV_PART_MAIN),
                              lv_color_hex(s_tree->theme->warn)) &&
-                 lv_obj_get_style_border_width(peer_scene->scene.button,
-                                               LV_PART_MAIN) == 0,
+                 lv_obj_get_style_outline_width(peer_scene->scene.button,
+                                                LV_PART_MAIN) == 0,
              "incompatible scene explains and isolates its warning");
 
     const slate_snapshot_t unavailable_scene = {

@@ -61,9 +61,13 @@ static void set_enabled(lv_obj_t *object, bool enabled)
     }
 }
 
-static void pending_border_opa(void *object, int32_t opacity)
+/* The pulse rides on the outline rather than the border for the reason
+ * style_presentation() gives in slate_ui.c: a border is part of the content
+ * area, so the tile's own name and controls would move under the user's finger
+ * at the moment they touched it. */
+static void pending_outline_opa(void *object, int32_t opacity)
 {
-    lv_obj_set_style_border_opa(object, (lv_opa_t) opacity, LV_PART_MAIN);
+    lv_obj_set_style_outline_opa(object, (lv_opa_t) opacity, LV_PART_MAIN);
 }
 
 static void set_pending_animation(slate_light_view_t *view, bool pending)
@@ -73,8 +77,8 @@ static void set_pending_animation(slate_light_view_t *view, bool pending)
     }
 
     if (!pending) {
-        lv_anim_delete(view->tile, pending_border_opa);
-        lv_obj_set_style_border_opa(view->tile, LV_OPA_COVER, LV_PART_MAIN);
+        lv_anim_delete(view->tile, pending_outline_opa);
+        lv_obj_set_style_outline_opa(view->tile, LV_OPA_COVER, LV_PART_MAIN);
         view->pending_animation = false;
         return;
     }
@@ -82,7 +86,7 @@ static void set_pending_animation(slate_light_view_t *view, bool pending)
     lv_anim_t animation;
     lv_anim_init(&animation);
     lv_anim_set_var(&animation, view->tile);
-    lv_anim_set_exec_cb(&animation, pending_border_opa);
+    lv_anim_set_exec_cb(&animation, pending_outline_opa);
     lv_anim_set_values(&animation, LIGHT_PENDING_OPA_LOW, LV_OPA_COVER);
     lv_anim_set_duration(&animation, LIGHT_PENDING_PULSE_MS);
     lv_anim_set_reverse_duration(&animation, LIGHT_PENDING_PULSE_MS);
@@ -193,8 +197,8 @@ static bool build_compact(lv_obj_t *tile, const slate_theme_t *theme,
     lv_obj_set_pos(view->icon, 0, 0);
     lv_obj_set_size(view->icon, 36, 36);
     lv_obj_set_style_text_align(view->icon, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_label_set_long_mode(view->name, LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->name, lv_pct(100));
+    slate_component_label_one_line(view->name);
     lv_obj_align(view->name, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
     lv_obj_remove_style_all(view->state_dot);
@@ -232,7 +236,7 @@ static bool build_wide(lv_obj_t *tile, const slate_theme_t *theme,
                             lv_obj_get_style_space_right(tile, LV_PART_MAIN);
     int32_t controls_width = content_width - 64;
     lv_obj_set_width(view->name, controls_width - 64);
-    lv_label_set_long_mode(view->name, LV_LABEL_LONG_DOT);
+    slate_component_label_one_line(view->name);
     lv_obj_align(view->brightness_value, LV_ALIGN_TOP_RIGHT, 0, 0);
     lv_obj_set_pos(view->brightness_slider, 52, 54);
     lv_obj_set_width(view->brightness_slider, controls_width);
@@ -264,7 +268,7 @@ static bool build_large(lv_obj_t *tile, const slate_theme_t *theme,
     lv_obj_set_style_text_align(view->icon, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_pos(view->name, 66, 8);
     lv_obj_set_width(view->name, 220);
-    lv_label_set_long_mode(view->name, LV_LABEL_LONG_DOT);
+    slate_component_label_one_line(view->name);
 
     lv_obj_remove_style_all(view->state_dot);
     lv_obj_remove_flag(view->state_dot,

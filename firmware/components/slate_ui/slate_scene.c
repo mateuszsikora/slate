@@ -133,8 +133,8 @@ bool slate_scene_build(lv_obj_t *tile, const slate_config_tile_t *config,
     lv_obj_set_size(view->icon, 38, 34);
     lv_obj_set_style_text_align(view->icon, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_align(view->icon, LV_ALIGN_TOP_MID, 0, 0);
-    lv_label_set_long_mode(view->name, LV_LABEL_LONG_DOT);
     lv_obj_set_width(view->name, lv_pct(100));
+    slate_component_label_one_line(view->name);
     lv_obj_set_style_text_align(view->name, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_align(view->name, LV_ALIGN_BOTTOM_MID, 0, 0);
 

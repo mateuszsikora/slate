@@ -148,7 +148,7 @@ light with no brightness capability is a tile that toggles.
 | Size | Renders | Touch |
 |------|---------|-------|
 | 1×1 | position-aware icon, name | `toggle` |
-| 1×2 | icon, up/stop/down, position % | `open`, `stop`, `close` |
+| 1×2 | icon, name, up/stop/down, position % | `open`, `stop`, `close` |
 | 2×1 | the same, horizontally | `open`, `stop`, `close` |
 
 Movement animates until the state settles.
