@@ -80,7 +80,12 @@ export function TopBar({
       </nav>
 
       <div className="topbar__controls">
-        <button type="button" className="button button--secondary" onClick={onOpenSettings}>
+        <button
+          type="button"
+          className="button button--secondary"
+          onClick={onOpenSettings}
+          disabled={config === null}
+        >
           Settings
         </button>
         <button type="button" className="button button--secondary" onClick={onOpenIntegrations}>

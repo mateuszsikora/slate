@@ -88,6 +88,7 @@ jobs:
   #
   # `tsc --noEmit` runs as part of `npm run build`, so a type error is a failed
   # check rather than a bundle that ships and breaks in a browser nobody opened.
+  # The editor tests also keep generated browser data in sync with firmware.
   editor:
     name: editor
     runs-on: ubuntu-latest
@@ -102,6 +103,10 @@ jobs:
 
       - name: Build
         run: tools/editor/build.sh
+
+      - name: Test
+        run: npm test
+        working-directory: editor
 
       # The number §10 budgets is the gzipped one, and firmware/cmake/gzip.cmake
       # fails the firmware build when it is over 400 KB. Reported here as well so
