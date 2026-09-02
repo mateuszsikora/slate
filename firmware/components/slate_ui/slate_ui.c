@@ -154,10 +154,14 @@ static slate_config_t *clone_config(const slate_config_t *source)
         return NULL;
     }
     copy->schema = source->schema;
-    copy->settings = source->settings;
-    copy->settings.timezone = NULL;
-    copy->settings.night_start = NULL;
-    copy->settings.night_end = NULL;
+    copy->settings.brightness_day = source->settings.brightness_day;
+    copy->settings.brightness_night = source->settings.brightness_night;
+    copy->settings.screen_off_after = source->settings.screen_off_after;
+    copy->settings.wake_on_touch = source->settings.wake_on_touch;
+    copy->settings.has_brightness_day = source->settings.has_brightness_day;
+    copy->settings.has_brightness_night = source->settings.has_brightness_night;
+    copy->settings.has_screen_off_after = source->settings.has_screen_off_after;
+    copy->settings.has_wake_on_touch = source->settings.has_wake_on_touch;
     if (!clone_string(source->theme, &copy->theme) ||
         !clone_string(source->home_page, &copy->home_page) ||
         !clone_string(source->settings.timezone, &copy->settings.timezone) ||
@@ -733,8 +737,17 @@ static lv_obj_t *build_tile_shell(ui_tree_t *tree, const slate_config_tile_t *ti
     return object;
 }
 
+static bool owns_horizontal_drag(const lv_obj_t *object)
+{
+    return lv_obj_check_type(object, &lv_slider_class) ||
+           lv_obj_check_type(object, &lv_arc_class);
+}
+
 static void bubble_gestures_to_content(lv_obj_t *object)
 {
+    if (owns_horizontal_drag(object)) {
+        return;
+    }
     lv_obj_add_flag(object, LV_OBJ_FLAG_GESTURE_BUBBLE);
     uint32_t count = lv_obj_get_child_count(object);
     for (uint32_t i = 0; i < count; ++i) {
@@ -1026,8 +1039,19 @@ static esp_err_t navigate_page(ui_tree_t *tree, lv_dir_t direction)
 
 static bool page_gesture_target(const ui_tree_t *tree, const lv_obj_t *target)
 {
-    return tree != NULL && target != NULL &&
-           (target == tree->content || lv_obj_get_parent(target) == tree->content);
+    if (tree == NULL || tree->content == NULL || target == NULL) {
+        return false;
+    }
+    for (const lv_obj_t *object = target; object != NULL;
+         object = lv_obj_get_parent(object)) {
+        if (object == tree->content) {
+            return true;
+        }
+        if (owns_horizontal_drag(object)) {
+            return false;
+        }
+    }
+    return false;
 }
 
 static void page_gesture_cb(lv_event_t *event)
@@ -1039,13 +1063,16 @@ static void page_gesture_cb(lv_event_t *event)
     ui_tree_t *tree = lv_event_get_user_data(event);
     lv_obj_t *target = lv_event_get_target_obj(event);
     if (!page_gesture_target(tree, target)) {
-        /* Sliders and buttons own their horizontal drags. A tile shell still
-         * distinguishes a swipe from its ordinary click/tap action. */
+        /* Sliders and arcs own their horizontal drags. Buttons bubble gestures
+         * because LVGL still distinguishes a swipe from their click action. */
         return;
     }
     lv_dir_t direction = lv_indev_get_gesture_dir(indev);
     if (direction == LV_DIR_LEFT || direction == LV_DIR_RIGHT) {
-        (void) navigate_page(tree, direction);
+        esp_err_t err = navigate_page(tree, direction);
+        if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "page gesture ignored: %s", esp_err_to_name(err));
+        }
     }
 }
 
@@ -1960,9 +1987,8 @@ static esp_err_t measured_cycle(int cycle, lv_obj_t *anchor,
     return err;
 }
 
-static bool verify_layout(const slate_config_t *config)
+static bool verify_layout(void)
 {
-    (void) config;
     const slate_config_page_t *page = tree_page(s_tree);
     if (page == NULL || s_tree->content == NULL) {
         return false;
@@ -2557,7 +2583,7 @@ static esp_err_t selftest_on_task(void)
     slate_config_t *final = test_config(0);
     UI_CHECK(final != NULL && rebuild_on_task(final) == ESP_OK,
              "final mixed-provider tree activated");
-    UI_CHECK(final != NULL && verify_layout(final),
+    UI_CHECK(final != NULL && verify_layout(),
              "all tiles match the exact grid coordinates");
     UI_CHECK(s_fixture.calls > 0 && s_fixture.subscriptions >= 3,
              "fixture received subscriptions from every page");
@@ -2728,7 +2754,7 @@ static esp_err_t selftest_on_task(void)
                  temperature_view != NULL &&
                  lv_color_eq(lv_obj_get_style_bg_color(temperature_view->tile, LV_PART_MAIN),
                              lv_color_hex(minimal_light->surface)) &&
-                 verify_layout(sensors),
+                 verify_layout(),
              "Minimal Light changes palette without moving the grid");
     if (sensors != NULL) {
         slate_config_free(sensors);
@@ -3105,7 +3131,7 @@ static esp_err_t selftest_on_task(void)
     slate_config_t *light_layouts = light_layout_test_config();
     bool light_layouts_active = light_layouts != NULL &&
                                 rebuild_on_task(light_layouts) == ESP_OK;
-    UI_CHECK(light_layouts_active && verify_layout(light_layouts),
+    UI_CHECK(light_layouts_active && verify_layout(),
              "valid 1x2 and 4x1 light layouts keep exact grid geometry");
     if (light_layouts != NULL) {
         slate_config_free(light_layouts);
@@ -3270,7 +3296,7 @@ static esp_err_t selftest_on_task(void)
              "confirmed colour temperature clears pending presentation");
 
     slate_config_t *covers = cover_test_config();
-    UI_CHECK(covers != NULL && rebuild_on_task(covers) == ESP_OK && verify_layout(covers),
+    UI_CHECK(covers != NULL && rebuild_on_task(covers) == ESP_OK && verify_layout(),
              "all three cover layouts activated on the exact grid");
     UI_CHECK(publish_cover_test_states() == ESP_OK,
              "cover variants received normalized state");
@@ -3296,6 +3322,11 @@ static esp_err_t selftest_on_task(void)
                             lv_obj_get_width(vertical_cover->cover.close_button) >= 48 &&
                             lv_obj_get_height(vertical_cover->cover.close_button) >= 48;
     UI_CHECK(cover_targets_ok, "1x2 and 2x1 cover controls meet the 48 px target");
+    UI_CHECK(horizontal_cover != NULL &&
+                 page_gesture_target(s_tree, horizontal_cover->cover.open_button) &&
+                 page_gesture_target(s_tree, horizontal_cover->cover.stop_button) &&
+                 page_gesture_target(s_tree, horizontal_cover->cover.close_button),
+             "nested cover buttons leave horizontal swipes to page navigation");
     UI_CHECK(vertical_cover != NULL &&
                  lv_obj_get_y(vertical_cover->cover.name) +
                          lv_obj_get_height(vertical_cover->cover.name) <=
@@ -3452,6 +3483,7 @@ static esp_err_t selftest_on_task(void)
         "scene-movie", "scene-relax", "scene-dinner", "scene-away", "scene-missing",
     };
     bool bar_layout_ok = true;
+    bool bar_gestures_bubble = true;
     bool all_activated = true;
     bool all_confirmed = true;
     lv_obj_update_layout(s_tree->screen);
@@ -3462,6 +3494,8 @@ static esp_err_t selftest_on_task(void)
                         lv_obj_get_width(scene_view->scene.button) >= 48 &&
                         lv_obj_get_height(scene_view->scene.button) >= 48 &&
                         lv_obj_has_flag(scene_view->scene.button, LV_OBJ_FLAG_CLICKABLE);
+        bar_gestures_bubble = bar_gestures_bubble && scene_view != NULL &&
+                              page_gesture_target(s_tree, scene_view->scene.button);
         unsigned scene_calls = s_fixture.action_calls;
         lv_result_t scene_result = scene_view != NULL
                                        ? lv_obj_send_event(scene_view->scene.button,
@@ -3503,6 +3537,8 @@ static esp_err_t selftest_on_task(void)
                                     lv_color_hex(s_tree->theme->on_accent));
     }
     UI_CHECK(bar_layout_ok, "4x1 bar gives every scene an independent touch target");
+    UI_CHECK(bar_gestures_bubble,
+             "nested scene buttons leave horizontal swipes to page navigation");
     UI_CHECK(all_activated, "every scene button emits its own activate action");
     UI_CHECK(all_confirmed,
              "accepted scenes flash only their button with a legible foreground");
