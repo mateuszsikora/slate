@@ -684,6 +684,7 @@ static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title,
         lv_obj_set_pos(tree->content, 0, UI_BAR_HEIGHT);
         lv_obj_set_size(tree->content, UI_WIDTH, UI_HEIGHT - UI_BAR_HEIGHT);
         lv_obj_add_flag(tree->content, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(tree->content, LV_OBJ_FLAG_GESTURE_BUBBLE);
         lv_obj_add_event_cb(tree->content, page_gesture_cb, LV_EVENT_GESTURE, tree);
     }
 
@@ -746,9 +747,10 @@ static bool owns_horizontal_drag(const lv_obj_t *object)
 static void bubble_gestures_to_content(lv_obj_t *object)
 {
     if (owns_horizontal_drag(object)) {
-        return;
+        lv_obj_remove_flag(object, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    } else {
+        lv_obj_add_flag(object, LV_OBJ_FLAG_GESTURE_BUBBLE);
     }
-    lv_obj_add_flag(object, LV_OBJ_FLAG_GESTURE_BUBBLE);
     uint32_t count = lv_obj_get_child_count(object);
     for (uint32_t i = 0; i < count; ++i) {
         bubble_gestures_to_content(lv_obj_get_child(object, (int32_t) i));
@@ -1903,6 +1905,41 @@ static slate_config_t *scene_test_config(void)
     return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
 }
 
+static slate_config_t *gesture_inspection_config(void)
+{
+    static const char JSON[] =
+        "{\"schema\":1,\"theme\":\"minimal-light\",\"home_page\":\"left\",\"pages\":[{"
+        "\"id\":\"left\",\"title\":\"Swipe a control left\",\"tiles\":["
+        "{\"id\":\"dimmer-left\",\"type\":\"light\",\"pos\":[0,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"action-dimmer\"}},"
+        "{\"id\":\"cover-left\",\"type\":\"cover\",\"pos\":[2,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"cover-horizontal\"}},"
+        "{\"id\":\"scenes-left\",\"type\":\"scene\",\"pos\":[0,1],\"size\":[4,1],"
+        "\"bindings\":["
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-movie\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-relax\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-dinner\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-away\"}]}]},"
+        "{\"id\":\"right\",\"title\":\"Swipe a control right\",\"tiles\":["
+        "{\"id\":\"dimmer-right\",\"type\":\"light\",\"pos\":[0,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"action-dimmer\"}},"
+        "{\"id\":\"cover-right\",\"type\":\"cover\",\"pos\":[2,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"cover-horizontal\"}},"
+        "{\"id\":\"scenes-right\",\"type\":\"scene\",\"pos\":[0,1],\"size\":[4,1],"
+        "\"bindings\":["
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-movie\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-relax\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-dinner\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-away\"}]}]}]}";
+
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
 static void settle_frame(void)
 {
     /* The real RGB flush completes from VSYNC. Yielding the owner task lets the
@@ -2410,6 +2447,45 @@ static esp_err_t publish_scene_test_states(void)
     return ESP_OK;
 }
 
+static esp_err_t publish_gesture_inspection_states(void)
+{
+    static const slate_snapshot_t SCENES[] = {
+        {.resource = "scene-movie", .kind = SLATE_KIND_SCENE, .name = "Movie",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-relax", .kind = SLATE_KIND_SCENE, .name = "Relax",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-dinner", .kind = SLATE_KIND_SCENE, .name = "Dinner",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-away", .kind = SLATE_KIND_SCENE, .name = "Away",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+    };
+    const slate_snapshot_t dimmer = {
+        .resource = "action-dimmer",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Drag brightness; page must stay",
+        .available = true,
+        .capabilities = {
+            .actions = 1u << SLATE_ACTION_SET_BRIGHTNESS,
+            .brightness_min = 0,
+            .brightness_max = 100,
+        },
+        .state.light = {.on = true, .brightness = 55,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    esp_err_t err = slate_state_publish("ui-fixture", &dimmer);
+    if (err == ESP_OK) {
+        err = publish_cover_state("cover-horizontal", 43, SLATE_COVER_IDLE, true);
+    }
+    for (size_t i = 0; err == ESP_OK && i < sizeof(SCENES) / sizeof(SCENES[0]); i++) {
+        err = slate_state_publish("ui-fixture", &SCENES[i]);
+    }
+    if (err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    return err;
+}
+
 static bool sensor_view_text(const char *resource, const char *value, const char *unit)
 {
     binding_view_t *view = find_view("direct", resource);
@@ -2603,10 +2679,28 @@ static esp_err_t selftest_on_task(void)
              "the fixture tile observed the same normalized path");
     UI_CHECK(page_indicator_at(0, 2),
              "the multi-page bar identifies the home page");
+    UI_CHECK(s_tree->content != NULL &&
+                 !lv_obj_has_flag(s_tree->content, LV_OBJ_FLAG_GESTURE_BUBBLE),
+             "page content terminates bubbled gestures");
     UI_CHECK(direct_view != NULL && page_gesture_target(s_tree, direct_view->tile) &&
                  direct_view->light.brightness_slider != NULL &&
                  !page_gesture_target(s_tree, direct_view->light.brightness_slider),
              "tile swipes navigate while sliders keep their drags");
+    UI_CHECK(direct_view != NULL && direct_view->light.brightness_slider != NULL &&
+                 !lv_obj_has_flag(direct_view->light.brightness_slider,
+                                  LV_OBJ_FLAG_GESTURE_BUBBLE),
+             "brightness slider keeps gestures instead of bubbling them");
+    lv_area_t brightness_click_area = {0};
+    if (direct_view != NULL && direct_view->light.brightness_slider != NULL) {
+        lv_obj_get_click_area(direct_view->light.brightness_slider,
+                              &brightness_click_area);
+    }
+    UI_CHECK(lv_area_get_height(&brightness_click_area) >= 80,
+             "brightness slider owns an 80 px gesture-safe touch target");
+    UI_CHECK(direct_view != NULL && direct_view->light.brightness_slider != NULL &&
+                 lv_obj_has_flag(direct_view->light.brightness_slider,
+                                 LV_OBJ_FLAG_ADV_HITTEST),
+             "brightness slider limits its expanded hit box to the knob");
 
     unsigned actions_before_navigation = s_fixture.action_calls;
     ui_tree_t *home_tree = s_tree;
@@ -3012,7 +3106,8 @@ static esp_err_t selftest_on_task(void)
                  !lv_obj_has_flag(readonly->tile, LV_OBJ_FLAG_CLICKABLE),
              "read-only light exposes no action target");
     UI_CHECK(toggle_only != NULL && toggle_only->light.brightness_slider != NULL &&
-                 lv_obj_has_flag(toggle_only->light.brightness_slider, LV_OBJ_FLAG_HIDDEN),
+                 lv_obj_has_flag(toggle_only->light.brightness_slider,
+                                 LV_OBJ_FLAG_HIDDEN),
              "unadvertised brightness control stays hidden");
     UI_CHECK(missing_light != NULL &&
                  !lv_obj_has_flag(missing_light->light.identity, LV_OBJ_FLAG_HIDDEN) &&
@@ -3327,6 +3422,10 @@ static esp_err_t selftest_on_task(void)
                  page_gesture_target(s_tree, horizontal_cover->cover.stop_button) &&
                  page_gesture_target(s_tree, horizontal_cover->cover.close_button),
              "nested cover buttons leave horizontal swipes to page navigation");
+    UI_CHECK(horizontal_cover != NULL &&
+                 lv_obj_has_flag(horizontal_cover->cover.open_button,
+                                 LV_OBJ_FLAG_GESTURE_BUBBLE),
+             "nested cover button bubbles page gestures to content");
     UI_CHECK(vertical_cover != NULL &&
                  lv_obj_get_y(vertical_cover->cover.name) +
                          lv_obj_get_height(vertical_cover->cover.name) <=
@@ -3483,7 +3582,8 @@ static esp_err_t selftest_on_task(void)
         "scene-movie", "scene-relax", "scene-dinner", "scene-away", "scene-missing",
     };
     bool bar_layout_ok = true;
-    bool bar_gestures_bubble = true;
+    bool bar_gesture_targets_ok = true;
+    bool bar_gesture_flags_ok = true;
     bool all_activated = true;
     bool all_confirmed = true;
     lv_obj_update_layout(s_tree->screen);
@@ -3494,8 +3594,11 @@ static esp_err_t selftest_on_task(void)
                         lv_obj_get_width(scene_view->scene.button) >= 48 &&
                         lv_obj_get_height(scene_view->scene.button) >= 48 &&
                         lv_obj_has_flag(scene_view->scene.button, LV_OBJ_FLAG_CLICKABLE);
-        bar_gestures_bubble = bar_gestures_bubble && scene_view != NULL &&
-                              page_gesture_target(s_tree, scene_view->scene.button);
+        bar_gesture_targets_ok = bar_gesture_targets_ok && scene_view != NULL &&
+                                 page_gesture_target(s_tree, scene_view->scene.button);
+        bar_gesture_flags_ok = bar_gesture_flags_ok && scene_view != NULL &&
+                               lv_obj_has_flag(scene_view->scene.button,
+                                               LV_OBJ_FLAG_GESTURE_BUBBLE);
         unsigned scene_calls = s_fixture.action_calls;
         lv_result_t scene_result = scene_view != NULL
                                        ? lv_obj_send_event(scene_view->scene.button,
@@ -3537,8 +3640,10 @@ static esp_err_t selftest_on_task(void)
                                     lv_color_hex(s_tree->theme->on_accent));
     }
     UI_CHECK(bar_layout_ok, "4x1 bar gives every scene an independent touch target");
-    UI_CHECK(bar_gestures_bubble,
+    UI_CHECK(bar_gesture_targets_ok,
              "nested scene buttons leave horizontal swipes to page navigation");
+    UI_CHECK(bar_gesture_flags_ok,
+             "nested scene buttons bubble page gestures to content");
     UI_CHECK(all_activated, "every scene button emits its own activate action");
     UI_CHECK(all_confirmed,
              "accepted scenes flash only their button with a legible foreground");
@@ -3638,14 +3743,14 @@ static esp_err_t selftest_on_task(void)
         slate_config_free(scenes);
     }
 
-    lights = light_test_config();
-    UI_CHECK(lights != NULL && rebuild_on_task(lights) == ESP_OK,
-             "direct-provider light dashboard restored for inspection");
-    if (lights != NULL) {
-        slate_config_free(lights);
+    slate_config_t *gesture_inspection = gesture_inspection_config();
+    UI_CHECK(gesture_inspection != NULL && rebuild_on_task(gesture_inspection) == ESP_OK,
+             "manual gesture inspection dashboard activated");
+    if (gesture_inspection != NULL) {
+        slate_config_free(gesture_inspection);
     }
-    UI_CHECK(publish_light_test_states() == ESP_OK,
-             "direct-provider light dashboard left populated");
+    UI_CHECK(publish_gesture_inspection_states() == ESP_OK,
+             "manual gesture inspection dashboard left populated");
 
     ESP_LOGI(TAG, "selftest: %u check(s), %u failure(s)", checks, failures);
 #undef UI_CHECK

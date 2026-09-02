@@ -14,15 +14,15 @@
 static const char *TAG = "slate_light";
 
 #define LIGHT_SLIDER_HEIGHT       12
-#define LIGHT_SLIDER_TOUCH_EXPAND 18
+#define LIGHT_SLIDER_TOUCH_EXPAND 34
 #define LIGHT_TEMPERATURE_SPAN_K  1500
 #define LIGHT_TEMPERATURE_MIN_K   2000
 #define LIGHT_TEMPERATURE_MAX_K   6500
 #define LIGHT_PENDING_OPA_LOW     LV_OPA_40
 #define LIGHT_PENDING_PULSE_MS    650
 
-_Static_assert(LIGHT_SLIDER_HEIGHT + 2 * LIGHT_SLIDER_TOUCH_EXPAND >= 48,
-               "light sliders need a 48 px touch target");
+_Static_assert(LIGHT_SLIDER_HEIGHT + 2 * LIGHT_SLIDER_TOUCH_EXPAND >= 80,
+               "light sliders need an 80 px gesture-safe touch target");
 
 static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t *font,
                             uint32_t color)
@@ -170,6 +170,10 @@ static lv_obj_t *make_slider(lv_obj_t *parent, const slate_theme_t *theme,
     }
     lv_obj_set_height(slider, LIGHT_SLIDER_HEIGHT);
     lv_obj_set_ext_click_area(slider, LIGHT_SLIDER_TOUCH_EXPAND);
+    /* Keep the broad hit box around the handle, not around the entire track.
+     * A near miss is easy to recover into a drag, while a swipe that begins
+     * elsewhere on the tile remains available for page navigation. */
+    lv_obj_add_flag(slider, LV_OBJ_FLAG_ADV_HITTEST);
     lv_obj_set_style_bg_color(slider, lv_color_hex(theme->surface_alt), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(slider, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(slider, LV_RADIUS_CIRCLE, LV_PART_MAIN);
