@@ -44,6 +44,8 @@ idf_component_register(
 #   -DSLATE_BRIGHTNESS_SELFTEST=1
 #                              verify schedule boundaries, unsynced/setup
 #                              behavior and dark-touch consumption at boot.
+#   -DSLATE_TIME_SELFTEST=1    resolve Europe/Warsaw and verify both sides of
+#                              its 2026 daylight-saving boundaries at boot.
 #   -DSLATE_OTA_ROLLBACK_SELFTEST=1
 #                              panic before API/network startup, but only when
 #                              the running image is pending verification. OTA
@@ -71,7 +73,7 @@ idf_component_register(
 foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_WS_SELFTEST SLATE_STATE_SELFTEST
              SLATE_DIRECT_SELFTEST SLATE_ACTION_SELFTEST SLATE_CONFIG_API_SELFTEST SLATE_HA_SELFTEST
              SLATE_OTA_ROLLBACK_SELFTEST
-             SLATE_UI_SELFTEST SLATE_UI_LEAK_BYTES SLATE_BRIGHTNESS_SELFTEST
+             SLATE_UI_SELFTEST SLATE_UI_LEAK_BYTES SLATE_BRIGHTNESS_SELFTEST SLATE_TIME_SELFTEST
              SLATE_COREDUMP_SELFTEST SLATE_SETUP_AP_PASSWORD)
     if(DEFINED ${knob})
         target_compile_definitions(${COMPONENT_LIB} PRIVATE ${knob}=${${knob}})

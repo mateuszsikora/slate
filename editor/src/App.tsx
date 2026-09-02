@@ -19,6 +19,7 @@ import { DeviceSocket, type ConnectionState, type LogFrame, type StatusFrame } f
 import { DevicePanel } from './ui/DevicePanel'
 import { IntegrationsDialog } from './ui/IntegrationsDialog'
 import { LogPanel, type LogLine } from './ui/LogPanel'
+import { SettingsDialog } from './ui/SettingsDialog'
 import { TopBar } from './ui/TopBar'
 import { Unlock } from './ui/Unlock'
 import { Unreachable } from './ui/Unreachable'
@@ -52,6 +53,7 @@ export function App() {
   const [mode, setMode] = useState<'normal' | 'edit'>('normal')
   const [logs, setLogs] = useState<LogLine[]>([])
   const [movingTo, setMovingTo] = useState<string | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [integrationsOpen, setIntegrationsOpen] = useState(false)
 
   const socketRef = useRef<DeviceSocket | null>(null)
@@ -148,6 +150,7 @@ export function App() {
     modeRef.current = 'normal'
     setLogs([])
     setUnlockError(null)
+    setSettingsOpen(false)
     setIntegrationsOpen(false)
     setPhase('unlock')
   }, [])
@@ -365,6 +368,7 @@ export function App() {
     modeRef.current = 'normal'
     setLogs([])
     setUnlockError(null)
+    setSettingsOpen(false)
     setIntegrationsOpen(false)
     setPhase('unreachable')
   }, [client, token])
@@ -601,6 +605,7 @@ export function App() {
         onPublish={() => void publishDraft()}
         onDiscard={discardDraft}
         onToggleMode={toggleMode}
+        onOpenSettings={() => setSettingsOpen(true)}
         onOpenIntegrations={() => setIntegrationsOpen(true)}
         onLock={info?.authentication === 'pin' ? lock : undefined}
       />
@@ -630,6 +635,13 @@ export function App() {
           <LogPanel lines={logs} connection={connection} />
         </aside>
       </div>
+      {settingsOpen && draft !== null ? (
+        <SettingsDialog
+          config={draft}
+          onChange={changeDraft}
+          onClose={() => setSettingsOpen(false)}
+        />
+      ) : null}
       {integrationsOpen && integrationClient !== null ? (
         <IntegrationsDialog
           client={integrationClient}
