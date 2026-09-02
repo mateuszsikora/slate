@@ -767,10 +767,13 @@ static bool build_configured_bar(ui_tree_t *tree, const slate_config_t *config,
 
         int32_t label_width = view->config->span * UI_BAR_SLOT_WIDTH - 16;
         if (view->config->item_type == SLATE_BAR_ITEM_CLOCK) {
-            view->label = make_label(view->container, "--:--", tree->theme->body,
+            const lv_font_t *font = view->config->span == 1
+                                        ? tree->theme->caption : tree->theme->body;
+            view->label = make_label(view->container, "--:--", font,
                                      tree->theme->text_hi);
             if (view->label != NULL) {
                 lv_obj_set_width(view->label, label_width);
+                slate_component_label_one_line(view->label);
                 lv_obj_align(view->label, LV_ALIGN_LEFT_MID, 8, 0);
             }
         } else if (view->config->item_type == SLATE_BAR_ITEM_TITLE) {
@@ -886,8 +889,7 @@ static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title,
 
     tree->bar_timer = lv_timer_create(bar_timer_cb, 1000, NULL);
     if (tree->bar_timer == NULL) {
-        lv_obj_delete(tree->screen);
-        free(tree);
+        tree_destroy(tree);
         return NULL;
     }
     update_bar(tree);
@@ -1967,8 +1969,8 @@ static slate_config_t *bar_test_config(bool multiple_pages)
 {
     static const char PREFIX[] =
         "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"bar\":["
-        "{\"type\":\"clock\",\"slot\":0,\"span\":2},"
-        "{\"type\":\"title\",\"slot\":2,\"span\":5},"
+        "{\"type\":\"clock\",\"slot\":0,\"span\":1},"
+        "{\"type\":\"title\",\"slot\":1,\"span\":6},"
         "{\"type\":\"future_item\",\"slot\":7,\"span\":1},"
         "{\"type\":\"page_indicator\",\"slot\":8,\"span\":1},"
         "{\"type\":\"badge\",\"provider\":\"ui-fixture\",\"label\":\"Fixture\","
@@ -2355,6 +2357,32 @@ static bar_item_view_t *find_bar_item(const char *type)
         }
     }
     return NULL;
+}
+
+/* The clock is the one bar item whose text the panel picks, so a span that
+ * merely holds "--:--" is not enough — 23:59 is wider than 00:00 in a
+ * proportional font, and a slot that clips it clips it every evening. Measured
+ * the way LVGL lays the label out rather than derived from the font size. */
+static bool bar_clock_text_fits(const bar_item_view_t *view)
+{
+    if (view == NULL || view->label == NULL) {
+        return false;
+    }
+    lv_obj_t *probe = lv_label_create(lv_obj_get_parent(view->label));
+    if (probe == NULL) {
+        return false;
+    }
+    lv_obj_set_style_text_font(probe,
+                               lv_obj_get_style_text_font(view->label, LV_PART_MAIN),
+                               LV_PART_MAIN);
+    lv_obj_set_style_text_letter_space(
+        probe, lv_obj_get_style_text_letter_space(view->label, LV_PART_MAIN),
+        LV_PART_MAIN);
+    lv_label_set_text(probe, "23:59");
+    lv_obj_update_layout(probe);
+    int32_t text_width = lv_obj_get_width(probe);
+    lv_obj_delete(probe);
+    return text_width <= lv_obj_get_width(view->label);
 }
 
 static bool configured_bar_geometry(void)
@@ -3084,12 +3112,17 @@ static esp_err_t selftest_on_task(void)
     bar_item_view_t *bar_pages = find_bar_item("page_indicator");
     bar_item_view_t *bar_badge = find_bar_item("badge");
     UI_CHECK(bar_clock != NULL && bar_clock->label != NULL &&
+                 lv_obj_get_style_text_font(bar_clock->label, LV_PART_MAIN) ==
+                     s_tree->theme->caption &&
+                 lv_label_get_long_mode(bar_clock->label) == LV_LABEL_LONG_DOT &&
                  bar_title != NULL && bar_title->label != NULL &&
                  strcmp(lv_label_get_text(bar_title->label), "Home") == 0 &&
                  bar_future != NULL && bar_future->label == NULL &&
                  bar_future->dot == NULL &&
                  !lv_obj_has_flag(bar_future->container, LV_OBJ_FLAG_CLICKABLE),
              "known bar items render and unknown items reserve empty slots");
+    UI_CHECK(bar_clock_text_fits(bar_clock),
+             "one-slot clock shows its widest time without clipping");
     UI_CHECK(bar_pages != NULL && bar_pages->label != NULL &&
                  strcmp(lv_label_get_text(bar_pages->label), "1 / 2") == 0,
              "configured page indicator consumes the navigation counter");

@@ -1,7 +1,6 @@
 import type { BarItem, ProviderStatus } from '../lib/api'
+import { BAR_SLOT_COUNT, firstFreeSlot } from '../lib/bar'
 import { providerLabel } from '../lib/providers'
-
-const SLOT_COUNT = 12
 
 const KNOWN_TYPES = [
   { value: 'clock', label: 'Clock' },
@@ -38,7 +37,17 @@ export function BarEditor({ bar, providers, onChange }: Props) {
   }
 
   const errors = barErrors(bar)
-  const freeSlot = firstFreeSlot(bar)
+  // A clock wants two slots so the time is never the thing a user has to widen
+  // by hand, but one free slot is still a place to put an item — the panel
+  // renders a single-slot clock in the caption font rather than clipping it.
+  const pairSlot = firstFreeSlot(bar, 2)
+  const newItem: BarItem | null =
+    pairSlot !== null
+      ? { type: 'clock', slot: pairSlot, span: 2 }
+      : (() => {
+          const single = firstFreeSlot(bar, 1)
+          return single === null ? null : { type: 'clock', slot: single, span: 1 }
+        })()
   const update = (index: number, item: BarItem) => {
     const next = [...bar]
     next[index] = item
@@ -56,10 +65,10 @@ export function BarEditor({ bar, providers, onChange }: Props) {
           <button
             type="button"
             className="button button--secondary"
-            disabled={freeSlot === null}
-            title={freeSlot === null ? 'All twelve slots are occupied' : undefined}
+            disabled={newItem === null}
+            title={newItem === null ? 'All twelve slots are occupied' : undefined}
             onClick={() => {
-              if (freeSlot !== null) onChange([...bar, { type: 'clock', slot: freeSlot, span: 1 }])
+              if (newItem !== null) onChange([...bar, newItem])
             }}
           >
             Add item
@@ -71,7 +80,7 @@ export function BarEditor({ bar, providers, onChange }: Props) {
       </div>
 
       <div className="bar-slots" aria-label="System bar slot preview">
-        {Array.from({ length: SLOT_COUNT }, (_, slot) => {
+        {Array.from({ length: BAR_SLOT_COUNT }, (_, slot) => {
           const item = bar.find((entry) => slot >= entry.slot && slot < entry.slot + entry.span)
           return (
             <span
@@ -128,7 +137,7 @@ export function BarEditor({ bar, providers, onChange }: Props) {
                 <input
                   type="number"
                   min="1"
-                  max={SLOT_COUNT}
+                  max={BAR_SLOT_COUNT}
                   value={item.slot + 1}
                   onChange={(event) =>
                     update(index, { ...item, slot: Number(event.currentTarget.value) - 1 })
@@ -140,7 +149,7 @@ export function BarEditor({ bar, providers, onChange }: Props) {
                 <input
                   type="number"
                   min="1"
-                  max={SLOT_COUNT}
+                  max={BAR_SLOT_COUNT}
                   value={item.span}
                   onChange={(event) =>
                     update(index, { ...item, span: Number(event.currentTarget.value) })
@@ -203,16 +212,6 @@ function defaultBar(providers: Pick<ProviderStatus, 'id' | 'status'>[]): BarItem
   ]
 }
 
-function firstFreeSlot(bar: BarItem[]): number | null {
-  const occupied = new Set<number>()
-  for (const item of bar) {
-    for (let slot = item.slot; slot < item.slot + item.span; slot += 1) occupied.add(slot)
-  }
-  return Array.from({ length: SLOT_COUNT }, (_, index) => index).find(
-    (index) => !occupied.has(index),
-  ) ?? null
-}
-
 function itemLabel(item: BarItem): string {
   return KNOWN_TYPES.find((type) => type.value === item.type)?.label ?? item.type
 }
@@ -221,19 +220,19 @@ function barErrors(bar: BarItem[]): string[] {
   const errors: string[] = []
   const owners = new Map<number, number>()
   bar.forEach((item, index) => {
-    if (!Number.isInteger(item.slot) || item.slot < 0 || item.slot >= SLOT_COUNT) {
-      errors.push(`Item ${index + 1} must start in slots 1–${SLOT_COUNT}.`)
+    if (!Number.isInteger(item.slot) || item.slot < 0 || item.slot >= BAR_SLOT_COUNT) {
+      errors.push(`Item ${index + 1} must start in slots 1–${BAR_SLOT_COUNT}.`)
     }
     if (
       !Number.isInteger(item.span) ||
       item.span < 1 ||
-      item.span > SLOT_COUNT ||
-      item.slot + item.span > SLOT_COUNT
+      item.span > BAR_SLOT_COUNT ||
+      item.slot + item.span > BAR_SLOT_COUNT
     ) {
       errors.push(`Item ${index + 1} extends beyond the twelve-slot bar.`)
     }
     if (item.type === 'badge' && !item.provider) errors.push(`Item ${index + 1} needs a provider.`)
-    for (let slot = Math.max(0, item.slot); slot < Math.min(SLOT_COUNT, item.slot + item.span); slot += 1) {
+    for (let slot = Math.max(0, item.slot); slot < Math.min(BAR_SLOT_COUNT, item.slot + item.span); slot += 1) {
       const owner = owners.get(slot)
       if (owner !== undefined) {
         errors.push(`Items ${owner + 1} and ${index + 1} overlap at slot ${slot + 1}.`)

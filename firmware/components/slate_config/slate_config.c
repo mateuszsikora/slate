@@ -696,15 +696,17 @@ static bool build_bar(const cJSON *root, slate_config_t *config)
         return true;
     }
     config->has_bar = true;
-    config->bar_item_count = (size_t) cJSON_GetArraySize(bar);
-    if (config->bar_item_count == 0) {
+    size_t bar_item_count = (size_t) cJSON_GetArraySize(bar);
+    if (bar_item_count == 0) {
         return true;
     }
-    config->bar_items = config_calloc(config->bar_item_count,
-                                      sizeof(*config->bar_items));
-    if (config->bar_items == NULL) {
+    slate_config_bar_item_t *bar_items =
+        config_calloc(bar_item_count, sizeof(*bar_items));
+    if (bar_items == NULL) {
         return false;
     }
+    config->bar_items = bar_items;
+    config->bar_item_count = bar_item_count;
     for (size_t i = 0; i < config->bar_item_count; ++i) {
         const cJSON *json = cJSON_GetArrayItem(bar, (int) i);
         const cJSON *type = cJSON_GetObjectItemCaseSensitive(json, "type");
