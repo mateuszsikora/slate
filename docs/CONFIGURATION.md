@@ -60,12 +60,15 @@ The endpoints that carry the document are in [`API.md`](API.md).
 |-------|------|----------|---------|
 | `schema` | integer | yes | format version. `1` is the only one that exists. A document declaring a higher version is refused with `schema_too_new` and the panel says a firmware update is needed |
 | `theme` | string | yes | a theme id the running firmware carries; `GET /api/v1/info` lists them |
-| `home_page` | string | yes | the `id` of the page shown after a rebuild |
+| `home_page` | string | yes | the page shown on boot, and the fallback after a replacement removes the page that was visible |
 | `settings` | object | no | below |
 | `pages` | array | yes | at least one page |
 
 UTF-8, and at most **64 KB** on the wire. A page has an `id` unique in the
-document, a `title` shown in the system bar, and `tiles`.
+document, a `title` shown in the system bar, and `tiles`. Swipe horizontally
+over the content area to move to the previous or next page. Navigation does not
+wrap. A replacement keeps the visible page when its `id` survives the edit and
+otherwise selects `home_page`.
 
 ## Settings
 
@@ -92,9 +95,11 @@ that mode is an address somebody can read.
 
 ## The grid
 
-The screen is 800×480. A fixed 56 px system bar carries the clock, the page
-title and a connection indicator, and is not configurable. What is left is a
-**4 columns × 3 rows** grid of 184×124 px cells.
+The screen is 800×480. A fixed 56 px system bar carries the clock, the current
+page title and a connection indicator. Multi-page dashboards add a compact
+current/total page number; single-page dashboards do not show it. The bar
+arrangement is fixed. What is left is a **4 columns × 3 rows** grid of 184×124
+px cells.
 
 `pos` is `[column, row]`, zero-based from the top left. `size` is
 `[width, height]` in cells. Pixel coordinates do not exist in this format, and

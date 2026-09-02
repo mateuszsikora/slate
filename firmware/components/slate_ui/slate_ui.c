@@ -16,6 +16,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "lvgl.h"
 
 #include "slate_action.h"
@@ -67,13 +68,22 @@ typedef struct {
 } binding_view_t;
 
 typedef struct {
+    slate_config_t *config;
+    size_t references;
+} ui_model_t;
+
+typedef struct {
     lv_obj_t *screen;
+    lv_obj_t *content;
     lv_obj_t *clock;
     lv_obj_t *provider;
+    lv_obj_t *page_indicator;
     lv_timer_t *bar_timer;
     binding_view_t *views;
     size_t view_count;
     const slate_theme_t *theme;
+    ui_model_t *model;
+    size_t page_index;
 } ui_tree_t;
 
 typedef struct {
@@ -97,6 +107,8 @@ static atomic_bool s_edit_mode = ATOMIC_VAR_INIT(false);
 static atomic_bool s_message_active = ATOMIC_VAR_INIT(false);
 
 static void tree_destroy(ui_tree_t *tree);
+static void activate_tree(ui_tree_t *fresh);
+static void page_gesture_cb(lv_event_t *event);
 
 static void *ui_calloc(size_t count, size_t size)
 {
@@ -106,6 +118,148 @@ static void *ui_calloc(size_t count, size_t size)
     return heap_caps_calloc_prefer(count, size, 2,
                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+}
+
+static char *ui_strdup(const char *source)
+{
+    if (source == NULL) {
+        return NULL;
+    }
+    size_t size = strlen(source) + 1;
+    char *copy = heap_caps_malloc_prefer(size, 2,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT,
+                                         MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (copy != NULL) {
+        memcpy(copy, source, size);
+    }
+    return copy;
+}
+
+static bool clone_string(const char *source, char **out)
+{
+    if (source == NULL) {
+        return true;
+    }
+    *out = ui_strdup(source);
+    return *out != NULL;
+}
+
+/* slate_ui_rebuild() deliberately lets its caller free the parsed model as
+ * soon as the synchronous call returns. Page navigation outlives that call,
+ * so the runtime keeps one owned copy shared by successive visible trees. */
+static slate_config_t *clone_config(const slate_config_t *source)
+{
+    slate_config_t *copy = ui_calloc(1, sizeof(*copy));
+    if (copy == NULL) {
+        return NULL;
+    }
+    copy->schema = source->schema;
+    copy->settings.brightness_day = source->settings.brightness_day;
+    copy->settings.brightness_night = source->settings.brightness_night;
+    copy->settings.screen_off_after = source->settings.screen_off_after;
+    copy->settings.wake_on_touch = source->settings.wake_on_touch;
+    copy->settings.has_brightness_day = source->settings.has_brightness_day;
+    copy->settings.has_brightness_night = source->settings.has_brightness_night;
+    copy->settings.has_screen_off_after = source->settings.has_screen_off_after;
+    copy->settings.has_wake_on_touch = source->settings.has_wake_on_touch;
+    if (!clone_string(source->theme, &copy->theme) ||
+        !clone_string(source->home_page, &copy->home_page) ||
+        !clone_string(source->settings.timezone, &copy->settings.timezone) ||
+        !clone_string(source->settings.night_start, &copy->settings.night_start) ||
+        !clone_string(source->settings.night_end, &copy->settings.night_end)) {
+        slate_config_free(copy);
+        return NULL;
+    }
+
+    if (source->page_count > 0) {
+        copy->pages = ui_calloc(source->page_count, sizeof(*copy->pages));
+        if (copy->pages == NULL) {
+            slate_config_free(copy);
+            return NULL;
+        }
+    }
+    copy->page_count = source->page_count;
+    for (size_t p = 0; p < source->page_count; ++p) {
+        const slate_config_page_t *from_page = &source->pages[p];
+        slate_config_page_t *to_page = &copy->pages[p];
+        if (!clone_string(from_page->id, &to_page->id) ||
+            !clone_string(from_page->title, &to_page->title)) {
+            slate_config_free(copy);
+            return NULL;
+        }
+        if (from_page->tile_count > 0) {
+            to_page->tiles = ui_calloc(from_page->tile_count, sizeof(*to_page->tiles));
+            if (to_page->tiles == NULL) {
+                slate_config_free(copy);
+                return NULL;
+            }
+        }
+        to_page->tile_count = from_page->tile_count;
+        for (size_t t = 0; t < from_page->tile_count; ++t) {
+            const slate_config_tile_t *from_tile = &from_page->tiles[t];
+            slate_config_tile_t *to_tile = &to_page->tiles[t];
+            to_tile->component = from_tile->component;
+            to_tile->column = from_tile->column;
+            to_tile->row = from_tile->row;
+            to_tile->width = from_tile->width;
+            to_tile->height = from_tile->height;
+            if (!clone_string(from_tile->id, &to_tile->id) ||
+                !clone_string(from_tile->type, &to_tile->type) ||
+                !clone_string(from_tile->label, &to_tile->label) ||
+                !clone_string(from_tile->icon, &to_tile->icon)) {
+                slate_config_free(copy);
+                return NULL;
+            }
+            if (from_tile->binding_count > 0) {
+                to_tile->bindings = ui_calloc(from_tile->binding_count,
+                                               sizeof(*to_tile->bindings));
+                if (to_tile->bindings == NULL) {
+                    slate_config_free(copy);
+                    return NULL;
+                }
+            }
+            to_tile->binding_count = from_tile->binding_count;
+            for (size_t b = 0; b < from_tile->binding_count; ++b) {
+                if (!clone_string(from_tile->bindings[b].provider,
+                                  &to_tile->bindings[b].provider) ||
+                    !clone_string(from_tile->bindings[b].resource,
+                                  &to_tile->bindings[b].resource)) {
+                    slate_config_free(copy);
+                    return NULL;
+                }
+            }
+        }
+    }
+    return copy;
+}
+
+static ui_model_t *model_create(const slate_config_t *config)
+{
+    ui_model_t *model = ui_calloc(1, sizeof(*model));
+    if (model == NULL) {
+        return NULL;
+    }
+    model->config = clone_config(config);
+    if (model->config == NULL) {
+        free(model);
+        return NULL;
+    }
+    model->references = 1;
+    return model;
+}
+
+static void model_retain(ui_model_t *model)
+{
+    model->references++;
+}
+
+static void model_release(ui_model_t *model)
+{
+    if (model == NULL || --model->references > 0) {
+        return;
+    }
+    slate_config_free(model->config);
+    free(model);
 }
 
 static slate_kind_t component_kind(slate_component_type_t component)
@@ -133,6 +287,32 @@ static const slate_config_page_t *home_page(const slate_config_t *config)
         }
     }
     return NULL; /* Validation makes this unreachable for an accepted model. */
+}
+
+static size_t page_index_for(const slate_config_t *config, const char *id)
+{
+    if (id != NULL) {
+        for (size_t i = 0; i < config->page_count; ++i) {
+            if (strcmp(config->pages[i].id, id) == 0) {
+                return i;
+            }
+        }
+    }
+    for (size_t i = 0; i < config->page_count; ++i) {
+        if (strcmp(config->pages[i].id, config->home_page) == 0) {
+            return i;
+        }
+    }
+    return 0; /* Validation makes the fallback unreachable. */
+}
+
+static const slate_config_page_t *tree_page(const ui_tree_t *tree)
+{
+    if (tree == NULL || tree->model == NULL ||
+        tree->page_index >= tree->model->config->page_count) {
+        return NULL;
+    }
+    return &tree->model->config->pages[tree->page_index];
 }
 
 static void style_plain(lv_obj_t *object)
@@ -423,7 +603,8 @@ static void bar_timer_cb(lv_timer_t *timer)
     update_all();
 }
 
-static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title)
+static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title,
+                            size_t page_count, size_t page_index)
 {
     ui_tree_t *tree = ui_calloc(1, sizeof(*tree));
     if (tree == NULL) {
@@ -466,7 +647,22 @@ static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title)
     }
     lv_obj_set_width(page_title, 320);
     slate_component_label_one_line(page_title);
-    lv_obj_align(page_title, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_align(page_title, LV_ALIGN_CENTER, 0, page_count > 1 ? -6 : 0);
+
+    if (page_count > 1) {
+        char position[48];
+        snprintf(position, sizeof(position), "%u / %u",
+                 (unsigned) page_index + 1, (unsigned) page_count);
+        tree->page_indicator = make_label(bar, position, theme->caption, theme->text_lo);
+        if (tree->page_indicator == NULL) {
+            tree_destroy(tree);
+            return NULL;
+        }
+        lv_obj_set_width(tree->page_indicator, 96);
+        slate_component_label_one_line(tree->page_indicator);
+        lv_obj_set_style_text_align(tree->page_indicator, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+        lv_obj_align(tree->page_indicator, LV_ALIGN_BOTTOM_MID, 0, -2);
+    }
 
     tree->provider = make_label(bar, "PROVIDERS DEGRADED", theme->caption, theme->text_lo);
     if (tree->provider == NULL) {
@@ -477,6 +673,20 @@ static ui_tree_t *tree_base(const slate_theme_t *theme, const char *title)
     slate_component_label_one_line(tree->provider);
     lv_obj_set_style_text_align(tree->provider, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_obj_align(tree->provider, LV_ALIGN_RIGHT_MID, 0, 0);
+
+    if (page_count > 0) {
+        tree->content = lv_obj_create(tree->screen);
+        if (tree->content == NULL) {
+            tree_destroy(tree);
+            return NULL;
+        }
+        style_plain(tree->content);
+        lv_obj_set_pos(tree->content, 0, UI_BAR_HEIGHT);
+        lv_obj_set_size(tree->content, UI_WIDTH, UI_HEIGHT - UI_BAR_HEIGHT);
+        lv_obj_add_flag(tree->content, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_remove_flag(tree->content, LV_OBJ_FLAG_GESTURE_BUBBLE);
+        lv_obj_add_event_cb(tree->content, page_gesture_cb, LV_EVENT_GESTURE, tree);
+    }
 
     tree->bar_timer = lv_timer_create(bar_timer_cb, 1000, NULL);
     if (tree->bar_timer == NULL) {
@@ -501,6 +711,7 @@ static void tree_destroy(ui_tree_t *tree)
         lv_obj_delete(tree->screen);
     }
     free(tree->views);
+    model_release(tree->model);
     free(tree);
 }
 
@@ -510,9 +721,9 @@ static lv_obj_t *build_tile_shell(ui_tree_t *tree, const slate_config_tile_t *ti
     int32_t width = tile->width * UI_CELL_WIDTH + (tile->width - 1) * UI_GAP;
     int32_t height = tile->height * UI_CELL_HEIGHT + (tile->height - 1) * UI_GAP;
     int32_t x = UI_MARGIN + tile->column * (UI_CELL_WIDTH + UI_GAP);
-    int32_t y = UI_BAR_HEIGHT + UI_MARGIN + tile->row * (UI_CELL_HEIGHT + UI_GAP);
+    int32_t y = UI_MARGIN + tile->row * (UI_CELL_HEIGHT + UI_GAP);
 
-    lv_obj_t *object = lv_obj_create(tree->screen);
+    lv_obj_t *object = lv_obj_create(tree->content);
     if (object == NULL) {
         return NULL;
     }
@@ -525,6 +736,25 @@ static lv_obj_t *build_tile_shell(ui_tree_t *tree, const slate_config_tile_t *ti
     lv_obj_set_style_pad_all(object, theme->pad, LV_PART_MAIN);
     lv_obj_add_flag(object, LV_OBJ_FLAG_CLICKABLE);
     return object;
+}
+
+static bool owns_horizontal_drag(const lv_obj_t *object)
+{
+    return lv_obj_check_type(object, &lv_slider_class) ||
+           lv_obj_check_type(object, &lv_arc_class);
+}
+
+static void bubble_gestures_to_content(lv_obj_t *object)
+{
+    if (owns_horizontal_drag(object)) {
+        lv_obj_remove_flag(object, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    } else {
+        lv_obj_add_flag(object, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    }
+    uint32_t count = lv_obj_get_child_count(object);
+    for (uint32_t i = 0; i < count; ++i) {
+        bubble_gestures_to_content(lv_obj_get_child(object, (int32_t) i));
+    }
 }
 
 static bool build_unknown_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
@@ -678,11 +908,15 @@ static bool build_known_tile(ui_tree_t *tree, const slate_config_tile_t *tile,
     return true;
 }
 
-static ui_tree_t *build_config_tree(const slate_config_t *config)
+static ui_tree_t *build_page_tree(ui_model_t *model, size_t page_index)
 {
-    const slate_config_page_t *page = home_page(config);
+    const slate_config_t *config = model->config;
+    if (page_index >= config->page_count) {
+        return NULL;
+    }
+    const slate_config_page_t *page = &config->pages[page_index];
     const slate_theme_t *theme = slate_theme_find(config->theme);
-    if (page == NULL || theme == NULL) {
+    if (theme == NULL) {
         return NULL;
     }
 
@@ -693,10 +927,14 @@ static ui_tree_t *build_config_tree(const slate_config_t *config)
         }
     }
 
-    ui_tree_t *tree = tree_base(theme, page->title != NULL ? page->title : page->id);
+    ui_tree_t *tree = tree_base(theme, page->title != NULL ? page->title : page->id,
+                                config->page_count, page_index);
     if (tree == NULL) {
         return NULL;
     }
+    tree->model = model;
+    tree->page_index = page_index;
+    model_retain(model);
     if (view_count > 0) {
         tree->views = ui_calloc(view_count, sizeof(*tree->views));
         if (tree->views == NULL) {
@@ -748,8 +986,96 @@ static ui_tree_t *build_config_tree(const slate_config_t *config)
             tree_destroy(tree);
             return NULL;
         }
+        bubble_gestures_to_content(object);
     }
     return tree;
+}
+
+static ui_tree_t *build_config_tree_at(const slate_config_t *config, const char *page_id)
+{
+    ui_model_t *model = model_create(config);
+    if (model == NULL) {
+        return NULL;
+    }
+    size_t page_index = page_index_for(model->config, page_id);
+    ui_tree_t *tree = build_page_tree(model, page_index);
+    model_release(model);
+    return tree;
+}
+
+#ifdef SLATE_UI_SELFTEST
+static ui_tree_t *build_config_tree(const slate_config_t *config)
+{
+    return build_config_tree_at(config, config->home_page);
+}
+#endif
+
+static esp_err_t navigate_page(ui_tree_t *tree, lv_dir_t direction)
+{
+    if (tree == NULL || tree != s_tree || tree->model == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    size_t target = tree->page_index;
+    size_t page_count = tree->model->config->page_count;
+    if (direction == LV_DIR_LEFT && target + 1 < page_count) {
+        target++;
+    } else if (direction == LV_DIR_RIGHT && target > 0) {
+        target--;
+    } else {
+        return ESP_ERR_NOT_FOUND; /* A vertical gesture or a non-wrapping edge. */
+    }
+
+    int64_t started = esp_timer_get_time();
+    ui_tree_t *fresh = build_page_tree(tree->model, target);
+    if (fresh == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    activate_tree(fresh);
+    slate_state_drain(discard_changed, NULL);
+    update_all();
+    ESP_LOGI(TAG, "switched to page \"%s\" in %" PRIi64 " us",
+             tree_page(fresh)->id, esp_timer_get_time() - started);
+    return ESP_OK;
+}
+
+static bool page_gesture_target(const ui_tree_t *tree, const lv_obj_t *target)
+{
+    if (tree == NULL || tree->content == NULL || target == NULL) {
+        return false;
+    }
+    for (const lv_obj_t *object = target; object != NULL;
+         object = lv_obj_get_parent(object)) {
+        if (object == tree->content) {
+            return true;
+        }
+        if (owns_horizontal_drag(object)) {
+            return false;
+        }
+    }
+    return false;
+}
+
+static void page_gesture_cb(lv_event_t *event)
+{
+    lv_indev_t *indev = lv_event_get_indev(event);
+    if (indev == NULL) {
+        return;
+    }
+    ui_tree_t *tree = lv_event_get_user_data(event);
+    lv_obj_t *target = lv_event_get_target_obj(event);
+    if (!page_gesture_target(tree, target)) {
+        /* Sliders and arcs own their horizontal drags. Buttons bubble gestures
+         * because LVGL still distinguishes a swipe from their click action. */
+        return;
+    }
+    lv_dir_t direction = lv_indev_get_gesture_dir(indev);
+    if (direction == LV_DIR_LEFT || direction == LV_DIR_RIGHT) {
+        esp_err_t err = navigate_page(tree, direction);
+        if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "page gesture ignored: %s", esp_err_to_name(err));
+        }
+    }
 }
 
 static slate_binding_t *config_bindings(const slate_config_t *config, size_t *out_count)
@@ -817,7 +1143,9 @@ static esp_err_t rebuild_on_task(const slate_config_t *config)
         return ESP_ERR_NO_MEM;
     }
 
-    ui_tree_t *fresh = build_config_tree(config);
+    const slate_config_page_t *current_page = tree_page(s_tree);
+    ui_tree_t *fresh = build_config_tree_at(
+        config, current_page != NULL ? current_page->id : config->home_page);
     if (fresh == NULL) {
         free(bindings);
         return ESP_ERR_NO_MEM;
@@ -849,8 +1177,9 @@ static esp_err_t rebuild_on_task(const slate_config_t *config)
     atomic_store_explicit(&s_message_active, false, memory_order_release);
     slate_state_drain(discard_changed, NULL);
     update_all();
+    const slate_config_page_t *active = tree_page(fresh);
     ESP_LOGI(TAG, "activated page \"%s\": %u tile(s), %u binding(s)",
-             home_page(config)->id, (unsigned) home_page(config)->tile_count,
+             active->id, (unsigned) active->tile_count,
              (unsigned) binding_count);
     return ESP_OK;
 }
@@ -911,7 +1240,7 @@ static bool editor_url(char *out, size_t out_len, char *address, size_t address_
 static ui_tree_t *build_message_tree(const char *title, const char *message)
 {
     const slate_theme_t *theme = slate_theme_default();
-    ui_tree_t *tree = tree_base(theme, title);
+    ui_tree_t *tree = tree_base(theme, title, 0, 0);
     if (tree == NULL) {
         return NULL;
     }
@@ -1576,6 +1905,41 @@ static slate_config_t *scene_test_config(void)
     return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
 }
 
+static slate_config_t *gesture_inspection_config(void)
+{
+    static const char JSON[] =
+        "{\"schema\":1,\"theme\":\"minimal-light\",\"home_page\":\"left\",\"pages\":[{"
+        "\"id\":\"left\",\"title\":\"Swipe a control left\",\"tiles\":["
+        "{\"id\":\"dimmer-left\",\"type\":\"light\",\"pos\":[0,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"action-dimmer\"}},"
+        "{\"id\":\"cover-left\",\"type\":\"cover\",\"pos\":[2,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"cover-horizontal\"}},"
+        "{\"id\":\"scenes-left\",\"type\":\"scene\",\"pos\":[0,1],\"size\":[4,1],"
+        "\"bindings\":["
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-movie\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-relax\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-dinner\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-away\"}]}]},"
+        "{\"id\":\"right\",\"title\":\"Swipe a control right\",\"tiles\":["
+        "{\"id\":\"dimmer-right\",\"type\":\"light\",\"pos\":[0,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"action-dimmer\"}},"
+        "{\"id\":\"cover-right\",\"type\":\"cover\",\"pos\":[2,0],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"ui-fixture\",\"resource\":\"cover-horizontal\"}},"
+        "{\"id\":\"scenes-right\",\"type\":\"scene\",\"pos\":[0,1],\"size\":[4,1],"
+        "\"bindings\":["
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-movie\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-relax\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-dinner\"},"
+        "{\"provider\":\"ui-fixture\",\"resource\":\"scene-away\"}]}]}]}";
+
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
 static void settle_frame(void)
 {
     /* The real RGB flush completes from VSYNC. Yielding the owner task lets the
@@ -1660,19 +2024,19 @@ static esp_err_t measured_cycle(int cycle, lv_obj_t *anchor,
     return err;
 }
 
-static bool verify_layout(const slate_config_t *config)
+static bool verify_layout(void)
 {
-    const slate_config_page_t *page = home_page(config);
-    if (page == NULL || s_tree == NULL) {
+    const slate_config_page_t *page = tree_page(s_tree);
+    if (page == NULL || s_tree->content == NULL) {
         return false;
     }
     lv_obj_update_layout(s_tree->screen);
-    /* Child zero is the fixed system bar; tiles follow in configuration order. */
+    /* Tiles are children of the content gesture target, in configuration order. */
     for (size_t i = 0; i < page->tile_count; i++) {
         const slate_config_tile_t *tile = &page->tiles[i];
-        lv_obj_t *object = lv_obj_get_child(s_tree->screen, (int32_t) i + 1);
+        lv_obj_t *object = lv_obj_get_child(s_tree->content, (int32_t) i);
         int32_t want_x = UI_MARGIN + tile->column * (UI_CELL_WIDTH + UI_GAP);
-        int32_t want_y = UI_BAR_HEIGHT + UI_MARGIN + tile->row * (UI_CELL_HEIGHT + UI_GAP);
+        int32_t want_y = UI_MARGIN + tile->row * (UI_CELL_HEIGHT + UI_GAP);
         int32_t want_w = tile->width * UI_CELL_WIDTH + (tile->width - 1) * UI_GAP;
         int32_t want_h = tile->height * UI_CELL_HEIGHT + (tile->height - 1) * UI_GAP;
         if (object == NULL || lv_obj_get_x(object) != want_x || lv_obj_get_y(object) != want_y ||
@@ -1697,6 +2061,15 @@ static binding_view_t *find_view(const char *provider, const char *resource)
     return NULL;
 }
 
+static bool page_indicator_at(size_t index, size_t count)
+{
+    char expected[48];
+    snprintf(expected, sizeof(expected), "%u / %u",
+             (unsigned) index + 1, (unsigned) count);
+    return s_tree != NULL && s_tree->page_indicator != NULL &&
+           strcmp(lv_label_get_text(s_tree->page_indicator), expected) == 0;
+}
+
 static esp_err_t publish_test_states(void)
 {
     const slate_snapshot_t direct = {
@@ -1719,10 +2092,43 @@ static esp_err_t publish_test_states(void)
                          .unit = "°C",
                          .measurement = SLATE_MEASUREMENT_TEMPERATURE},
     };
+    const slate_snapshot_t offscreen = {
+        .resource = "offscreen",
+        .kind = SLATE_KIND_SENSOR,
+        .name = "Off-screen fixture",
+        .available = true,
+        .state.sensor = {.numeric = true,
+                         .value = 18.5,
+                         .unit = "°C",
+                         .measurement = SLATE_MEASUREMENT_TEMPERATURE},
+    };
     esp_err_t err = slate_state_publish("direct", &direct);
     if (err == ESP_OK) {
         err = slate_state_publish("ui-fixture", &fixture);
     }
+    if (err == ESP_OK) {
+        err = slate_state_publish("ui-fixture", &offscreen);
+    }
+    if (err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    return err;
+}
+
+static esp_err_t publish_direct_light_state(bool on)
+{
+    const slate_snapshot_t direct = {
+        .resource = "living-room",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Living room",
+        .available = true,
+        .capabilities = {.actions = 1u << SLATE_ACTION_TOGGLE},
+        .state.light = {.on = on,
+                        .brightness = SLATE_STATE_ABSENT,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    esp_err_t err = slate_state_publish("direct", &direct);
     if (err == ESP_OK) {
         slate_state_drain(discard_changed, NULL);
         update_all();
@@ -2041,6 +2447,45 @@ static esp_err_t publish_scene_test_states(void)
     return ESP_OK;
 }
 
+static esp_err_t publish_gesture_inspection_states(void)
+{
+    static const slate_snapshot_t SCENES[] = {
+        {.resource = "scene-movie", .kind = SLATE_KIND_SCENE, .name = "Movie",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-relax", .kind = SLATE_KIND_SCENE, .name = "Relax",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-dinner", .kind = SLATE_KIND_SCENE, .name = "Dinner",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+        {.resource = "scene-away", .kind = SLATE_KIND_SCENE, .name = "Away",
+         .available = true, .capabilities.actions = 1u << SLATE_ACTION_ACTIVATE},
+    };
+    const slate_snapshot_t dimmer = {
+        .resource = "action-dimmer",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Drag brightness; page must stay",
+        .available = true,
+        .capabilities = {
+            .actions = 1u << SLATE_ACTION_SET_BRIGHTNESS,
+            .brightness_min = 0,
+            .brightness_max = 100,
+        },
+        .state.light = {.on = true, .brightness = 55,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    esp_err_t err = slate_state_publish("ui-fixture", &dimmer);
+    if (err == ESP_OK) {
+        err = publish_cover_state("cover-horizontal", 43, SLATE_COVER_IDLE, true);
+    }
+    for (size_t i = 0; err == ESP_OK && i < sizeof(SCENES) / sizeof(SCENES[0]); i++) {
+        err = slate_state_publish("ui-fixture", &SCENES[i]);
+    }
+    if (err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    return err;
+}
+
 static bool sensor_view_text(const char *resource, const char *value, const char *unit)
 {
     binding_view_t *view = find_view("direct", resource);
@@ -2214,11 +2659,8 @@ static esp_err_t selftest_on_task(void)
     slate_config_t *final = test_config(0);
     UI_CHECK(final != NULL && rebuild_on_task(final) == ESP_OK,
              "final mixed-provider tree activated");
-    UI_CHECK(final != NULL && verify_layout(final),
+    UI_CHECK(final != NULL && verify_layout(),
              "all tiles match the exact grid coordinates");
-    if (final != NULL) {
-        slate_config_free(final);
-    }
     UI_CHECK(s_fixture.calls > 0 && s_fixture.subscriptions >= 3,
              "fixture received subscriptions from every page");
     UI_CHECK(publish_test_states() == ESP_OK,
@@ -2235,6 +2677,99 @@ static esp_err_t selftest_on_task(void)
                  strcmp(lv_label_get_text(fixture_view->sensor.value), "21.4") == 0 &&
                  strcmp(lv_label_get_text(fixture_view->sensor.unit), "°C") == 0,
              "the fixture tile observed the same normalized path");
+    UI_CHECK(page_indicator_at(0, 2),
+             "the multi-page bar identifies the home page");
+    UI_CHECK(s_tree->content != NULL &&
+                 !lv_obj_has_flag(s_tree->content, LV_OBJ_FLAG_GESTURE_BUBBLE),
+             "page content terminates bubbled gestures");
+    UI_CHECK(direct_view != NULL && page_gesture_target(s_tree, direct_view->tile) &&
+                 direct_view->light.brightness_slider != NULL &&
+                 !page_gesture_target(s_tree, direct_view->light.brightness_slider),
+             "tile swipes navigate while sliders keep their drags");
+    UI_CHECK(direct_view != NULL && direct_view->light.brightness_slider != NULL &&
+                 !lv_obj_has_flag(direct_view->light.brightness_slider,
+                                  LV_OBJ_FLAG_GESTURE_BUBBLE),
+             "brightness slider keeps gestures instead of bubbling them");
+    lv_area_t brightness_click_area = {0};
+    if (direct_view != NULL && direct_view->light.brightness_slider != NULL) {
+        lv_obj_get_click_area(direct_view->light.brightness_slider,
+                              &brightness_click_area);
+    }
+    UI_CHECK(lv_area_get_height(&brightness_click_area) >= 80,
+             "brightness slider owns an 80 px gesture-safe touch target");
+    UI_CHECK(direct_view != NULL && direct_view->light.brightness_slider != NULL &&
+                 lv_obj_has_flag(direct_view->light.brightness_slider,
+                                 LV_OBJ_FLAG_ADV_HITTEST),
+             "brightness slider limits its expanded hit box to the knob");
+
+    unsigned actions_before_navigation = s_fixture.action_calls;
+    ui_tree_t *home_tree = s_tree;
+    int64_t switch_started = esp_timer_get_time();
+    esp_err_t next_page_err = navigate_page(s_tree, LV_DIR_LEFT);
+    int64_t next_page_us = esp_timer_get_time() - switch_started;
+    binding_view_t *offscreen_view = find_view("ui-fixture", "offscreen");
+    UI_CHECK(next_page_err == ESP_OK && s_tree != home_tree &&
+                 tree_page(s_tree) != NULL &&
+                 strcmp(tree_page(s_tree)->id, "secondary") == 0 &&
+                 page_indicator_at(1, 2) &&
+                 find_view("direct", "living-room") == NULL &&
+                 offscreen_view != NULL &&
+                 strcmp(lv_label_get_text(offscreen_view->sensor.value), "18.5") == 0,
+             "left swipe reaches the next page with current state");
+    UI_CHECK(navigate_page(s_tree, LV_DIR_LEFT) == ESP_ERR_NOT_FOUND &&
+                 tree_page(s_tree) != NULL &&
+                 strcmp(tree_page(s_tree)->id, "secondary") == 0,
+             "the last page does not wrap around");
+    UI_CHECK(final != NULL && rebuild_on_task(final) == ESP_OK &&
+                 tree_page(s_tree) != NULL &&
+                 strcmp(tree_page(s_tree)->id, "secondary") == 0 &&
+                 page_indicator_at(1, 2),
+             "a config replacement preserves a surviving page id");
+    UI_CHECK(publish_direct_light_state(false) == ESP_OK &&
+                 find_view("direct", "living-room") == NULL,
+             "a hidden page has no live view or action handler");
+    switch_started = esp_timer_get_time();
+    esp_err_t previous_page_err = navigate_page(s_tree, LV_DIR_RIGHT);
+    int64_t previous_page_us = esp_timer_get_time() - switch_started;
+    direct_view = find_view("direct", "living-room");
+    fixture_view = find_view("ui-fixture", "temperature");
+    UI_CHECK(previous_page_err == ESP_OK && tree_page(s_tree) != NULL &&
+                 strcmp(tree_page(s_tree)->id, "home") == 0 &&
+                 page_indicator_at(0, 2) && direct_view != NULL &&
+                 strcmp(lv_label_get_text(direct_view->light.icon),
+                        SLATE_ICON_LIGHTBULB_OUTLINE) == 0,
+             "right swipe returns to refreshed hidden-page state");
+    UI_CHECK(navigate_page(s_tree, LV_DIR_RIGHT) == ESP_ERR_NOT_FOUND &&
+                 tree_page(s_tree) != NULL &&
+                 strcmp(tree_page(s_tree)->id, "home") == 0,
+             "the first page does not wrap around");
+
+    esp_err_t secondary_again_err = navigate_page(s_tree, LV_DIR_LEFT);
+    slate_config_t *fallback = sensor_test_config();
+    UI_CHECK(secondary_again_err == ESP_OK && fallback != NULL &&
+                 rebuild_on_task(fallback) == ESP_OK &&
+                 tree_page(s_tree) != NULL &&
+                 strcmp(tree_page(s_tree)->id, "sensors") == 0 &&
+                 s_tree->page_indicator == NULL,
+             "a removed page falls back to home_page without an indicator");
+    if (fallback != NULL) {
+        slate_config_free(fallback);
+    }
+    UI_CHECK(final != NULL && rebuild_on_task(final) == ESP_OK &&
+                 tree_page(s_tree) != NULL &&
+                 strcmp(tree_page(s_tree)->id, "home") == 0 &&
+                 publish_test_states() == ESP_OK &&
+                 s_fixture.action_calls == actions_before_navigation,
+             "page navigation never dispatches a hidden action");
+    ESP_LOGI(TAG, "selftest: page switch build/update next=%" PRIi64
+                  " us previous=%" PRIi64 " us",
+             next_page_us, previous_page_us);
+    if (final != NULL) {
+        slate_config_free(final);
+    }
+
+    direct_view = find_view("direct", "living-room");
+    fixture_view = find_view("ui-fixture", "temperature");
 
     ui_tree_t *mixed_tree = s_tree;
     slate_provider_status_t direct_status_before =
@@ -2313,7 +2848,7 @@ static esp_err_t selftest_on_task(void)
                  temperature_view != NULL &&
                  lv_color_eq(lv_obj_get_style_bg_color(temperature_view->tile, LV_PART_MAIN),
                              lv_color_hex(minimal_light->surface)) &&
-                 verify_layout(sensors),
+                 verify_layout(),
              "Minimal Light changes palette without moving the grid");
     if (sensors != NULL) {
         slate_config_free(sensors);
@@ -2571,7 +3106,8 @@ static esp_err_t selftest_on_task(void)
                  !lv_obj_has_flag(readonly->tile, LV_OBJ_FLAG_CLICKABLE),
              "read-only light exposes no action target");
     UI_CHECK(toggle_only != NULL && toggle_only->light.brightness_slider != NULL &&
-                 lv_obj_has_flag(toggle_only->light.brightness_slider, LV_OBJ_FLAG_HIDDEN),
+                 lv_obj_has_flag(toggle_only->light.brightness_slider,
+                                 LV_OBJ_FLAG_HIDDEN),
              "unadvertised brightness control stays hidden");
     UI_CHECK(missing_light != NULL &&
                  !lv_obj_has_flag(missing_light->light.identity, LV_OBJ_FLAG_HIDDEN) &&
@@ -2690,7 +3226,7 @@ static esp_err_t selftest_on_task(void)
     slate_config_t *light_layouts = light_layout_test_config();
     bool light_layouts_active = light_layouts != NULL &&
                                 rebuild_on_task(light_layouts) == ESP_OK;
-    UI_CHECK(light_layouts_active && verify_layout(light_layouts),
+    UI_CHECK(light_layouts_active && verify_layout(),
              "valid 1x2 and 4x1 light layouts keep exact grid geometry");
     if (light_layouts != NULL) {
         slate_config_free(light_layouts);
@@ -2855,7 +3391,7 @@ static esp_err_t selftest_on_task(void)
              "confirmed colour temperature clears pending presentation");
 
     slate_config_t *covers = cover_test_config();
-    UI_CHECK(covers != NULL && rebuild_on_task(covers) == ESP_OK && verify_layout(covers),
+    UI_CHECK(covers != NULL && rebuild_on_task(covers) == ESP_OK && verify_layout(),
              "all three cover layouts activated on the exact grid");
     UI_CHECK(publish_cover_test_states() == ESP_OK,
              "cover variants received normalized state");
@@ -2881,6 +3417,15 @@ static esp_err_t selftest_on_task(void)
                             lv_obj_get_width(vertical_cover->cover.close_button) >= 48 &&
                             lv_obj_get_height(vertical_cover->cover.close_button) >= 48;
     UI_CHECK(cover_targets_ok, "1x2 and 2x1 cover controls meet the 48 px target");
+    UI_CHECK(horizontal_cover != NULL &&
+                 page_gesture_target(s_tree, horizontal_cover->cover.open_button) &&
+                 page_gesture_target(s_tree, horizontal_cover->cover.stop_button) &&
+                 page_gesture_target(s_tree, horizontal_cover->cover.close_button),
+             "nested cover buttons leave horizontal swipes to page navigation");
+    UI_CHECK(horizontal_cover != NULL &&
+                 lv_obj_has_flag(horizontal_cover->cover.open_button,
+                                 LV_OBJ_FLAG_GESTURE_BUBBLE),
+             "nested cover button bubbles page gestures to content");
     UI_CHECK(vertical_cover != NULL &&
                  lv_obj_get_y(vertical_cover->cover.name) +
                          lv_obj_get_height(vertical_cover->cover.name) <=
@@ -3037,6 +3582,8 @@ static esp_err_t selftest_on_task(void)
         "scene-movie", "scene-relax", "scene-dinner", "scene-away", "scene-missing",
     };
     bool bar_layout_ok = true;
+    bool bar_gesture_targets_ok = true;
+    bool bar_gesture_flags_ok = true;
     bool all_activated = true;
     bool all_confirmed = true;
     lv_obj_update_layout(s_tree->screen);
@@ -3047,6 +3594,11 @@ static esp_err_t selftest_on_task(void)
                         lv_obj_get_width(scene_view->scene.button) >= 48 &&
                         lv_obj_get_height(scene_view->scene.button) >= 48 &&
                         lv_obj_has_flag(scene_view->scene.button, LV_OBJ_FLAG_CLICKABLE);
+        bar_gesture_targets_ok = bar_gesture_targets_ok && scene_view != NULL &&
+                                 page_gesture_target(s_tree, scene_view->scene.button);
+        bar_gesture_flags_ok = bar_gesture_flags_ok && scene_view != NULL &&
+                               lv_obj_has_flag(scene_view->scene.button,
+                                               LV_OBJ_FLAG_GESTURE_BUBBLE);
         unsigned scene_calls = s_fixture.action_calls;
         lv_result_t scene_result = scene_view != NULL
                                        ? lv_obj_send_event(scene_view->scene.button,
@@ -3088,6 +3640,10 @@ static esp_err_t selftest_on_task(void)
                                     lv_color_hex(s_tree->theme->on_accent));
     }
     UI_CHECK(bar_layout_ok, "4x1 bar gives every scene an independent touch target");
+    UI_CHECK(bar_gesture_targets_ok,
+             "nested scene buttons leave horizontal swipes to page navigation");
+    UI_CHECK(bar_gesture_flags_ok,
+             "nested scene buttons bubble page gestures to content");
     UI_CHECK(all_activated, "every scene button emits its own activate action");
     UI_CHECK(all_confirmed,
              "accepted scenes flash only their button with a legible foreground");
@@ -3187,14 +3743,14 @@ static esp_err_t selftest_on_task(void)
         slate_config_free(scenes);
     }
 
-    lights = light_test_config();
-    UI_CHECK(lights != NULL && rebuild_on_task(lights) == ESP_OK,
-             "direct-provider light dashboard restored for inspection");
-    if (lights != NULL) {
-        slate_config_free(lights);
+    slate_config_t *gesture_inspection = gesture_inspection_config();
+    UI_CHECK(gesture_inspection != NULL && rebuild_on_task(gesture_inspection) == ESP_OK,
+             "manual gesture inspection dashboard activated");
+    if (gesture_inspection != NULL) {
+        slate_config_free(gesture_inspection);
     }
-    UI_CHECK(publish_light_test_states() == ESP_OK,
-             "direct-provider light dashboard left populated");
+    UI_CHECK(publish_gesture_inspection_states() == ESP_OK,
+             "manual gesture inspection dashboard left populated");
 
     ESP_LOGI(TAG, "selftest: %u check(s), %u failure(s)", checks, failures);
 #undef UI_CHECK

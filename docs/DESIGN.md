@@ -110,7 +110,15 @@ The direct provider is the smallest useful interoperability path: a script or No
 
 ### 3.2 Grid
 
-The display is 800×480. A fixed 56 px system bar at the top shows the clock, page title and connection indicator; it is not configurable.
+The display is 800×480. A fixed 56 px system bar at the top shows the clock,
+current page title and connection indicator. A dashboard with more than one
+page also shows the current and total page numbers. The bar arrangement is
+fixed.
+
+A horizontal swipe inside the content area moves one page left or right without
+wrapping at either end. A single-page dashboard has no position indicator. When
+a configuration is replaced, the visible page stays selected if its `id` still
+exists; otherwise the new document's `home_page` is selected.
 
 The content area is 800×424, divided into a 4 × 3 grid with a 12 px gap and 14 px margin. Each cell is 184×124 px — enough for an icon, a value and a label, with room for a comfortable touch target.
 
