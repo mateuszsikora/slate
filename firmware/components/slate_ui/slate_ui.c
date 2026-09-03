@@ -51,6 +51,10 @@ static const char *TAG = "slate_ui";
 
 #define UI_REBUILD_POST_TIMEOUT_MS 1000
 #define UI_LABEL_LIMIT             64
+/* A formatted reading, a space and the longest unit a snapshot may carry, with
+ * the slack -Os asks for: an out-of-range double formats far wider than the
+ * value the layout was designed around, which is §7.5's whole point. */
+#define UI_BAR_VALUE_MAX  96
 #define UI_PROVIDER_SUMMARY_MAX    128
 #define UI_EDITOR_URL_MAX          32
 #define UI_EDITOR_QR_SIZE          220
@@ -535,6 +539,9 @@ static void bar_resource_text(const bar_item_view_t *view,
     switch (view->config->component) {
     case SLATE_COMPONENT_SENSOR: {
         char value[SLATE_SENSOR_TEXT_MAX + 24];
+        _Static_assert(UI_BAR_VALUE_MAX >=
+                           sizeof(value) + sizeof(resource->state.sensor.unit) + 1,
+                       "a reading and its unit must fit the bar's text buffer");
         slate_sensor_format_value(&resource->state.sensor, value, sizeof(value));
         if (resource->state.sensor.unit[0] != '\0') {
             snprintf(out, size, "%s %s", value, resource->state.sensor.unit);
@@ -599,7 +606,7 @@ static void update_bar_resource(bar_item_view_t *view, const slate_theme_t *them
     bool known = slate_state_get(view->config->provider, view->config->resource,
                                  &resource) == ESP_OK;
 
-    char text[SLATE_SENSOR_TEXT_MAX + 32];
+    char text[UI_BAR_VALUE_MAX];
     bar_resource_text(view, known ? &resource : NULL, text, sizeof(text));
     lv_label_set_text(view->value, text);
     lv_obj_set_style_text_font(view->value, bar_value_font(view, text, theme),
