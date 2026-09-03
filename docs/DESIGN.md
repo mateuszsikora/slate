@@ -122,9 +122,11 @@ while offline or unconfigured.
 A bar item named `sensor`, `light` or `cover` carries §3.3's `provider` and
 `resource` pair and shows that resource's state over its name: for a sensor the
 reading and its unit, or the word a textual one reports — §5.6's `binary_sensor`
-door contact is that case and is how a door reaches the bar; `On`/`Off` with a
-badge-coloured dot for a light; `Open`/`Closed` or the reported position for a
-cover. Naming the component rather than inventing a kindless bound item is what
+door contact is that case and is how a door reaches the bar; `On`/`Off` for a
+light; `Open`/`Closed` or the reported position for a cover. Those last two also
+carry the badge's dot, accent while the light is on or the cover is open and
+muted otherwise; a sensor has no dot, having no second state to colour it with.
+Naming the component rather than inventing a kindless bound item is what
 supplies §5.1 with the kind every binding is handed to the store with — the same
 answer a tile keeps in the same place — and it is why a `scene`, which is
 stateless and could only ever render blank, is a validation error on the bar
@@ -132,8 +134,9 @@ rather than an item reserving slots. `label` overrides the caption, which
 otherwise falls back to the normalized name and then to the resource id (§7). A
 bound item needs at least two slots, because one 64 px slot holds a caption or a
 reading and not both.
-Unavailability is §7.5's: the dash, not the last value, and the warning colour
-on the dot.
+Unavailability is §7.5's: the dash, not the last value, and — on the two kinds
+that carry one — the warning colour on the dot. A sensor has none, so the dash
+is the whole signal.
 
 Omitting `bar` preserves the schema-1 compatible arrangement: clock, current
 page title, connection status and, on multi-page dashboards, an exact
