@@ -192,6 +192,7 @@ export function Workspace({
       <BarEditor
         bar={config.bar}
         providers={providers}
+        onLoadResources={onLoadResources}
         onChange={(bar) => {
           const next = { ...config }
           if (bar === undefined) delete next.bar

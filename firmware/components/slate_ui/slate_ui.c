@@ -51,6 +51,10 @@ static const char *TAG = "slate_ui";
 
 #define UI_REBUILD_POST_TIMEOUT_MS 1000
 #define UI_LABEL_LIMIT             64
+/* A formatted reading, a space and the longest unit a snapshot may carry, with
+ * the slack -Os asks for: an out-of-range double formats far wider than the
+ * value the layout was designed around, which is §7.5's whole point. */
+#define UI_BAR_VALUE_MAX           96
 #define UI_PROVIDER_SUMMARY_MAX    128
 #define UI_EDITOR_URL_MAX          32
 #define UI_EDITOR_QR_SIZE          220
@@ -82,6 +86,8 @@ typedef struct {
     lv_obj_t *container;
     lv_obj_t *label;
     lv_obj_t *dot;
+    lv_obj_t *value;
+    int32_t value_width;
 } bar_item_view_t;
 
 typedef struct {
@@ -201,10 +207,12 @@ static slate_config_t *clone_config(const slate_config_t *source)
         const slate_config_bar_item_t *from = &source->bar_items[i];
         slate_config_bar_item_t *to = &copy->bar_items[i];
         to->item_type = from->item_type;
+        to->component = from->component;
         to->slot = from->slot;
         to->span = from->span;
         if (!clone_string(from->type, &to->type) ||
             !clone_string(from->provider, &to->provider) ||
+            !clone_string(from->resource, &to->resource) ||
             !clone_string(from->label, &to->label)) {
             slate_config_free(copy);
             return NULL;
@@ -502,6 +510,140 @@ static uint32_t badge_status_color(slate_provider_status_t status,
     return theme->text_lo;
 }
 
+/* §7's fallback chain, stated once for the bar: the configured label, then the
+ * name the provider normalized, then the resource id — which is at least
+ * something to look for in the editor. */
+static const char *bar_resource_name(const bar_item_view_t *view,
+                                     const slate_resource_t *resource)
+{
+    if (view->config->label != NULL) {
+        return view->config->label;
+    }
+    if (resource != NULL && resource->name[0] != '\0') {
+        return resource->name;
+    }
+    return view->config->resource;
+}
+
+/* One line per kind, using each component's own vocabulary: §7.3's reading,
+ * §7.1's power state and §7.2's position. A resource that is stale, unavailable
+ * or missing shows §7.5's dash rather than a value that stopped being true. */
+static void bar_resource_text(const bar_item_view_t *view,
+                              const slate_resource_t *resource, char *out, size_t size)
+{
+    if (resource == NULL || resource->presentation != SLATE_PRESENT_OK) {
+        strlcpy(out, "-", size);
+        return;
+    }
+
+    switch (view->config->component) {
+    case SLATE_COMPONENT_SENSOR: {
+        char value[SLATE_SENSOR_TEXT_MAX + 24];
+        _Static_assert(UI_BAR_VALUE_MAX >=
+                           sizeof(value) + sizeof(resource->state.sensor.unit) + 1,
+                       "a reading and its unit must fit the bar's text buffer");
+        slate_sensor_format_value(&resource->state.sensor, value, sizeof(value));
+        if (resource->state.sensor.unit[0] != '\0') {
+            snprintf(out, size, "%s %s", value, resource->state.sensor.unit);
+        } else {
+            strlcpy(out, value, size);
+        }
+        return;
+    }
+    case SLATE_COMPONENT_LIGHT:
+        strlcpy(out, resource->state.light.on ? "On" : "Off", size);
+        return;
+    case SLATE_COMPONENT_COVER: {
+        int16_t position = resource->state.cover.position;
+        if (position == SLATE_STATE_ABSENT) {
+            strlcpy(out, "-", size);
+        } else if (position <= 0) {
+            strlcpy(out, "Closed", size);
+        } else if (position >= 100) {
+            strlcpy(out, "Open", size);
+        } else {
+            snprintf(out, size, "%d%%", position);
+        }
+        return;
+    }
+    case SLATE_COMPONENT_SCENE:
+    case SLATE_COMPONENT_UNKNOWN:
+        break;
+    }
+    strlcpy(out, "-", size);
+}
+
+static uint32_t bar_resource_dot_color(const bar_item_view_t *view,
+                                       const slate_resource_t *resource,
+                                       const slate_theme_t *theme)
+{
+    if (resource == NULL || resource->presentation != SLATE_PRESENT_OK) {
+        return theme->warn;
+    }
+    /* A cover that reports no position is healthy and merely quiet about how
+     * open it is: the reading is a dash while the dot stays muted, because the
+     * warning colour here would claim the resource itself is in trouble. */
+    bool active = view->config->component == SLATE_COMPONENT_LIGHT
+                      ? resource->state.light.on
+                      : resource->state.cover.position != SLATE_STATE_ABSENT &&
+                            resource->state.cover.position > 0;
+    return active ? theme->accent : theme->text_lo;
+}
+
+/* §7.5's type scale, measured against this item's slots rather than guessed
+ * from the string length: how much room a reading has depends on the span it
+ * was given. The letter spacing belongs to the label rather than to the font,
+ * so reading it here stays correct across a step down the scale. */
+static const lv_font_t *bar_value_font(const bar_item_view_t *view, const char *text,
+                                       const slate_theme_t *theme)
+{
+    lv_point_t size;
+    lv_text_get_size(&size, text, theme->body,
+                     lv_obj_get_style_text_letter_space(view->value, LV_PART_MAIN), 0,
+                     LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return size.x <= view->value_width ? theme->body : theme->caption;
+}
+
+static bool set_label_text(lv_obj_t *label, const char *text)
+{
+    if (strcmp(lv_label_get_text(label), text) == 0) {
+        return false;
+    }
+    lv_label_set_text(label, text);
+    return true;
+}
+
+/*
+ * Reached from the state subscription and from the one-second bar timer alike,
+ * so an item whose resource has not changed must cost nothing: LVGL reallocates
+ * the label text and invalidates the area on every set_text, and measuring the
+ * type scale on top of that would put a font measurement per bound item into
+ * every tick of the clock.
+ */
+static void update_bar_resource(bar_item_view_t *view, const slate_theme_t *theme)
+{
+    slate_resource_t resource;
+    bool known = slate_state_get(view->config->provider, view->config->resource,
+                                 &resource) == ESP_OK;
+    const slate_resource_t *current = known ? &resource : NULL;
+
+    char text[UI_BAR_VALUE_MAX];
+    bar_resource_text(view, current, text, sizeof(text));
+    if (set_label_text(view->value, text)) {
+        lv_obj_set_style_text_font(view->value, bar_value_font(view, text, theme),
+                                   LV_PART_MAIN);
+        /* The reading picks its own font, so the one-line height follows it. */
+        slate_component_label_one_line(view->value);
+    }
+    set_label_text(view->label, bar_resource_name(view, current));
+    if (view->dot != NULL) {
+        lv_color_t color = lv_color_hex(bar_resource_dot_color(view, current, theme));
+        if (!lv_color_eq(lv_obj_get_style_bg_color(view->dot, LV_PART_MAIN), color)) {
+            lv_obj_set_style_bg_color(view->dot, color, LV_PART_MAIN);
+        }
+    }
+}
+
 static void update_bar(ui_tree_t *tree)
 {
     if (tree == NULL) {
@@ -526,6 +668,9 @@ static void update_bar(ui_tree_t *tree)
                 uint32_t color = badge_status_color(
                     slate_state_provider_status(view->config->provider), tree->theme);
                 lv_obj_set_style_bg_color(view->dot, lv_color_hex(color), LV_PART_MAIN);
+            } else if (view->config->item_type == SLATE_BAR_ITEM_RESOURCE &&
+                       view->value != NULL) {
+                update_bar_resource(view, tree->theme);
             }
         }
         return;
@@ -738,6 +883,69 @@ static bool build_legacy_bar(ui_tree_t *tree, const char *title,
     return true;
 }
 
+/* A bound item is a reading over a caption, the way §7.3's tile is: the value
+ * is what somebody glances at and the name is what identifies it. Light and
+ * cover additionally carry the badge's dot, which is the part that reads from
+ * across a room. */
+static bool build_bar_resource(ui_tree_t *tree, bar_item_view_t *view)
+{
+    const slate_theme_t *theme = tree->theme;
+    bool dotted = view->config->component == SLATE_COMPONENT_LIGHT ||
+                  view->config->component == SLATE_COMPONENT_COVER;
+    int32_t left = dotted ? 24 : 8;
+    view->value_width = view->config->span * UI_BAR_SLOT_WIDTH - left - 8;
+
+    if (dotted) {
+        view->dot = lv_obj_create(view->container);
+        if (view->dot == NULL) {
+            return false;
+        }
+        style_plain(view->dot);
+        lv_obj_remove_flag(view->dot, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_size(view->dot, 8, 8);
+        lv_obj_set_style_radius(view->dot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(view->dot, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(view->dot, lv_color_hex(theme->text_lo), LV_PART_MAIN);
+        lv_obj_align(view->dot, LV_ALIGN_TOP_LEFT, 8, 14);
+    }
+
+    view->value = make_label(view->container, "-", theme->body, theme->text_hi);
+    view->label = make_label(view->container, bar_resource_name(view, NULL),
+                             theme->caption, theme->text_lo);
+    if (view->value == NULL || view->label == NULL) {
+        return false;
+    }
+    lv_obj_set_width(view->value, view->value_width);
+    slate_component_label_one_line(view->value);
+    lv_obj_align(view->value, LV_ALIGN_TOP_LEFT, left, 6);
+    lv_obj_set_width(view->label, view->config->span * UI_BAR_SLOT_WIDTH - 16);
+    slate_component_label_one_line(view->label);
+    lv_obj_align(view->label, LV_ALIGN_BOTTOM_LEFT, 8, -6);
+    return true;
+}
+
+/* Every known item owes the parts its presentation is made of. An unknown type
+ * owes nothing: §3.2 reserves its slots and renders it empty, and a page
+ * indicator on a single-page dashboard is deliberately blank. */
+static bool bar_item_complete(const bar_item_view_t *view, size_t page_count)
+{
+    switch (view->config->item_type) {
+    case SLATE_BAR_ITEM_CLOCK:
+    case SLATE_BAR_ITEM_TITLE:
+        return view->label != NULL;
+    case SLATE_BAR_ITEM_PAGE_INDICATOR:
+        return page_count <= 1 || view->label != NULL;
+    case SLATE_BAR_ITEM_BADGE:
+        return view->label != NULL && view->dot != NULL;
+    case SLATE_BAR_ITEM_RESOURCE:
+        return view->label != NULL && view->value != NULL &&
+               (view->config->component == SLATE_COMPONENT_SENSOR || view->dot != NULL);
+    case SLATE_BAR_ITEM_UNKNOWN:
+        break;
+    }
+    return true;
+}
+
 static bool build_configured_bar(ui_tree_t *tree, const slate_config_t *config,
                                  const char *title, size_t page_count,
                                  size_t page_index)
@@ -819,16 +1027,12 @@ static bool build_configured_bar(ui_tree_t *tree, const slate_config_t *config,
                 slate_component_label_one_line(view->label);
                 lv_obj_align(view->label, LV_ALIGN_LEFT_MID, 24, 0);
             }
+        } else if (view->config->item_type == SLATE_BAR_ITEM_RESOURCE &&
+                   !build_bar_resource(tree, view)) {
+            return false;
         }
 
-        if (view->config->item_type != SLATE_BAR_ITEM_UNKNOWN &&
-            ((view->config->item_type == SLATE_BAR_ITEM_BADGE && view->dot == NULL) ||
-             (view->config->item_type != SLATE_BAR_ITEM_BADGE &&
-              view->config->item_type != SLATE_BAR_ITEM_PAGE_INDICATOR &&
-              view->label == NULL) ||
-             (view->config->item_type == SLATE_BAR_ITEM_PAGE_INDICATOR &&
-              page_count > 1 && view->label == NULL) ||
-             (view->config->item_type == SLATE_BAR_ITEM_BADGE && view->label == NULL))) {
+        if (!bar_item_complete(view, page_count)) {
             return false;
         }
     }
@@ -1277,9 +1481,27 @@ static void page_gesture_cb(lv_event_t *event)
     }
 }
 
+static bool bar_item_binds(const slate_config_bar_item_t *item)
+{
+    return item->item_type == SLATE_BAR_ITEM_RESOURCE && item->provider != NULL &&
+           item->resource != NULL;
+}
+
+/*
+ * Every binding in the document, not merely every tile's: §5.1 makes the
+ * binding set the store's allocation rather than a filter over one, so a bar
+ * item whose pair never reached slate_state_bind() would have nowhere to read
+ * its value from. Bar items are document-level and are collected once, ahead of
+ * the pages, while a tile's binding lives on whichever page carries it.
+ */
 static slate_binding_t *config_bindings(const slate_config_t *config, size_t *out_count)
 {
     size_t count = 0;
+    for (size_t i = 0; i < config->bar_item_count; i++) {
+        if (bar_item_binds(&config->bar_items[i])) {
+            count++;
+        }
+    }
     for (size_t p = 0; p < config->page_count; p++) {
         const slate_config_page_t *page = &config->pages[p];
         for (size_t i = 0; i < page->tile_count; i++) {
@@ -1298,6 +1520,16 @@ static slate_binding_t *config_bindings(const slate_config_t *config, size_t *ou
         return NULL;
     }
     size_t used = 0;
+    for (size_t i = 0; i < config->bar_item_count; i++) {
+        const slate_config_bar_item_t *item = &config->bar_items[i];
+        if (bar_item_binds(item)) {
+            bindings[used++] = (slate_binding_t) {
+                .provider = item->provider,
+                .resource = item->resource,
+                .kind = component_kind(item->component),
+            };
+        }
+    }
     for (size_t p = 0; p < config->page_count; p++) {
         const slate_config_page_t *page = &config->pages[p];
         for (size_t i = 0; i < page->tile_count; i++) {
@@ -1967,14 +2199,22 @@ static slate_config_t *sensor_test_config(void)
 
 static slate_config_t *bar_test_config(bool multiple_pages)
 {
+    /* Twelve slots exactly: the bound sensor shares its pair with the page's
+     * tile, and the bound light is reachable only through the bar — which is
+     * what proves a bar binding reaches the state store on its own. */
     static const char PREFIX[] =
         "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"bar\":["
         "{\"type\":\"clock\",\"slot\":0,\"span\":1},"
-        "{\"type\":\"title\",\"slot\":1,\"span\":6},"
-        "{\"type\":\"future_item\",\"slot\":7,\"span\":1},"
-        "{\"type\":\"page_indicator\",\"slot\":8,\"span\":1},"
+        "{\"type\":\"title\",\"slot\":1,\"span\":2},"
+        "{\"type\":\"future_item\",\"slot\":3,\"span\":1},"
+        "{\"type\":\"page_indicator\",\"slot\":4,\"span\":1},"
         "{\"type\":\"badge\",\"provider\":\"ui-fixture\",\"label\":\"Fixture\","
-        "\"slot\":9,\"span\":3}],\"pages\":[{\"id\":\"home\",\"title\":\"Home\","
+        "\"slot\":5,\"span\":2},"
+        "{\"type\":\"sensor\",\"provider\":\"ui-fixture\","
+        "\"resource\":\"temperature\",\"slot\":7,\"span\":2},"
+        "{\"type\":\"light\",\"provider\":\"ui-fixture\","
+        "\"resource\":\"bar-light\",\"label\":\"Hall\",\"slot\":9,\"span\":3}],"
+        "\"pages\":[{\"id\":\"home\",\"title\":\"Home\","
         "\"tiles\":[{\"id\":\"temperature\",\"type\":\"sensor\",\"pos\":[0,0],"
         "\"size\":[1,1],\"binding\":{\"provider\":\"ui-fixture\","
         "\"resource\":\"temperature\"}}]}";
@@ -2404,6 +2644,55 @@ static bool configured_bar_geometry(void)
         }
     }
     return true;
+}
+
+/* The same measurement the clock check makes, for the one other bar text the
+ * panel picks rather than the configuration: a reading whose font did not step
+ * down far enough is clipped, not merely tight. */
+static bool bar_value_text_fits(const bar_item_view_t *view)
+{
+    if (view == NULL || view->value == NULL) {
+        return false;
+    }
+    lv_point_t size;
+    lv_text_get_size(&size, lv_label_get_text(view->value),
+                     lv_obj_get_style_text_font(view->value, LV_PART_MAIN),
+                     lv_obj_get_style_text_letter_space(view->value, LV_PART_MAIN), 0,
+                     LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return size.x <= view->value_width;
+}
+
+/* Both fixtures the configured bar binds. The sensor is also a tile on the
+ * page; the light exists only on the bar. */
+static esp_err_t publish_bar_states(const slate_sensor_state_t *reading, bool light_on,
+                                    bool available)
+{
+    const slate_snapshot_t sensor = {
+        .resource = "temperature",
+        .kind = SLATE_KIND_SENSOR,
+        .name = "Fixture temperature",
+        .available = available,
+        .state.sensor = *reading,
+    };
+    const slate_snapshot_t light = {
+        .resource = "bar-light",
+        .kind = SLATE_KIND_LIGHT,
+        .name = "Hall light",
+        .available = available,
+        .capabilities = {.actions = 1u << SLATE_ACTION_TOGGLE},
+        .state.light = {.on = light_on,
+                        .brightness = SLATE_STATE_ABSENT,
+                        .color_temperature = SLATE_STATE_ABSENT},
+    };
+    esp_err_t err = slate_state_publish("ui-fixture", &sensor);
+    if (err == ESP_OK) {
+        err = slate_state_publish("ui-fixture", &light);
+    }
+    if (err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    return err;
 }
 
 static esp_err_t publish_test_states(void)
@@ -3148,11 +3437,86 @@ static esp_err_t selftest_on_task(void)
                  lv_color_eq(lv_obj_get_style_bg_color(bar_badge->dot, LV_PART_MAIN),
                              lv_color_hex(s_tree->theme->text_lo)),
              "offline provider badge uses the muted colour");
+
+    /* §3.2's bound items. The reading and the power state arrive through the
+     * same store the tiles read, so the first check is really that a bar
+     * binding reached slate_state_bind() at all. */
+    ui_tree_t *bar_tree = s_tree;
+    bar_item_view_t *bar_sensor = find_bar_item("sensor");
+    bar_item_view_t *bar_light = find_bar_item("light");
+    const slate_sensor_state_t warm = {.numeric = true,
+                                       .value = 21.4,
+                                       .unit = "°C",
+                                       .measurement = SLATE_MEASUREMENT_TEMPERATURE};
+    esp_err_t bar_online =
+        slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_ONLINE);
+    esp_err_t bar_bound_published = publish_bar_states(&warm, true, true);
+    UI_CHECK(bar_online == ESP_OK && bar_bound_published == ESP_OK && bar_sensor != NULL &&
+                 bar_sensor->value != NULL && bar_sensor->label != NULL &&
+                 bar_sensor->dot == NULL &&
+                 strcmp(lv_label_get_text(bar_sensor->value), "21.4 °C") == 0 &&
+                 strcmp(lv_label_get_text(bar_sensor->label), "Fixture temperature") == 0 &&
+                 bar_value_text_fits(bar_sensor) &&
+                 !lv_obj_has_flag(bar_sensor->container, LV_OBJ_FLAG_CLICKABLE),
+             "a bound bar item shows the published reading under the resource name");
+    UI_CHECK(bar_light != NULL && bar_light->value != NULL && bar_light->dot != NULL &&
+                 strcmp(lv_label_get_text(bar_light->value), "On") == 0 &&
+                 strcmp(lv_label_get_text(bar_light->label), "Hall") == 0 &&
+                 lv_color_eq(lv_obj_get_style_bg_color(bar_light->dot, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->accent)),
+             "a bar light carries the badge dot and its configured label");
+
+    const slate_sensor_state_t cooler = {.numeric = true,
+                                         .value = 22.7,
+                                         .unit = "°C",
+                                         .measurement = SLATE_MEASUREMENT_TEMPERATURE};
+    UI_CHECK(publish_bar_states(&cooler, false, true) == ESP_OK && s_tree == bar_tree &&
+                 strcmp(lv_label_get_text(bar_sensor->value), "22.7 °C") == 0 &&
+                 strcmp(lv_label_get_text(bar_light->value), "Off") == 0 &&
+                 lv_color_eq(lv_obj_get_style_bg_color(bar_light->dot, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->text_lo)),
+             "a later publication updates bar items without rebuilding the tree");
+
+    /* §7.5's own example of an out-of-range value, in two slots: too wide for
+     * the body font and comfortable in the caption one. */
+    const slate_sensor_state_t wide_reading = {.numeric = true,
+                                               .value = 1013.25,
+                                               .unit = "hPa",
+                                               .measurement = SLATE_MEASUREMENT_PRESSURE};
+    UI_CHECK(publish_bar_states(&wide_reading, false, true) == ESP_OK &&
+                 strcmp(lv_label_get_text(bar_sensor->value), "1013.25 hPa") == 0 &&
+                 lv_obj_get_style_text_font(bar_sensor->value, LV_PART_MAIN) ==
+                     s_tree->theme->caption &&
+                 bar_value_text_fits(bar_sensor),
+             "a reading too wide for its slots steps down instead of clipping");
+
+    /* Past the bottom of the type scale §7.5 ellipsizes rather than clipping,
+     * which is the long mode every one-line label is held in. */
+    const slate_sensor_state_t wordy = {.numeric = false, .text = "Front door open wide"};
+    UI_CHECK(publish_bar_states(&wordy, false, true) == ESP_OK &&
+                 strcmp(lv_label_get_text(bar_sensor->value), "Front door open wide") == 0 &&
+                 lv_obj_get_style_text_font(bar_sensor->value, LV_PART_MAIN) ==
+                     s_tree->theme->caption &&
+                 lv_label_get_long_mode(bar_sensor->value) == LV_LABEL_LONG_DOT,
+             "a reading past the bottom of the scale is ellipsized, not clipped");
+
+    UI_CHECK(publish_bar_states(&warm, true, false) == ESP_OK &&
+                 strcmp(lv_label_get_text(bar_sensor->value), "-") == 0 &&
+                 strcmp(lv_label_get_text(bar_light->value), "-") == 0 &&
+                 lv_color_eq(lv_obj_get_style_bg_color(bar_light->dot, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->warn)),
+             "an unavailable resource shows the dash rather than its last value");
+    UI_CHECK(publish_bar_states(&warm, true, true) == ESP_OK &&
+                 strcmp(lv_label_get_text(bar_sensor->value), "21.4 °C") == 0,
+             "availability returns the reading to the bar");
+
     UI_CHECK(navigate_page(s_tree, LV_DIR_LEFT) == ESP_OK &&
                  (bar_pages = find_bar_item("page_indicator")) != NULL &&
                  bar_pages->label != NULL &&
-                 strcmp(lv_label_get_text(bar_pages->label), "2 / 2") == 0,
-             "configured page counter follows a swipe");
+                 strcmp(lv_label_get_text(bar_pages->label), "2 / 2") == 0 &&
+                 (bar_sensor = find_bar_item("sensor")) != NULL &&
+                 strcmp(lv_label_get_text(bar_sensor->value), "21.4 °C") == 0,
+             "configured page counter follows a swipe and bound items survive it");
     if (bar_config != NULL) {
         slate_config_free(bar_config);
     }
@@ -3198,6 +3562,28 @@ static esp_err_t selftest_on_task(void)
         "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\","
         "\"bar\":[{\"type\":\"clock\",\"slot\":11,\"span\":2}],"
         "\"pages\":[{\"id\":\"home\"}]}";
+    static const char MISSING_BAR_RESOURCE[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"bar\":["
+        "{\"type\":\"sensor\",\"provider\":\"ha\",\"slot\":0,\"span\":2}],"
+        "\"pages\":[{\"id\":\"home\"}]}";
+    static const char MISSING_BAR_PROVIDER[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"bar\":["
+        "{\"type\":\"sensor\",\"resource\":\"sensor.hall\",\"slot\":0,\"span\":2}],"
+        "\"pages\":[{\"id\":\"home\"}]}";
+    static const char NARROW_BAR_RESOURCE[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"bar\":["
+        "{\"type\":\"sensor\",\"provider\":\"ha\",\"resource\":\"sensor.hall\","
+        "\"slot\":0,\"span\":1}],\"pages\":[{\"id\":\"home\"}]}";
+    static const char SCENE_BAR_ITEM[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"bar\":["
+        "{\"type\":\"scene\",\"provider\":\"ha\",\"resource\":\"scene.relax\","
+        "\"slot\":0,\"span\":2}],\"pages\":[{\"id\":\"home\"}]}";
+    static const char DISAGREEING_BAR_RESOURCE[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"bar\":["
+        "{\"type\":\"sensor\",\"provider\":\"ha\",\"resource\":\"light.hall\","
+        "\"slot\":0,\"span\":2}],\"pages\":[{\"id\":\"home\",\"tiles\":["
+        "{\"id\":\"t1\",\"type\":\"light\",\"pos\":[0,0],\"size\":[1,1],"
+        "\"binding\":{\"provider\":\"ha\",\"resource\":\"light.hall\"}}]}]}";
     UI_CHECK(config_has_error(INVALID_BAR, "bar_required", "/bar") &&
                  config_has_error(INVALID_BAR_ITEM, "bar_item_required", "/bar/0") &&
                  config_has_error(INVALID_BAR_SLOT, "bar_slot_invalid", "/bar/0/slot") &&
@@ -3206,6 +3592,15 @@ static esp_err_t selftest_on_task(void)
                  config_has_error(MISSING_BADGE_PROVIDER, "provider_required",
                                   "/bar/0/provider"),
              "invalid bar shape, geometry, overlap and badge binding are rejected");
+    UI_CHECK(config_has_error(MISSING_BAR_RESOURCE, "bar_resource_required",
+                              "/bar/0/resource") &&
+                 config_has_error(MISSING_BAR_PROVIDER, "provider_required",
+                                  "/bar/0/provider") &&
+                 config_has_error(NARROW_BAR_RESOURCE, "bar_span_invalid",
+                                  "/bar/0/span") &&
+                 config_has_error(SCENE_BAR_ITEM, "bar_item_required", "/bar/0/type") &&
+                 config_has_error(DISAGREEING_BAR_RESOURCE, "binding_required", "/bar/0"),
+             "a bound bar item needs a whole binding, two slots and a bar component");
 
     slate_state_provider_set_status("ui-fixture", SLATE_PROVIDER_ONLINE);
     UI_CHECK(final != NULL && rebuild_on_task(final) == ESP_OK &&

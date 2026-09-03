@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import { ApiError, type Binding, type ProviderStatus, type Resource, type Tile } from '../lib/api'
+import { type Binding, type ProviderStatus, type Resource, type Tile } from '../lib/api'
 import { COMPONENTS, bindingFor, definitionFor, withSize, type TileSize } from '../lib/editor'
-import { providerLabel } from '../lib/providers'
+import { ResourcePicker } from './ResourcePicker'
 
 interface Props {
   tile: Tile | null
@@ -14,12 +14,6 @@ interface Props {
 
 export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete }: Props) {
   const [activeBinding, setActiveBinding] = useState(0)
-  const [resources, setResources] = useState<Resource[]>([])
-  const [catalogState, setCatalogState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle')
-  const [catalogMessage, setCatalogMessage] = useState('')
-  const [catalogRetry, setCatalogRetry] = useState(0)
-  const [query, setQuery] = useState('')
-  const [area, setArea] = useState('')
 
   const bindings = useMemo(() => {
     if (tile === null) {
@@ -29,12 +23,9 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
   }, [tile])
   const selectedBinding = bindings[Math.min(activeBinding, Math.max(0, bindings.length - 1))]
   const selectedBindingIndex = Math.min(activeBinding, Math.max(0, bindings.length - 1))
-  const provider = selectedBinding?.provider ?? ''
 
   useEffect(() => {
     setActiveBinding(0)
-    setQuery('')
-    setArea('')
   }, [tile?.id])
 
   useEffect(() => {
@@ -42,34 +33,6 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
       setActiveBinding(bindings.length - 1)
     }
   }, [activeBinding, bindings.length])
-
-  useEffect(() => {
-    if (provider === '') {
-      setResources([])
-      setCatalogState('idle')
-      return
-    }
-    let cancelled = false
-    setCatalogState('loading')
-    setCatalogMessage('')
-    void onLoadResources(provider)
-      .then((catalog) => {
-        if (!cancelled) {
-          setResources(catalog)
-          setCatalogState('ready')
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setResources([])
-          setCatalogState('error')
-          setCatalogMessage(resourceError(error, provider))
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [catalogRetry, provider, onLoadResources])
 
   if (tile === null) {
     return (
@@ -84,16 +47,6 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
   const providerIds = Array.from(
     new Set([...providers.map((entry) => entry.id), ...bindings.map((binding) => binding.provider)]),
   ).filter(Boolean)
-  const areas = Array.from(new Set(resources.map((resource) => resource.area).filter(Boolean))).sort()
-  const needle = query.trim().toLowerCase()
-  const matching = resources.filter(
-    (resource) =>
-      resource.kind === tile.type &&
-      (area === '' || resource.area === area) &&
-      (needle === '' ||
-        resource.resource.toLowerCase().includes(needle) ||
-        resource.name?.toLowerCase().includes(needle)),
-  )
 
   const updateBinding = (index: number, binding: Binding) => {
     if (tile.bindings !== undefined) {
@@ -215,99 +168,14 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
       ) : null}
 
       {selectedBinding !== undefined ? (
-        <>
-          <label className="field">
-            <span>Provider</span>
-            <select
-              value={selectedBinding.provider}
-              onChange={(event) => {
-                updateBinding(selectedBindingIndex, { provider: event.currentTarget.value, resource: '' })
-                setQuery('')
-                setArea('')
-              }}
-            >
-              <option value="">Choose a provider</option>
-              {providerIds.map((id) => (
-                <option key={id} value={id}>
-                  {providerLabel(id)} — {providers.find((entry) => entry.id === id)?.status ?? 'unknown'}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="field">
-            <span>Resource ID</span>
-            <input
-              value={selectedBinding.resource}
-              placeholder="Choose below or type an ID"
-              onChange={(event) =>
-                updateBinding(selectedBindingIndex, {
-                  ...selectedBinding,
-                  resource: event.currentTarget.value,
-                })
-              }
-            />
-          </label>
-
-          {catalogState === 'loading' ? <p className="catalog-note">Loading resources…</p> : null}
-          {catalogState === 'error' ? (
-            <div className="catalog-note catalog-note--error">
-              {catalogMessage}{' '}
-              <button type="button" className="link" onClick={() => setCatalogRetry((value) => value + 1)}>
-                Retry
-              </button>
-            </div>
-          ) : null}
-          {catalogState === 'ready' ? (
-            <div className="catalog">
-              <div className="catalog__filters">
-                <input
-                  type="search"
-                  value={query}
-                  placeholder="Search resources"
-                  onChange={(event) => setQuery(event.currentTarget.value)}
-                />
-                <select value={area} onChange={(event) => setArea(event.currentTarget.value)}>
-                  <option value="">All areas</option>
-                  {areas.map((name) => (
-                    <option key={name} value={name}>
-                      {name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="catalog__results">
-                {matching.length === 0 ? (
-                  <p>
-                    {provider === 'direct'
-                      ? 'No External API resources have published state yet. Type an ID above, publish the dashboard, then send that resource to the panel.'
-                      : `No matching ${tile.type} resources. You can still type an ID above.`}
-                  </p>
-                ) : (
-                  matching.slice(0, 80).map((resource) => (
-                    <button
-                      key={`${resource.provider}:${resource.resource}`}
-                      type="button"
-                      className={resource.resource === selectedBinding.resource ? 'selected' : ''}
-                      onClick={() =>
-                        updateBinding(selectedBindingIndex, {
-                          provider: resource.provider,
-                          resource: resource.resource,
-                        })
-                      }
-                    >
-                      <strong>{resource.name ?? resource.resource}</strong>
-                      <span>
-                        {resource.area ?? 'No area'} · {resource.resource}
-                        {resource.available ? '' : ' · unavailable'}
-                      </span>
-                    </button>
-                  ))
-                )}
-              </div>
-            </div>
-          ) : null}
-        </>
+        <ResourcePicker
+          binding={selectedBinding}
+          providers={providers}
+          kinds={[tile.type]}
+          resetKey={`${tile.id}:${selectedBindingIndex}`}
+          onLoadResources={onLoadResources}
+          onChange={(binding) => updateBinding(selectedBindingIndex, binding)}
+        />
       ) : null}
 
       <div className="inspector__actions">
@@ -330,17 +198,4 @@ export function Inspector({ tile, providers, onLoadResources, onUpdate, onDelete
       </div>
     </section>
   )
-}
-
-function resourceError(error: unknown, provider: string): string {
-  if (!(error instanceof ApiError)) {
-    return `The ${providerLabel(provider)} catalog could not be loaded.`
-  }
-  if (error.code === 'provider_unconfigured') {
-    return `${providerLabel(provider)} is not configured on this panel yet. Open Integrations to connect it.`
-  }
-  if (error.code === 'unreachable') {
-    return 'The panel did not answer. Resource IDs can still be entered manually.'
-  }
-  return `The ${providerLabel(provider)} catalog is unavailable (${error.code}).`
 }

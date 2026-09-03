@@ -40,9 +40,11 @@ The endpoints that carry the document are in [`API.md`](API.md).
   },
   "bar": [
     {"type": "clock", "slot": 0, "span": 2},
-    {"type": "title", "slot": 2, "span": 6},
-    {"type": "page_indicator", "slot": 8, "span": 1},
-    {"type": "badge", "slot": 9, "span": 3, "provider": "ha", "label": "Home"}
+    {"type": "title", "slot": 2, "span": 4},
+    {"type": "page_indicator", "slot": 6, "span": 1},
+    {"type": "badge", "slot": 7, "span": 2, "provider": "ha", "label": "Home"},
+    {"type": "sensor", "slot": 9, "span": 3,
+     "provider": "ha", "resource": "sensor.hall_temperature", "label": "Hall"}
   ],
   "pages": [
     {
@@ -114,16 +116,57 @@ bar. After 16 px margins on both sides, its usable 768 px are twelve gapless
 | `title` | none | current page title, falling back to its id |
 | `page_indicator` | none | exact `current/total` text on multi-page dashboards; empty on one page |
 | `badge` | `provider` required, `label` optional | provider caption and status dot |
+| `sensor`, `light`, `cover` | `provider` and `resource` required, `label` optional | that resource's state, over its name |
 
 A badge uses the theme accent while its provider is online, warning colour
 while connecting, degraded or in error, and muted colour while offline or not
 configured. `label` replaces the normal provider name.
+
+### A bar item bound to a resource
+
+An item named after a component carries a binding and shows that resource on
+the bar, the way a tile shows it on the grid:
+
+```json
+{"type": "sensor", "slot": 9, "span": 3,
+ "provider": "ha", "resource": "sensor.hall_temperature", "label": "Hall"}
+```
+
+`provider` and `resource` are the same pair a tile binds, and the component
+name is what tells the panel which kind to expect — exactly as a tile's `type`
+does. The three that have a bar presentation are:
+
+| `type` | Shows |
+|--------|-------|
+| `sensor` | the reading and its unit, in the same precision the sensor tile uses |
+| `light` | `On` or `Off`, with a dot in the accent colour while it is on |
+| `cover` | `Open`, `Closed`, or the position it reports |
+
+`scene` is not one of them: a scene is stateless, so an item bound to one would
+never show anything, and it is refused rather than reserved as a blank slot.
+
+`label` is optional. Without it the item shows the name the provider reported,
+and falls back to the resource id when there is none. A bound item needs at
+least **two slots**: 64 px holds a caption or a reading, not both. A resource
+that is unavailable, or whose provider is offline, shows a dash and turns its
+dot to the warning colour rather than leaving a value that stopped being true.
+
+A bar binding counts as a binding everywhere else in this document: it holds a
+place in the 256-pair limit, and it has to agree with every tile that names the
+same pair about what kind of thing it is.
 
 Omitting `bar` keeps the original clock, title, connection-status and page
 number arrangement. Setting `"bar": []` deliberately leaves the whole bar
 blank. An unknown item type is valid and reserves its slots while rendering
 nothing; this keeps later layouts geometrically stable on older firmware. Bar
 items never receive touch events.
+
+The component names are not unknown types, which is what makes them a narrowing
+of the format: firmware that predates this feature accepted `{"type":"scene"}`
+in the bar, and a `sensor` in a single slot, as unknown items reserving space.
+Both are now refused — `bar_item_required` and `bar_span_invalid` — because a
+name this firmware understands should say what is wrong with it rather than
+leave a slot permanently blank.
 
 ## The grid
 
@@ -351,16 +394,17 @@ returns no presentation text, so the editor can phrase and translate its own.
 | `duplicate_page_id` | two pages share an `id` |
 | `home_page_not_found` | `home_page` names no page |
 | `bar_required` | `bar` is present but is not an array |
-| `bar_item_required` | an item is not an object or has no non-empty string `type` |
+| `bar_item_required` | an item is not an object, has no non-empty string `type`, or names a component with no bar presentation (`scene`) |
 | `bar_slot_invalid` | `slot` is not an integer from 0 to 11 |
-| `bar_span_invalid` | `span` is not an integer from 1 to 12 or the item extends past slot 11 |
+| `bar_span_invalid` | `span` is not an integer from 1 to 12, is below the two slots a bound item needs, or the item extends past slot 11 |
+| `bar_resource_required` | a bound bar item's `resource` is missing, empty, the wrong JSON type, or over the length limit |
 | `bar_overlap` | two bar items reserve at least one of the same slots |
 | `tile_id_required`, `duplicate_tile_id` | document-wide, because neither has an unambiguous tile to blame |
 | `invalid_position` | `pos` is not two integers |
 | `invalid_size` | `size` is not one of the five rectangles, or not one this component renders |
 | `tile_out_of_bounds` | the rectangle leaves the 4 × 3 grid |
 | `tile_overlap` | two tiles cover the same cell |
-| `binding_required` | missing or malformed binding; also a scene with the wrong number of them, a pair used by two disagreeing component kinds, and more than 256 distinct pairs |
+| `binding_required` | missing or malformed binding; also a scene with the wrong number of them, a pair used by two disagreeing component kinds — bar items included, where the path is the item — and more than 256 distinct pairs |
 | `provider_required`, `resource_required` | missing, empty, the wrong JSON type, or over the length limit |
 
 Document-level refusals that are not about content use the same envelope as the

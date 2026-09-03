@@ -1,6 +1,15 @@
-import type { BarItem, ProviderStatus } from '../lib/api'
-import { BAR_SLOT_COUNT, firstFreeSlot } from '../lib/bar'
+import type { BarItem, ProviderStatus, Resource } from '../lib/api'
+import {
+  BAR_BOUND_MIN_SPAN,
+  BAR_RESOURCE_OPTION,
+  BAR_SLOT_COUNT,
+  barErrors,
+  firstFreeSlot,
+  isBoundBarItem,
+  retype,
+} from '../lib/bar'
 import { providerLabel } from '../lib/providers'
+import { ResourcePicker } from './ResourcePicker'
 
 const KNOWN_TYPES = [
   { value: 'clock', label: 'Clock' },
@@ -9,13 +18,25 @@ const KNOWN_TYPES = [
   { value: 'badge', label: 'Provider badge' },
 ] as const
 
+/**
+ * A bound item's `type` is the component it renders, so the select offers one
+ * "Resource" entry and this list is what the entry expands into. Picking an
+ * entity sets it; the select is here for a resource typed by hand.
+ */
+const BOUND_TYPES = [
+  { value: 'sensor', label: 'Sensor reading' },
+  { value: 'light', label: 'Light' },
+  { value: 'cover', label: 'Cover' },
+] as const
+
 interface Props {
   bar: BarItem[] | undefined
   providers: Pick<ProviderStatus, 'id' | 'status'>[]
+  onLoadResources: (provider: string) => Promise<Resource[]>
   onChange: (bar: BarItem[] | undefined) => void
 }
 
-export function BarEditor({ bar, providers, onChange }: Props) {
+export function BarEditor({ bar, providers, onLoadResources, onChange }: Props) {
   if (bar === undefined) {
     return (
       <section className="bar-editor" aria-labelledby="bar-editor-title">
@@ -110,18 +131,24 @@ export function BarEditor({ bar, providers, onChange }: Props) {
 
       <div className="bar-items">
         {bar.map((item, index) => {
-          const known = KNOWN_TYPES.some((type) => type.value === item.type)
+          const bound = isBoundBarItem(item)
+          const selectValue = bound ? BAR_RESOURCE_OPTION : item.type
+          const known = bound || KNOWN_TYPES.some((type) => type.value === item.type)
           const providerIds = Array.from(
             new Set([...providers.map((provider) => provider.id), item.provider ?? '']),
           ).filter(Boolean)
           return (
-            <div className="bar-item" key={`${index}-${item.type}`}>
+            // Keyed by position alone: picking an entity of another kind
+            // rewrites `type`, and keying on that would unmount the picker
+            // mid-search and refetch the catalog. retype() already clears the
+            // fields a real type change invalidates.
+            <div className="bar-item" key={index}>
               <label className="field">
                 <span>Item</span>
                 <select
-                  value={item.type}
+                  value={selectValue}
                   onChange={(event) =>
-                    update(index, { ...item, type: event.currentTarget.value })
+                    update(index, retype(item, event.currentTarget.value, providerIds[0] ?? ''))
                   }
                 >
                   {!known ? (
@@ -130,6 +157,7 @@ export function BarEditor({ bar, providers, onChange }: Props) {
                   {KNOWN_TYPES.map((type) => (
                     <option key={type.value} value={type.value}>{type.label}</option>
                   ))}
+                  <option value={BAR_RESOURCE_OPTION}>Resource</option>
                 </select>
               </label>
               <label className="field bar-item__number">
@@ -148,7 +176,7 @@ export function BarEditor({ bar, providers, onChange }: Props) {
                 <span>Width</span>
                 <input
                   type="number"
-                  min="1"
+                  min={bound ? BAR_BOUND_MIN_SPAN : 1}
                   max={BAR_SLOT_COUNT}
                   value={item.span}
                   onChange={(event) =>
@@ -157,35 +185,68 @@ export function BarEditor({ bar, providers, onChange }: Props) {
                 />
               </label>
               {item.type === 'badge' ? (
+                <label className="field">
+                  <span>Provider</span>
+                  <select
+                    value={item.provider ?? ''}
+                    onChange={(event) =>
+                      update(index, { ...item, provider: event.currentTarget.value })
+                    }
+                  >
+                    <option value="">Choose provider</option>
+                    {providerIds.map((provider) => (
+                      <option key={provider} value={provider}>{providerLabel(provider)}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              {bound ? (
                 <>
                   <label className="field">
-                    <span>Provider</span>
+                    <span>Shows</span>
                     <select
-                      value={item.provider ?? ''}
-                      onChange={(event) =>
-                        update(index, { ...item, provider: event.currentTarget.value })
-                      }
+                      value={item.type}
+                      onChange={(event) => update(index, { ...item, type: event.currentTarget.value })}
                     >
-                      <option value="">Choose provider</option>
-                      {providerIds.map((provider) => (
-                        <option key={provider} value={provider}>{providerLabel(provider)}</option>
+                      {BOUND_TYPES.map((type) => (
+                        <option key={type.value} value={type.value}>{type.label}</option>
                       ))}
                     </select>
                   </label>
-                  <label className="field">
-                    <span>Label override</span>
-                    <input
-                      value={item.label ?? ''}
-                      placeholder="Use provider name"
-                      onChange={(event) => {
-                        const next = { ...item }
-                        if (event.currentTarget.value === '') delete next.label
-                        else next.label = event.currentTarget.value
-                        update(index, next)
-                      }}
-                    />
-                  </label>
+                  <ResourcePicker
+                    binding={{ provider: item.provider ?? '', resource: item.resource ?? '' }}
+                    providers={providers}
+                    kinds={BOUND_TYPES.map((type) => type.value)}
+                    resetKey={`bar-${index}`}
+                    onLoadResources={onLoadResources}
+                    onChange={(binding, picked) =>
+                      update(index, {
+                        ...item,
+                        // The picked entity's kind is what the panel will
+                        // publish, so it decides the presentation rather than
+                        // leaving the two free to disagree.
+                        type: picked?.kind ?? item.type,
+                        provider: binding.provider,
+                        resource: binding.resource,
+                      })
+                    }
+                  />
                 </>
+              ) : null}
+              {item.type === 'badge' || bound ? (
+                <label className="field">
+                  <span>Label override</span>
+                  <input
+                    value={item.label ?? ''}
+                    placeholder={bound ? 'Use the resource name' : 'Use provider name'}
+                    onChange={(event) => {
+                      const next = { ...item }
+                      if (event.currentTarget.value === '') delete next.label
+                      else next.label = event.currentTarget.value
+                      update(index, next)
+                    }}
+                  />
+                </label>
               ) : null}
               <button
                 type="button"
@@ -213,32 +274,8 @@ function defaultBar(providers: Pick<ProviderStatus, 'id' | 'status'>[]): BarItem
 }
 
 function itemLabel(item: BarItem): string {
+  if (isBoundBarItem(item)) {
+    return item.label ?? (item.resource !== undefined && item.resource !== '' ? item.resource : 'Resource')
+  }
   return KNOWN_TYPES.find((type) => type.value === item.type)?.label ?? item.type
-}
-
-function barErrors(bar: BarItem[]): string[] {
-  const errors: string[] = []
-  const owners = new Map<number, number>()
-  bar.forEach((item, index) => {
-    if (!Number.isInteger(item.slot) || item.slot < 0 || item.slot >= BAR_SLOT_COUNT) {
-      errors.push(`Item ${index + 1} must start in slots 1–${BAR_SLOT_COUNT}.`)
-    }
-    if (
-      !Number.isInteger(item.span) ||
-      item.span < 1 ||
-      item.span > BAR_SLOT_COUNT ||
-      item.slot + item.span > BAR_SLOT_COUNT
-    ) {
-      errors.push(`Item ${index + 1} extends beyond the twelve-slot bar.`)
-    }
-    if (item.type === 'badge' && !item.provider) errors.push(`Item ${index + 1} needs a provider.`)
-    for (let slot = Math.max(0, item.slot); slot < Math.min(BAR_SLOT_COUNT, item.slot + item.span); slot += 1) {
-      const owner = owners.get(slot)
-      if (owner !== undefined) {
-        errors.push(`Items ${owner + 1} and ${index + 1} overlap at slot ${slot + 1}.`)
-      }
-      else owners.set(slot, index)
-    }
-  })
-  return errors
 }

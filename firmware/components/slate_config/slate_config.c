@@ -138,27 +138,34 @@ static bool json_integer(const cJSON *item, int *out)
     return true;
 }
 
-static slate_component_type_t component_type(const cJSON *tile)
+static slate_component_type_t component_named(const char *type)
 {
-    const cJSON *type = cJSON_GetObjectItemCaseSensitive(tile, "type");
-    if (!cJSON_IsString(type)) {
-        return SLATE_COMPONENT_UNKNOWN;
-    }
-    if (strcmp(type->valuestring, "light") == 0) {
+    if (strcmp(type, "light") == 0) {
         return SLATE_COMPONENT_LIGHT;
     }
-    if (strcmp(type->valuestring, "cover") == 0) {
+    if (strcmp(type, "cover") == 0) {
         return SLATE_COMPONENT_COVER;
     }
-    if (strcmp(type->valuestring, "sensor") == 0) {
+    if (strcmp(type, "sensor") == 0) {
         return SLATE_COMPONENT_SENSOR;
     }
-    if (strcmp(type->valuestring, "scene") == 0) {
+    if (strcmp(type, "scene") == 0) {
         return SLATE_COMPONENT_SCENE;
     }
     return SLATE_COMPONENT_UNKNOWN;
 }
 
+static slate_component_type_t component_type(const cJSON *tile)
+{
+    const cJSON *type = cJSON_GetObjectItemCaseSensitive(tile, "type");
+    return cJSON_IsString(type) ? component_named(type->valuestring)
+                                : SLATE_COMPONENT_UNKNOWN;
+}
+
+/* A bar item naming a component carries that component's binding (§3.3). Scene
+ * is a component name without a bar presentation — it is stateless, so a slot
+ * holding one would stay blank for ever — and is refused rather than reserved
+ * as an unknown type would be. */
 static slate_bar_item_type_t bar_item_type(const char *type)
 {
     if (strcmp(type, "clock") == 0) {
@@ -172,6 +179,10 @@ static slate_bar_item_type_t bar_item_type(const char *type)
     }
     if (strcmp(type, "page_indicator") == 0) {
         return SLATE_BAR_ITEM_PAGE_INDICATOR;
+    }
+    slate_component_type_t component = component_named(type);
+    if (component != SLATE_COMPONENT_UNKNOWN && component != SLATE_COMPONENT_SCENE) {
+        return SLATE_BAR_ITEM_RESOURCE;
     }
     return SLATE_BAR_ITEM_UNKNOWN;
 }
@@ -330,8 +341,44 @@ static void validate_binding(validation_t *validation, const cJSON *binding,
     }
 }
 
-static void validate_bar(const cJSON *root, slate_config_report_t *report)
+/* A bound bar item needs both halves of §3.3's pair and both halves of a
+ * legible slot: a single 64 px slot holds a caption or a reading, not both. */
+static void validate_bar_resource(validation_t *validation, const cJSON *item,
+                                  slate_component_type_t component,
+                                  const char *item_path)
 {
+    char field_path[96];
+    const cJSON *provider = cJSON_GetObjectItemCaseSensitive(item, "provider");
+    const cJSON *resource = cJSON_GetObjectItemCaseSensitive(item, "resource");
+    bool provider_ok = cJSON_IsString(provider) && provider->valuestring[0] != '\0' &&
+                       strlen(provider->valuestring) <= SLATE_PROVIDER_ID_MAX;
+    bool resource_ok = cJSON_IsString(resource) && resource->valuestring[0] != '\0' &&
+                       strlen(resource->valuestring) <= SLATE_RESOURCE_ID_MAX;
+    if (!provider_ok) {
+        snprintf(field_path, sizeof(field_path), "%s/provider", item_path);
+        add_error(validation->report, "provider_required", field_path, NULL);
+    }
+    if (!resource_ok) {
+        snprintf(field_path, sizeof(field_path), "%s/resource", item_path);
+        add_error(validation->report, "bar_resource_required", field_path, NULL);
+    }
+    if (!provider_ok || !resource_ok) {
+        return;
+    }
+
+    /* §5.1 makes the binding set the store's allocation rather than a filter on
+     * one, so a bar binding counts against the same cap and has to agree with
+     * every tile that names the same pair. */
+    binding_result_t result = remember_binding(
+        validation, provider->valuestring, resource->valuestring, component);
+    if (result == BINDING_CONFLICT || result == BINDING_CAPACITY_EXCEEDED) {
+        add_error(validation->report, "binding_required", item_path, NULL);
+    }
+}
+
+static void validate_bar(validation_t *validation, const cJSON *root)
+{
+    slate_config_report_t *report = validation->report;
     const cJSON *bar = cJSON_GetObjectItemCaseSensitive(root, "bar");
     if (bar == NULL) {
         return;
@@ -352,11 +399,19 @@ static void validate_bar(const cJSON *root, slate_config_report_t *report)
         }
 
         const cJSON *type = cJSON_GetObjectItemCaseSensitive(item, "type");
+        bool type_ok = cJSON_IsString(type) && type->valuestring[0] != '\0';
+        slate_component_type_t component =
+            type_ok ? component_named(type->valuestring) : SLATE_COMPONENT_UNKNOWN;
+        slate_bar_item_type_t item_type =
+            type_ok ? bar_item_type(type->valuestring) : SLATE_BAR_ITEM_UNKNOWN;
+
         char field_path[96];
-        if (!cJSON_IsString(type) || type->valuestring[0] == '\0') {
+        if (!type_ok || component == SLATE_COMPONENT_SCENE) {
             snprintf(field_path, sizeof(field_path), "%s/type", item_path);
             add_error(report, "bar_item_required", field_path, NULL);
         }
+
+        int minimum_span = item_type == SLATE_BAR_ITEM_RESOURCE ? 2 : 1;
 
         int slot = 0;
         const cJSON *slot_json = cJSON_GetObjectItemCaseSensitive(item, "slot");
@@ -369,7 +424,7 @@ static void validate_bar(const cJSON *root, slate_config_report_t *report)
 
         int span = 0;
         const cJSON *span_json = cJSON_GetObjectItemCaseSensitive(item, "span");
-        bool span_ok = json_integer(span_json, &span) && span >= 1 &&
+        bool span_ok = json_integer(span_json, &span) && span >= minimum_span &&
                        span <= SLATE_BAR_SLOT_COUNT &&
                        (!slot_ok || slot + span <= SLATE_BAR_SLOT_COUNT);
         if (!span_ok) {
@@ -386,13 +441,15 @@ static void validate_bar(const cJSON *root, slate_config_report_t *report)
             occupied |= mask;
         }
 
-        if (cJSON_IsString(type) && strcmp(type->valuestring, "badge") == 0) {
+        if (item_type == SLATE_BAR_ITEM_BADGE) {
             const cJSON *provider = cJSON_GetObjectItemCaseSensitive(item, "provider");
             if (!cJSON_IsString(provider) || provider->valuestring[0] == '\0' ||
                 strlen(provider->valuestring) > SLATE_PROVIDER_ID_MAX) {
                 snprintf(field_path, sizeof(field_path), "%s/provider", item_path);
                 add_error(report, "provider_required", field_path, NULL);
             }
+        } else if (item_type == SLATE_BAR_ITEM_RESOURCE) {
+            validate_bar_resource(validation, item, component, item_path);
         }
     }
 }
@@ -538,12 +595,12 @@ static void validate_document(const cJSON *root, validation_t *validation)
         add_error(report, "theme_not_found", "/theme", NULL);
     }
 
-    validate_bar(root, report);
-
     const cJSON *pages = cJSON_GetObjectItemCaseSensitive(root, "pages");
     if (!cJSON_IsArray(pages)) {
         add_error(report, "pages_required", "/pages", NULL);
         add_error(report, "home_page_not_found", "/home_page", NULL);
+        /* The bar is a top-level array and is diagnosable without the pages. */
+        validate_bar(validation, root);
         return;
     }
 
@@ -599,6 +656,12 @@ static void validate_document(const cJSON *root, validation_t *validation)
     if (!home_found) {
         add_error(report, "home_page_not_found", "/home_page", NULL);
     }
+
+    /* After the tiles, so that a bar item whose kind contradicts an existing
+     * tile is refused where the contradiction was introduced. Blaming the tile
+     * would key the error to a tile id in §4.1's `tile_errors` and point the
+     * editor at the element that did not change. */
+    validate_bar(validation, root);
 }
 
 static void binding_free(slate_config_binding_t *binding)
@@ -620,6 +683,7 @@ void slate_config_free(slate_config_t *config)
     for (size_t i = 0; i < config->bar_item_count; ++i) {
         free(config->bar_items[i].type);
         free(config->bar_items[i].provider);
+        free(config->bar_items[i].resource);
         free(config->bar_items[i].label);
     }
     free(config->bar_items);
@@ -717,10 +781,14 @@ static bool build_bar(const cJSON *root, slate_config_t *config)
         slate_config_bar_item_t *item = &config->bar_items[i];
         item->type = config_strdup(type->valuestring);
         item->item_type = bar_item_type(type->valuestring);
+        item->component = item->item_type == SLATE_BAR_ITEM_RESOURCE
+                              ? component_named(type->valuestring)
+                              : SLATE_COMPONENT_UNKNOWN;
         item->slot = (uint8_t) slot;
         item->span = (uint8_t) span;
         if (item->type == NULL ||
             !copy_optional_string(json, "provider", &item->provider) ||
+            !copy_optional_string(json, "resource", &item->resource) ||
             !copy_optional_string(json, "label", &item->label)) {
             return false;
         }
