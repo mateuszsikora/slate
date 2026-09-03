@@ -66,7 +66,7 @@ static unsigned decimal_places(slate_measurement_t measurement, double value)
     return 1;
 }
 
-static void format_value(const slate_sensor_state_t *sensor, char *out, size_t size)
+void slate_sensor_format_value(const slate_sensor_state_t *sensor, char *out, size_t size)
 {
     if (!sensor->numeric) {
         strlcpy(out, sensor->text[0] != '\0' ? sensor->text : "-", size);
@@ -216,7 +216,7 @@ void slate_sensor_update(const slate_sensor_view_t *view, const slate_resource_t
     }
 
     if (resource->presentation == SLATE_PRESENT_OK) {
-        format_value(sensor, value, sizeof(value));
+        slate_sensor_format_value(sensor, value, sizeof(value));
     } else {
         strlcpy(value, "-", sizeof(value));
     }

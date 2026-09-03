@@ -61,13 +61,21 @@ typedef enum {
     SLATE_BAR_ITEM_TITLE,
     SLATE_BAR_ITEM_BADGE,
     SLATE_BAR_ITEM_PAGE_INDICATOR,
+    SLATE_BAR_ITEM_RESOURCE,
 } slate_bar_item_type_t;
 
+/* A bar item that carries a binding names its component, exactly as a tile
+ * does. §5.1 hands every binding to the state store with the kind its consumer
+ * expects, and two opaque strings cannot supply one; the component name is
+ * where a tile keeps that answer, so a bar item keeps it in the same place.
+ * `component` is meaningful only for SLATE_BAR_ITEM_RESOURCE. */
 typedef struct {
     char *type;
     char *provider;
+    char *resource;
     char *label;
     slate_bar_item_type_t item_type;
+    slate_component_type_t component;
     uint8_t slot;
     uint8_t span;
 } slate_config_bar_item_t;

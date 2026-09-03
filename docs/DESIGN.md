@@ -113,10 +113,25 @@ The direct provider is the smallest useful interoperability path: a script or No
 The display is 800×480. A fixed 56 px system bar at the top has 16 px outer
 margins and twelve gapless 64 px slots. The optional top-level `bar` array
 places non-interactive items with a zero-based `slot` and a `span`: `clock`,
-`title`, `page_indicator`, or a provider `badge`. Items may not overlap or
-extend beyond slot 11. A badge names its `provider` and may override its
-caption with `label`; its dot uses the theme accent while online, warning while
-connecting or degraded, and muted colour while offline or unconfigured.
+`title`, `page_indicator`, a provider `badge`, or a component name carrying a
+binding. Items may not overlap or extend beyond slot 11. A badge names its
+`provider` and may override its caption with `label`; its dot uses the theme
+accent while online, warning while connecting or degraded, and muted colour
+while offline or unconfigured.
+
+A bar item named `sensor`, `light` or `cover` carries §3.3's `provider` and
+`resource` pair and shows that resource's state over its name: the reading and
+unit for a sensor, `On`/`Off` with a badge-coloured dot for a light,
+`Open`/`Closed` or the reported position for a cover. Naming the component
+rather than inventing a kindless bound item is what supplies §5.1 with the kind
+every binding is handed to the store with — the same answer a tile keeps in the
+same place — and it is why a `scene`, which is stateless and could only ever
+render blank, is a validation error on the bar rather than an item reserving
+slots. `label` overrides the caption, which otherwise falls back to the
+normalized name and then to the resource id (§7). A bound item needs at least
+two slots, because one 64 px slot holds a caption or a reading and not both.
+Unavailability is §7.5's: the dash, not the last value, and the warning colour
+on the dot.
 
 Omitting `bar` preserves the schema-1 compatible arrangement: clock, current
 page title, connection status and, on multi-page dashboards, an exact
@@ -160,9 +175,11 @@ Twelve cells is also the performance answer, not only a layout choice: S-2 measu
   },
   "bar": [
     {"type": "clock", "slot": 0, "span": 2},
-    {"type": "title", "slot": 2, "span": 6},
-    {"type": "page_indicator", "slot": 8, "span": 1},
-    {"type": "badge", "slot": 9, "span": 3, "provider": "ha", "label": "Home"}
+    {"type": "title", "slot": 2, "span": 4},
+    {"type": "page_indicator", "slot": 6, "span": 1},
+    {"type": "badge", "slot": 7, "span": 2, "provider": "ha", "label": "Home"},
+    {"type": "sensor", "slot": 9, "span": 3,
+     "provider": "ha", "resource": "sensor.hall_temperature", "label": "Hall"}
   ],
   "pages": [
     {
@@ -214,12 +231,14 @@ Page ids are unique within the document. Tile ids are also unique across the
 whole document, not merely within one page, because they key validation errors
 and editor selection. Empty ids are invalid.
 
-Most tiles carry one `binding`; a component such as the scene bar carries `bindings`. A binding is always the pair `provider` + `resource`. Resource ids are opaque outside their provider: `light.living_room` has meaning to the HA adapter, while `living-room` may name the same light in the direct provider. The pair is stored and compared as two strings; firmware never infers a provider from punctuation or from a component type.
+Most tiles carry one `binding`; a component such as the scene bar carries `bindings`. A system-bar item named after a component (§3.2) carries the same pair as two fields on the item itself, having no tile to hang an object off. A binding is always the pair `provider` + `resource`. Resource ids are opaque outside their provider: `light.living_room` has meaning to the HA adapter, while `living-room` may name the same light in the direct provider. The pair is stored and compared as two strings; firmware never infers a provider from punctuation or from a component type.
 
 Provider ids are at most 15 UTF-8 bytes and resource ids at most 63. The same
-pair may feed several tiles only when all known component types agree on its
-normalized kind; binding `direct:living-room` as both a `light` and a `sensor`
-is invalid. One active configuration may reference at most 256 distinct pairs.
+pair may feed several tiles and bar items only when all known component types
+agree on its normalized kind; binding `direct:living-room` as both a `light`
+and a `sensor` is invalid whether the disagreement is between two tiles or
+between a tile and the bar. One active configuration may reference at most 256
+distinct pairs.
 Unknown component types do not reserve provider state until firmware learns
 how to interpret them.
 

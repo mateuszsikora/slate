@@ -137,6 +137,7 @@ export interface BarItem {
   slot: number
   span: number
   provider?: string
+  resource?: string
   label?: string
 }
 
