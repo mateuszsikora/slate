@@ -275,6 +275,70 @@ incompatible-binding placeholder. A binding that has never produced a snapshot
 renders a placeholder naming `provider:resource`, so it can be found in the
 editor rather than guessed at.
 
+### Which Home Assistant entities can be bound
+
+The adapter maps five HA domains onto the four tile types. An entity in any
+other domain is not published and the editor's picker does not list it.
+
+| HA domain | Tile type |
+|-----------|-----------|
+| `light` | `light` |
+| `cover` | `cover` |
+| `sensor` | `sensor` |
+| `binary_sensor` | `sensor` |
+| `scene` | `scene` |
+
+A `binary_sensor` — a door, a window, a motion detector, a leak detector — is a
+read-only `sensor` whose value is a word rather than a number. It has no unit
+and no actions: `binary_sensor.front_door` bound to a `sensor` tile reads
+`Open` or `Closed`, and tapping it does nothing, because nothing about a
+contact is switchable.
+
+The word comes from the entity's `device_class` and is the one Home Assistant
+itself shows:
+
+| `device_class` | on | off |
+|----------------|----|-----|
+| `door`, `garage_door`, `opening`, `window` | Open | Closed |
+| `motion`, `occupancy`, `smoke`, `gas`, `carbon_monoxide`, `sound`, `vibration`, `tamper` | Detected | Clear |
+| `moisture` | Wet | Dry |
+| `presence` | Home | Away |
+| `lock` | Unlocked | Locked |
+| `connectivity` | Connected | Disconnected |
+| `problem` | Problem | OK |
+| `safety` | Unsafe | Safe |
+| `battery` | Low | Normal |
+| `battery_charging` | Charging | Not charging |
+| `cold` | Cold | Normal |
+| `heat` | Hot | Normal |
+| `light` | Detected | No light |
+| `power` | Detected | No power |
+| `moving` | Moving | Not moving |
+| `running` | Running | Not running |
+| `plug` | Plugged in | Unplugged |
+| `update` | Update available | Up-to-date |
+| absent, or a class this firmware does not know | On | Off |
+
+An entity that reports `unknown` or `unavailable` is stale and renders a dash,
+not `Off`. A contact that has not answered is not a closed door.
+
+**Give a `binary_sensor` tile its own `icon` at 2×1 and larger.** The icon a
+`sensor` tile picks for itself comes from `measurement` — `temperature`,
+`humidity`, `pressure`, `power` — and a contact has none of those: its
+`device_class` names what it means, not what it measures. With no `icon` set,
+the tile therefore falls back to a question mark beside the word. The 1×1 size
+carries no icon at all and needs nothing.
+
+```json
+{"id": "t1", "type": "sensor", "pos": [0, 0], "size": [2, 1],
+ "binding": {"provider": "ha", "resource": "binary_sensor.front_door"},
+ "label": "Front door", "icon": "door-closed"}
+```
+
+`door-closed`, `window-open-variant`, `motion-sensor`, `water`, `garage` and
+`power-plug` are the names in `tools/fonts/icons.txt` that suit the common
+contacts.
+
 ## Themes
 
 Two ship in firmware: `midnight` (dark) and `minimal-light`. Themes are not part
