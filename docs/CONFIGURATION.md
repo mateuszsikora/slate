@@ -138,7 +138,7 @@ does. The three that have a bar presentation are:
 
 | `type` | Shows |
 |--------|-------|
-| `sensor` | the reading and its unit, in the same precision the sensor tile uses |
+| `sensor` | a number with its unit, in the same precision the sensor tile uses, or the word a textual sensor reports — a `binary_sensor` door contact reads `Open` or `Closed` and carries no unit |
 | `light` | `On` or `Off`, with a dot in the accent colour while it is on |
 | `cover` | `Open`, `Closed`, or the position it reports |
 
@@ -277,11 +277,14 @@ editor rather than guessed at.
 
 ### Which Home Assistant entities can be bound
 
-The adapter maps five HA domains onto the four tile types. An entity in any
-other domain is not published and the editor's picker does not list it.
+The adapter maps five HA domains onto the four component types. An entity in
+any other domain is not published and the editor's picker does not list it.
+The component name is the same one a tile carries in `type` and a bound system
+bar item carries in its own, so a domain that can back a tile can back a bar
+item.
 
-| HA domain | Tile type |
-|-----------|-----------|
+| HA domain | Component type |
+|-----------|----------------|
 | `light` | `light` |
 | `cover` | `cover` |
 | `sensor` | `sensor` |
@@ -293,6 +296,14 @@ read-only `sensor` whose value is a word rather than a number. It has no unit
 and no actions: `binary_sensor.front_door` bound to a `sensor` tile reads
 `Open` or `Closed`, and tapping it does nothing, because nothing about a
 contact is switchable.
+
+The same entity on a `sensor` bar item reads the same word, which is what puts
+a door on the bar without a tile:
+
+```json
+{"type": "sensor", "slot": 9, "span": 3, "label": "Front door",
+ "provider": "ha", "resource": "binary_sensor.front_door"}
+```
 
 The word comes from the entity's `device_class` and is the one Home Assistant
 itself shows:

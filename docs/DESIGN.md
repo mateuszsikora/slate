@@ -120,16 +120,18 @@ accent while online, warning while connecting or degraded, and muted colour
 while offline or unconfigured.
 
 A bar item named `sensor`, `light` or `cover` carries §3.3's `provider` and
-`resource` pair and shows that resource's state over its name: the reading and
-unit for a sensor, `On`/`Off` with a badge-coloured dot for a light,
-`Open`/`Closed` or the reported position for a cover. Naming the component
-rather than inventing a kindless bound item is what supplies §5.1 with the kind
-every binding is handed to the store with — the same answer a tile keeps in the
-same place — and it is why a `scene`, which is stateless and could only ever
-render blank, is a validation error on the bar rather than an item reserving
-slots. `label` overrides the caption, which otherwise falls back to the
-normalized name and then to the resource id (§7). A bound item needs at least
-two slots, because one 64 px slot holds a caption or a reading and not both.
+`resource` pair and shows that resource's state over its name: for a sensor the
+reading and its unit, or the word a textual one reports — §5.6's `binary_sensor`
+door contact is that case and is how a door reaches the bar; `On`/`Off` with a
+badge-coloured dot for a light; `Open`/`Closed` or the reported position for a
+cover. Naming the component rather than inventing a kindless bound item is what
+supplies §5.1 with the kind every binding is handed to the store with — the same
+answer a tile keeps in the same place — and it is why a `scene`, which is
+stateless and could only ever render blank, is a validation error on the bar
+rather than an item reserving slots. `label` overrides the caption, which
+otherwise falls back to the normalized name and then to the resource id (§7). A
+bound item needs at least two slots, because one 64 px slot holds a caption or a
+reading and not both.
 Unavailability is §7.5's: the dash, not the last value, and the warning colour
 on the dot.
 
@@ -687,7 +689,7 @@ Five HA domains map onto §5.2's four kinds. An entity in any other domain is no
 | `binary_sensor` | `sensor` | `on` or `off` |
 | `scene` | `scene` | anything but `unavailable` |
 
-`binary_sensor` is a `sensor` whose `value` is a word, not a fifth kind and not a `light`. The on/off shape would fit `light`, but §5.2 gives `light` a `toggle` and a `set_power` that a door contact cannot honour, and naming a read-only contact a light to borrow its dot is a lie the action bus would have to keep. Normalizing it to `sensor` needs no new vocabulary and renders in §7.3 today, since a sensor's value is already "numeric or textual".
+`binary_sensor` is a `sensor` whose `value` is a word, not a fifth kind and not a `light`. The on/off shape would fit `light`, but §5.2 gives `light` a `toggle` and a `set_power` that a door contact cannot honour, and naming a read-only contact a light to borrow its dot is a lie the action bus would have to keep. Normalizing it to `sensor` needs no new vocabulary and renders in §7.3 today, since a sensor's value is already "numeric or textual" — and, for the same reason, on §3.2's bound bar item, which is where a door contact earns its place without spending a cell of the grid.
 
 The word comes from `device_class`, which is where a `binary_sensor` keeps its meaning, and the words are Home Assistant's own, so the panel says what the app the user came from says. `On`/`Off` is the fallback for an absent or unrecognised class. `docs/CONFIGURATION.md` carries the table; the adapter's self-test asserts one class per distinct phrasing, so changing a word is a visible change to a test.
 
