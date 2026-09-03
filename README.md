@@ -59,10 +59,10 @@ document](docs/DESIGN.md):
   the editor and never puts a credential in a URL.
 - **M8 — the release path exists; the first release has not been tagged.**
   Pushing a `v*` tag builds the image, publishes it with checksums and deploys
-  the browser installer. Two pieces are still open: the panel does not fetch
-  updates on its own ([#37](https://github.com/mateuszsikora/slate/issues/37)),
-  and there are no enclosure files
-  ([#117](https://github.com/mateuszsikora/slate/issues/117)).
+  the browser installer. One piece is still open: the panel does not fetch
+  updates on its own ([#37](https://github.com/mateuszsikora/slate/issues/37)).
+  Enclosures are settled by pointing at a design that has been printed and
+  fitted rather than by publishing one.
 
 Until that first tag exists **there is nothing to download**, and the way to a
 running panel is a build from source and one flash over a cable — the last
@@ -392,13 +392,20 @@ for a browser to allow Web Serial; anywhere else it needs HTTPS.
 `.github/workflows/release.yml` is the same two commands on a tag, plus the
 GitHub Release and the Pages deployment.
 
-## Enclosure
+## Enclosures
 
-There are none yet, and this file will not pretend otherwise: an enclosure is
-verified by printing it and offering the panel up to it, and an untested STEP
-file published as a supported artifact is worse than an honest gap. Until then
-the panel is mounted as bare board plus standoffs, and
-[#117](https://github.com/mateuszsikora/slate/issues/117) is where that changes.
+This project publishes none of its own. What it can offer is a shorter list:
+third-party designs that have been printed and had the panel offered up to
+them, because an enclosure is verified by fitting it and not by reading its
+model page.
+
+- **[Tabletop case](https://www.printables.com/model/1425850-waveshare-esp32-s3-7inch-capacitive-touch-display)**
+  by David Smith — a desk stand, and what the development panel currently sits
+  in.
+
+Printables carries a good number of other designs for this board, wall mounts
+among them, so a different enclosure is a search rather than a modelling job.
+Anything that gets fitted here joins the list.
 
 ## Where to go next
 
