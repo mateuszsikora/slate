@@ -54,7 +54,7 @@ static const char *TAG = "slate_ui";
 /* A formatted reading, a space and the longest unit a snapshot may carry, with
  * the slack -Os asks for: an out-of-range double formats far wider than the
  * value the layout was designed around, which is §7.5's whole point. */
-#define UI_BAR_VALUE_MAX  96
+#define UI_BAR_VALUE_MAX           96
 #define UI_PROVIDER_SUMMARY_MAX    128
 #define UI_EDITOR_URL_MAX          32
 #define UI_EDITOR_QR_SIZE          220
@@ -580,6 +580,9 @@ static uint32_t bar_resource_dot_color(const bar_item_view_t *view,
     if (resource == NULL || resource->presentation != SLATE_PRESENT_OK) {
         return theme->warn;
     }
+    /* A cover that reports no position is healthy and merely quiet about how
+     * open it is: the reading is a dash while the dot stays muted, because the
+     * warning colour here would claim the resource itself is in trouble. */
     bool active = view->config->component == SLATE_COMPONENT_LIGHT
                       ? resource->state.light.on
                       : resource->state.cover.position != SLATE_STATE_ABSENT &&
@@ -589,7 +592,8 @@ static uint32_t bar_resource_dot_color(const bar_item_view_t *view,
 
 /* §7.5's type scale, measured against this item's slots rather than guessed
  * from the string length: how much room a reading has depends on the span it
- * was given. */
+ * was given. The letter spacing belongs to the label rather than to the font,
+ * so reading it here stays correct across a step down the scale. */
 static const lv_font_t *bar_value_font(const bar_item_view_t *view, const char *text,
                                        const slate_theme_t *theme)
 {
@@ -600,24 +604,43 @@ static const lv_font_t *bar_value_font(const bar_item_view_t *view, const char *
     return size.x <= view->value_width ? theme->body : theme->caption;
 }
 
+static bool set_label_text(lv_obj_t *label, const char *text)
+{
+    if (strcmp(lv_label_get_text(label), text) == 0) {
+        return false;
+    }
+    lv_label_set_text(label, text);
+    return true;
+}
+
+/*
+ * Reached from the state subscription and from the one-second bar timer alike,
+ * so an item whose resource has not changed must cost nothing: LVGL reallocates
+ * the label text and invalidates the area on every set_text, and measuring the
+ * type scale on top of that would put a font measurement per bound item into
+ * every tick of the clock.
+ */
 static void update_bar_resource(bar_item_view_t *view, const slate_theme_t *theme)
 {
     slate_resource_t resource;
     bool known = slate_state_get(view->config->provider, view->config->resource,
                                  &resource) == ESP_OK;
+    const slate_resource_t *current = known ? &resource : NULL;
 
     char text[UI_BAR_VALUE_MAX];
-    bar_resource_text(view, known ? &resource : NULL, text, sizeof(text));
-    lv_label_set_text(view->value, text);
-    lv_obj_set_style_text_font(view->value, bar_value_font(view, text, theme),
-                               LV_PART_MAIN);
-    slate_component_label_one_line(view->value);
-    lv_label_set_text(view->label, bar_resource_name(view, known ? &resource : NULL));
+    bar_resource_text(view, current, text, sizeof(text));
+    if (set_label_text(view->value, text)) {
+        lv_obj_set_style_text_font(view->value, bar_value_font(view, text, theme),
+                                   LV_PART_MAIN);
+        /* The reading picks its own font, so the one-line height follows it. */
+        slate_component_label_one_line(view->value);
+    }
+    set_label_text(view->label, bar_resource_name(view, current));
     if (view->dot != NULL) {
-        lv_obj_set_style_bg_color(
-            view->dot,
-            lv_color_hex(bar_resource_dot_color(view, known ? &resource : NULL, theme)),
-            LV_PART_MAIN);
+        lv_color_t color = lv_color_hex(bar_resource_dot_color(view, current, theme));
+        if (!lv_color_eq(lv_obj_get_style_bg_color(view->dot, LV_PART_MAIN), color)) {
+            lv_obj_set_style_bg_color(view->dot, color, LV_PART_MAIN);
+        }
     }
 }
 

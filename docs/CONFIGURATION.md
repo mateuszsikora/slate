@@ -161,6 +161,13 @@ blank. An unknown item type is valid and reserves its slots while rendering
 nothing; this keeps later layouts geometrically stable on older firmware. Bar
 items never receive touch events.
 
+The component names are not unknown types, which is what makes them a narrowing
+of the format: firmware that predates this feature accepted `{"type":"scene"}`
+in the bar, and a `sensor` in a single slot, as unknown items reserving space.
+Both are now refused — `bar_item_required` and `bar_span_invalid` — because a
+name this firmware understands should say what is wrong with it rather than
+leave a slot permanently blank.
+
 ## The grid
 
 Below the fixed 56 px system bar is a **4 columns × 3 rows** grid of 184×124 px

@@ -400,14 +400,17 @@ static void validate_bar(validation_t *validation, const cJSON *root)
 
         const cJSON *type = cJSON_GetObjectItemCaseSensitive(item, "type");
         bool type_ok = cJSON_IsString(type) && type->valuestring[0] != '\0';
+        slate_component_type_t component =
+            type_ok ? component_named(type->valuestring) : SLATE_COMPONENT_UNKNOWN;
+        slate_bar_item_type_t item_type =
+            type_ok ? bar_item_type(type->valuestring) : SLATE_BAR_ITEM_UNKNOWN;
+
         char field_path[96];
-        if (!type_ok || component_named(type->valuestring) == SLATE_COMPONENT_SCENE) {
+        if (!type_ok || component == SLATE_COMPONENT_SCENE) {
             snprintf(field_path, sizeof(field_path), "%s/type", item_path);
             add_error(report, "bar_item_required", field_path, NULL);
         }
 
-        slate_bar_item_type_t item_type =
-            type_ok ? bar_item_type(type->valuestring) : SLATE_BAR_ITEM_UNKNOWN;
         int minimum_span = item_type == SLATE_BAR_ITEM_RESOURCE ? 2 : 1;
 
         int slot = 0;
@@ -446,8 +449,7 @@ static void validate_bar(validation_t *validation, const cJSON *root)
                 add_error(report, "provider_required", field_path, NULL);
             }
         } else if (item_type == SLATE_BAR_ITEM_RESOURCE) {
-            validate_bar_resource(validation, item, component_named(type->valuestring),
-                                  item_path);
+            validate_bar_resource(validation, item, component, item_path);
         }
     }
 }

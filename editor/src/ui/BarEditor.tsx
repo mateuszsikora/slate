@@ -1,10 +1,12 @@
 import type { BarItem, ProviderStatus, Resource } from '../lib/api'
 import {
   BAR_BOUND_MIN_SPAN,
+  BAR_RESOURCE_OPTION,
   BAR_SLOT_COUNT,
   barErrors,
   firstFreeSlot,
   isBoundBarItem,
+  retype,
 } from '../lib/bar'
 import { providerLabel } from '../lib/providers'
 import { ResourcePicker } from './ResourcePicker'
@@ -26,8 +28,6 @@ const BOUND_TYPES = [
   { value: 'light', label: 'Light' },
   { value: 'cover', label: 'Cover' },
 ] as const
-
-const RESOURCE_OPTION = 'resource'
 
 interface Props {
   bar: BarItem[] | undefined
@@ -132,13 +132,17 @@ export function BarEditor({ bar, providers, onLoadResources, onChange }: Props) 
       <div className="bar-items">
         {bar.map((item, index) => {
           const bound = isBoundBarItem(item)
-          const selectValue = bound ? RESOURCE_OPTION : item.type
+          const selectValue = bound ? BAR_RESOURCE_OPTION : item.type
           const known = bound || KNOWN_TYPES.some((type) => type.value === item.type)
           const providerIds = Array.from(
             new Set([...providers.map((provider) => provider.id), item.provider ?? '']),
           ).filter(Boolean)
           return (
-            <div className="bar-item" key={`${index}-${item.type}`}>
+            // Keyed by position alone: picking an entity of another kind
+            // rewrites `type`, and keying on that would unmount the picker
+            // mid-search and refetch the catalog. retype() already clears the
+            // fields a real type change invalidates.
+            <div className="bar-item" key={index}>
               <label className="field">
                 <span>Item</span>
                 <select
@@ -153,7 +157,7 @@ export function BarEditor({ bar, providers, onLoadResources, onChange }: Props) 
                   {KNOWN_TYPES.map((type) => (
                     <option key={type.value} value={type.value}>{type.label}</option>
                   ))}
-                  <option value={RESOURCE_OPTION}>Resource</option>
+                  <option value={BAR_RESOURCE_OPTION}>Resource</option>
                 </select>
               </label>
               <label className="field bar-item__number">
@@ -257,28 +261,6 @@ export function BarEditor({ bar, providers, onLoadResources, onChange }: Props) 
       </div>
     </section>
   )
-}
-
-/**
- * Switching an item's type keeps the geometry and drops the fields the new type
- * has no meaning for, so a badge's provider does not survive as a stray field
- * on a clock.
- */
-function retype(item: BarItem, selected: string, fallbackProvider: string): BarItem {
-  const bound = selected === RESOURCE_OPTION
-  if (!bound && isBoundBarItem({ ...item, type: selected })) {
-    return { ...item, type: selected }
-  }
-  const next: BarItem = { type: bound ? 'sensor' : selected, slot: item.slot, span: item.span }
-  if (bound) {
-    next.span = Math.max(item.span, BAR_BOUND_MIN_SPAN)
-    next.provider = item.provider ?? fallbackProvider
-    next.resource = item.resource ?? ''
-  } else if (selected === 'badge') {
-    next.provider = item.provider ?? fallbackProvider
-  }
-  if (item.label !== undefined && (bound || selected === 'badge')) next.label = item.label
-  return next
 }
 
 function defaultBar(providers: Pick<ProviderStatus, 'id' | 'status'>[]): BarItem[] {

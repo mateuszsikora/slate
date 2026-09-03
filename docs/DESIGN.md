@@ -140,6 +140,12 @@ bar item types reserve their declared slots but render empty, so a document
 from newer firmware degrades without rearranging its known items. The page
 indicator is empty for a single-page dashboard in either arrangement.
 
+A component name is never an unknown type, and adding the bound items narrowed
+what schema 1 accepts: a `scene` in the bar, and a bound item in a single slot,
+were previously unknown items reserving space and are now validation errors.
+Forward compatibility is a promise about vocabulary this firmware has not
+learned yet, not about a name it understands and knows cannot render.
+
 A horizontal swipe inside the content area moves one page left or right without
 wrapping at either end. A single-page dashboard has no position indicator. When
 a configuration is replaced, the visible page stays selected if its `id` still

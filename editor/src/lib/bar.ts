@@ -12,6 +12,9 @@ export const BAR_BOUND_TYPES = ['sensor', 'light', 'cover'] as const
 /** One 64 px slot holds a caption or a reading, never both. */
 export const BAR_BOUND_MIN_SPAN = 2
 
+/** The "Item" select's entry for a bound item; the component follows the pick. */
+export const BAR_RESOURCE_OPTION = 'resource'
+
 export function isBoundBarItem(item: BarItem): boolean {
   return (BAR_BOUND_TYPES as readonly string[]).includes(item.type)
 }
@@ -74,4 +77,33 @@ export function barErrors(bar: BarItem[]): string[] {
     }
   })
   return errors
+}
+
+/**
+ * Switching an item's type keeps the geometry and drops the fields the new type
+ * has no meaning for, so a badge's provider does not survive as a stray field
+ * on a clock. A label goes with them: on a badge it overrode the provider name
+ * and on a bound item it overrides the resource name, which is not the same
+ * caption carried across.
+ *
+ * Widening a bound item to its two-slot minimum can push it past slot 11, so
+ * the start moves back rather than leaving the editor holding a draft the panel
+ * would refuse. That clamp is total, the way firstFreeSlot() is: geometry
+ * arrives from a number input that can hand over anything, and a clamp that
+ * passes NaN through is not a clamp.
+ */
+export function retype(item: BarItem, selected: string, fallbackProvider: string): BarItem {
+  const bound = selected === BAR_RESOURCE_OPTION
+  const next: BarItem = { type: bound ? 'sensor' : selected, slot: item.slot, span: item.span }
+  if (bound) {
+    const span = Number.isInteger(item.span) ? item.span : BAR_BOUND_MIN_SPAN
+    const slot = Number.isInteger(item.slot) ? item.slot : 0
+    next.span = Math.min(Math.max(span, BAR_BOUND_MIN_SPAN), BAR_SLOT_COUNT)
+    next.slot = Math.max(0, Math.min(slot, BAR_SLOT_COUNT - next.span))
+    next.provider = item.provider ?? fallbackProvider
+    next.resource = item.resource ?? ''
+  } else if (selected === 'badge') {
+    next.provider = item.provider ?? fallbackProvider
+  }
+  return next
 }
