@@ -1509,8 +1509,10 @@ static ui_tree_t *build_message_tree(const char *title, const char *message)
             tree_destroy(tree);
             return NULL;
         }
-        lv_label_set_long_mode(address_label, LV_LABEL_LONG_DOT);
         lv_obj_set_width(address_label, text_width);
+        /* The hint sits 32 px below this row. A width alone would not keep the
+         * address out of it — see slate_component_label_one_line(). */
+        slate_component_label_one_line(address_label);
         lv_obj_align(address_label, LV_ALIGN_TOP_LEFT, text_x, 44);
         lv_obj_align(hint, LV_ALIGN_TOP_LEFT, text_x, 76);
     }
@@ -2829,6 +2831,26 @@ static bool sensor_view_text(const char *resource, const char *value, const char
            view->sensor.unit != NULL &&
            strcmp(lv_label_get_text(view->sensor.value), value) == 0 &&
            strcmp(lv_label_get_text(view->sensor.unit), unit) == 0;
+}
+
+/* The editor-link rows are not bindings, so find_view() cannot reach them.
+ * Matched on what they say rather than on their index among the card's
+ * children: LV_LABEL_LONG_DOT rewrites a row's tail, never its head. */
+static lv_obj_t *find_label_by_prefix(lv_obj_t *parent, const char *prefix)
+{
+    const uint32_t count = lv_obj_get_child_count(parent);
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t *child = lv_obj_get_child(parent, i);
+        if (lv_obj_check_type(child, &lv_label_class) &&
+            strncmp(lv_label_get_text(child), prefix, strlen(prefix)) == 0) {
+            return child;
+        }
+        lv_obj_t *nested = find_label_by_prefix(child, prefix);
+        if (nested != NULL) {
+            return nested;
+        }
+    }
+    return NULL;
 }
 
 static bool label_is_one_line(lv_obj_t *label)
@@ -4200,6 +4222,37 @@ static esp_err_t selftest_on_task(void)
     }
     UI_CHECK(publish_gesture_inspection_states() == ESP_OK,
              "manual gesture inspection dashboard left populated");
+
+    /* The editor-link screen's address row is the other label held to one line.
+     * Its value is an IPv4 literal with room to spare on a 404 px row, which is
+     * precisely the case the height must leave alone: one line of text is
+     * already exactly one line high. Built detached and destroyed again, so the
+     * dashboard left on screen above is not disturbed. */
+    ui_tree_t *editor_link = build_message_tree("Dashboard unavailable",
+                                               "Open the editor to arrange this panel.");
+    lv_obj_t *address_row = NULL;
+    lv_obj_t *hint_row = NULL;
+    if (editor_link != NULL) {
+        lv_obj_update_layout(editor_link->screen);
+        address_row = find_label_by_prefix(editor_link->screen, "Open http://");
+        hint_row = find_label_by_prefix(editor_link->screen, "Scan to open");
+    }
+    if (address_row == NULL && hint_row == NULL) {
+        /* No station address means no QR, no address row and nothing to check —
+         * the screen is then the message alone. */
+        ESP_LOGW(TAG, "selftest: %-48s SKIP", "editor-link address row (no station address)");
+    } else {
+        UI_CHECK(address_row != NULL && hint_row != NULL &&
+                     lv_label_get_long_mode(address_row) == LV_LABEL_LONG_DOT &&
+                     label_is_one_line(address_row) &&
+                     strstr(lv_label_get_text(address_row), "...") == NULL &&
+                     lv_obj_get_y(address_row) + lv_obj_get_height(address_row) <=
+                         lv_obj_get_y(hint_row),
+                 "the editor address renders in full and clears its hint");
+    }
+    if (editor_link != NULL) {
+        tree_destroy(editor_link);
+    }
 
     ESP_LOGI(TAG, "selftest: %u check(s), %u failure(s)", checks, failures);
 #undef UI_CHECK

@@ -831,6 +831,21 @@ void app_main(void)
     }
 #endif
 
+    /* After start_network(), so a panel that genuinely came up in setup mode
+     * has already raised its card and the verifier declines instead of
+     * replacing §9.4's recovery address with a fixture. */
+#ifdef SLATE_DISPLAY_SELFTEST
+    esp_err_t setup_card_test_err = slate_display_selftest();
+    if (setup_card_test_err == ESP_ERR_INVALID_STATE) {
+        /* Declined rather than failed, and slate_display has already logged
+         * which of the two reasons it was. */
+        ESP_LOGW(TAG, "setup card selftest did not run");
+    } else if (setup_card_test_err != ESP_OK) {
+        ESP_LOGE(TAG, "setup card selftest failed: %s",
+                 esp_err_to_name(setup_card_test_err));
+    }
+#endif
+
     /* Before the health check is armed, not after: the panic is supposed to
      * happen while the image is still unverified, and the health task runs at a
      * higher priority than this one — so leaving it to the scheduler would make

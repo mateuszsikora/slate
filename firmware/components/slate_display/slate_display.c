@@ -911,6 +911,29 @@ static lv_obj_t *setup_label(lv_obj_t *parent, const char *text, uint32_t color,
     return label;
 }
 
+/* Hold a setup row to one line, so a value too long for it is truncated with an
+ * ellipsis instead of pushing into the row below.
+ *
+ * LV_LABEL_LONG_DOT does not mean "one line". LVGL wraps the text to the
+ * label's width first and only replaces the tail with dots once the wrapped
+ * result overflows the label's *height* — and a label with no height set
+ * reports the wrapped text as its own height, so it never overflows and never
+ * truncates. §7.5's dashboard labels use slate_component_label_one_line() for
+ * the same reason. This component cannot call it: slate_ui requires
+ * slate_display and not the other way round, and that helper is private to it.
+ */
+static void setup_label_one_line(lv_obj_t *label)
+{
+    const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    /* Against the content box, not the outer bounds: a row that later gains
+     * padding must still have one full line inside it rather than become dots
+     * while its text fits. */
+    lv_obj_set_height(label, lv_font_get_line_height(font) +
+                                 lv_obj_get_style_space_top(label, LV_PART_MAIN) +
+                                 lv_obj_get_style_space_bottom(label, LV_PART_MAIN));
+}
+
 static lv_obj_t *setup_qr(lv_obj_t *parent, const slate_display_setup_t *setup,
                           int32_t size)
 {
@@ -1057,7 +1080,10 @@ static void show_setup_overlay(void *ctx)
         char join[96];
         snprintf(join, sizeof(join), "1   Scan to join %s", setup->network);
         lv_obj_t *join_label = setup_label(card, join, theme->text_hi, theme->body, text_width);
-        lv_label_set_long_mode(join_label, LV_LABEL_LONG_DOT);
+        /* §9.2 allows the full 32-byte SSID, which is wider than these 408 px.
+         * The security row below is where the passphrase is, so this row is
+         * held to one line rather than allowed to grow over it. */
+        setup_label_one_line(join_label);
         lv_obj_align(join_label, LV_ALIGN_TOP_LEFT, text_x, 74);
 
         char security[96];
@@ -1450,3 +1476,186 @@ void slate_display_heap_metrics(slate_display_heap_metrics_t *out)
     *out = s_heap_metrics;
     portEXIT_CRITICAL(&s_heap_metrics_lock);
 }
+
+#ifdef SLATE_DISPLAY_SELFTEST
+
+/* §9.2 lets the setup network be the full 32 bytes the standard allows, and
+ * that is what the card has to survive — not the shorter name a particular
+ * router happens to be called. Tied to the header constant, so shortening one
+ * without the other is a compile error rather than a fixture that quietly
+ * stops being the maximum. */
+#define SETUP_TEST_SSID "Ridiculously-Long-Network-Name32"
+_Static_assert(sizeof(SETUP_TEST_SSID) == SLATE_DISPLAY_SETUP_NETWORK_LEN,
+               "the setup fixture must be a maximum-length SSID");
+
+typedef struct {
+    SemaphoreHandle_t done;
+    esp_err_t result;
+} setup_selftest_request_t;
+
+/* The rows are found by what they say rather than by their position among the
+ * card's children, so reordering the presentation does not silently move a
+ * check onto a different label. LV_LABEL_LONG_DOT rewrites the tail, never the
+ * head, so a prefix still identifies a truncated row. */
+static lv_obj_t *setup_find_label(lv_obj_t *parent, const char *prefix)
+{
+    const uint32_t count = lv_obj_get_child_count(parent);
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t *child = lv_obj_get_child(parent, i);
+        if (lv_obj_check_type(child, &lv_label_class) &&
+            strncmp(lv_label_get_text(child), prefix, strlen(prefix)) == 0) {
+            return child;
+        }
+        lv_obj_t *nested = setup_find_label(child, prefix);
+        if (nested != NULL) {
+            return nested;
+        }
+    }
+    return NULL;
+}
+
+/* Built through the work function the queue would have called: this already
+ * runs on the LVGL task, and §6.1 gives the presentation one path in, not a
+ * privileged second one for the verifier. Ownership of the copy is the same as
+ * slate_display_setup_show() hands over. */
+static lv_obj_t *setup_selftest_build(const char *ssid, const char *passphrase, bool banner)
+{
+    slate_display_setup_t *copy = calloc(1, sizeof(*copy));
+    if (copy == NULL) {
+        return NULL;
+    }
+    copy->banner = banner;
+    strlcpy(copy->network, ssid, sizeof(copy->network));
+    strlcpy(copy->address, "192.168.4.1", sizeof(copy->address));
+    strlcpy(copy->passphrase, passphrase, sizeof(copy->passphrase));
+    strlcpy(copy->message, "Setup self-test", sizeof(copy->message));
+
+    show_setup_overlay(copy);
+    if (s_setup_overlay != NULL) {
+        lv_obj_update_layout(s_setup_overlay);
+    }
+    return s_setup_overlay;
+}
+
+static bool setup_row_is_one_line(lv_obj_t *label)
+{
+    const lv_font_t *font =
+        label != NULL ? lv_obj_get_style_text_font(label, LV_PART_MAIN) : NULL;
+    return font != NULL &&
+           lv_obj_get_height(label) == lv_font_get_line_height(font) +
+                                           lv_obj_get_style_space_top(label, LV_PART_MAIN) +
+                                           lv_obj_get_style_space_bottom(label, LV_PART_MAIN);
+}
+
+static bool setup_rows_clear(lv_obj_t *above, lv_obj_t *below)
+{
+    return above != NULL && below != NULL &&
+           lv_obj_get_y(above) + lv_obj_get_height(above) <= lv_obj_get_y(below);
+}
+
+static esp_err_t setup_selftest_on_task(void)
+{
+    unsigned checks = 0;
+    unsigned failures = 0;
+#define SETUP_CHECK(condition, description)                                          \
+    do {                                                                             \
+        bool passed_ = (condition);                                                  \
+        checks++;                                                                    \
+        failures += !passed_;                                                        \
+        ESP_LOGI(TAG, "selftest: %-52s %s", description, passed_ ? "PASS" : "FAIL");  \
+    } while (0)
+
+    lv_obj_t *overlay = setup_selftest_build(SETUP_TEST_SSID, "", false);
+    lv_obj_t *join = overlay != NULL ? setup_find_label(overlay, "1   Scan to join") : NULL;
+    lv_obj_t *security = overlay != NULL ? setup_find_label(overlay, "No Wi-Fi password") : NULL;
+    const char *long_text = join != NULL ? lv_label_get_text(join) : "";
+    const int32_t long_y = join != NULL ? lv_obj_get_y(join) : -1;
+
+    SETUP_CHECK(join != NULL && lv_label_get_long_mode(join) == LV_LABEL_LONG_DOT &&
+                    setup_row_is_one_line(join),
+                "a maximum-length SSID leaves the join row one line high");
+    SETUP_CHECK(setup_rows_clear(join, security),
+                "the join row stays clear of the security row");
+    /* The height is what makes the dots happen at all, so an SSID that is
+     * merely narrow enough to fit would pass the two checks above without
+     * proving anything about the constraint under test. */
+    SETUP_CHECK(strstr(long_text, "...") != NULL,
+                "an SSID wider than the card truncates with an ellipsis");
+    hide_setup_overlay(NULL);
+
+    overlay = setup_selftest_build("slate-a1b2c3", "panel-setup-key", false);
+    join = overlay != NULL ? setup_find_label(overlay, "1   Scan to join") : NULL;
+    security = overlay != NULL ? setup_find_label(overlay, "Password   ") : NULL;
+
+    SETUP_CHECK(join != NULL &&
+                    strcmp(lv_label_get_text(join), "1   Scan to join slate-a1b2c3") == 0 &&
+                    setup_row_is_one_line(join) && lv_obj_get_y(join) == long_y,
+                "a short SSID renders in full and does not move");
+    SETUP_CHECK(setup_rows_clear(join, security) && security != NULL &&
+                    strcmp(lv_label_get_text(security), "Password   panel-setup-key") == 0,
+                "the security row still carries the provisioned passphrase");
+    hide_setup_overlay(NULL);
+
+    /* §9.4's banner is LV_LABEL_LONG_WRAP by intent and is outside this
+     * verifier's subject. Measure it while the fixture is already here: its
+     * password row is 29 px below the join row, so an SSID that wraps would
+     * land in it, and that is a follow-up rather than something to assert. */
+    overlay = setup_selftest_build(SETUP_TEST_SSID, "", true);
+    lv_obj_t *banner_join = overlay != NULL ? setup_find_label(overlay, "Scan to join") : NULL;
+    lv_obj_t *banner_security =
+        overlay != NULL ? setup_find_label(overlay, "No Wi-Fi password") : NULL;
+    ESP_LOGI(TAG,
+             "selftest: recovery banner join row %" PRId32 " px high, %" PRId32 " px of room",
+             banner_join != NULL ? lv_obj_get_height(banner_join) : -1,
+             banner_join != NULL && banner_security != NULL
+                 ? lv_obj_get_y(banner_security) - lv_obj_get_y(banner_join)
+                 : -1);
+    hide_setup_overlay(NULL);
+
+    /* The fixtures leave the backlight on, which is what §9.4 asks of a real
+     * card anyway. What must not survive is the presentation itself: while it
+     * is active §3.3's dimming is refused. */
+    SETUP_CHECK(!slate_display_setup_active(),
+                "the fixtures leave no setup presentation behind");
+
+    ESP_LOGI(TAG, "selftest: %u check(s), %u failure(s)", checks, failures);
+#undef SETUP_CHECK
+    return failures == 0 ? ESP_OK : ESP_FAIL;
+}
+
+static void setup_selftest_work(void *ctx)
+{
+    setup_selftest_request_t *request = ctx;
+    request->result = setup_selftest_on_task();
+    xSemaphoreGive(request->done);
+}
+
+esp_err_t slate_display_selftest(void)
+{
+    if (!s_ready) {
+        ESP_LOGW(TAG, "setup selftest skipped: the panel did not initialise");
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* §9.4 makes the card on screen a recovery mechanism. A panel that really
+     * cannot reach its router must not have that replaced by a fixture and
+     * then removed, so the verifier declines rather than competing with it. */
+    if (slate_display_setup_active()) {
+        ESP_LOGW(TAG, "setup selftest skipped: a setup presentation is on screen");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    if (done == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    setup_selftest_request_t request = {.done = done, .result = ESP_ERR_INVALID_STATE};
+    esp_err_t err = slate_display_post(setup_selftest_work, &request, 1000);
+    if (err == ESP_OK) {
+        xSemaphoreTake(done, portMAX_DELAY);
+        err = request.result;
+    }
+    vSemaphoreDelete(done);
+    return err;
+}
+
+#endif /* SLATE_DISPLAY_SELFTEST */
