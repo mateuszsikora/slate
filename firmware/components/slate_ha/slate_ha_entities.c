@@ -6,9 +6,11 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef SLATE_HA_SELFTEST
+#include <stdio.h> /* snprintf, for building fixture JSON in the self-test only */
+#endif
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -1109,8 +1111,8 @@ esp_err_t slate_ha_entities_selftest(void)
         const char *state;
         const char *name;
     } unanswered[] = {
-        {"unknown", "unknown binary_sensor is not available"},
-        {"unavailable", "unavailable binary_sensor keeps its last word"},
+        {"unknown", "unknown binary_sensor goes stale keeping its last word"},
+        {"unavailable", "unavailable binary_sensor goes stale keeping its last word"},
     };
     for (size_t i = 0; i < sizeof(unanswered) / sizeof(unanswered[0]); i++) {
         char diff[128];
@@ -1130,17 +1132,34 @@ esp_err_t slate_ha_entities_selftest(void)
               unanswered[i].name);
     }
 
-    /* One `device_class` per distinct phrasing, both ways round, plus the
-     * fallback for a contact that declares no class at all. The words are
-     * asserted here rather than in the table so that changing one is a visible
-     * change to a test, not a silent change to what the wall says. */
+    /*
+     * Every `device_class` the adapter knows, both ways round, plus the
+     * fallback for a contact that declares no class at all.
+     *
+     * The words are spelled out here rather than read from k_binary_phrasings
+     * on purpose: a test that iterated the production table would assert it
+     * against itself and a typo would pass. Written out, changing a word is a
+     * visible change to a test, which is what DESIGN.md §5.6 promises. The
+     * count is asserted below so the duplication cannot go stale in the other
+     * direction either — a class added to the table without a case here fails.
+     */
     static const struct {
         const char *device_class;
         const char *on;
         const char *off;
     } phrasings[] = {
         {"door", "Open", "Closed"},
+        {"garage_door", "Open", "Closed"},
+        {"opening", "Open", "Closed"},
+        {"window", "Open", "Closed"},
+        {"carbon_monoxide", "Detected", "Clear"},
+        {"gas", "Detected", "Clear"},
         {"motion", "Detected", "Clear"},
+        {"occupancy", "Detected", "Clear"},
+        {"smoke", "Detected", "Clear"},
+        {"sound", "Detected", "Clear"},
+        {"tamper", "Detected", "Clear"},
+        {"vibration", "Detected", "Clear"},
         {"moisture", "Wet", "Dry"},
         {"presence", "Home", "Away"},
         {"lock", "Unlocked", "Locked"},
@@ -1159,6 +1178,10 @@ esp_err_t slate_ha_entities_selftest(void)
         {"update", "Update available", "Up-to-date"},
         {NULL, "On", "Off"},
     };
+    /* -1 for the NULL fallback, which is not a row of the table. */
+    CHECK(sizeof(phrasings) / sizeof(phrasings[0]) - 1 ==
+              sizeof(k_binary_phrasings) / sizeof(k_binary_phrasings[0]),
+          "every known device_class has a phrasing case");
     bool phrasings_ok = true;
     for (size_t i = 0; i < sizeof(phrasings) / sizeof(phrasings[0]); i++) {
         for (unsigned on = 0; on <= 1; on++) {
@@ -1191,7 +1214,7 @@ esp_err_t slate_ha_entities_selftest(void)
             }
         }
     }
-    CHECK(phrasings_ok, "one device_class per binary_sensor phrasing reads its words");
+    CHECK(phrasings_ok, "every binary_sensor device_class reads its words");
 
     cJSON *change = cJSON_Parse(
         "{\"c\":{\"light.kitchen\":{\"+\":{\"s\":\"off\","

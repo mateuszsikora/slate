@@ -279,6 +279,23 @@ itself shows:
 An entity that reports `unknown` or `unavailable` is stale and renders a dash,
 not `Off`. A contact that has not answered is not a closed door.
 
+**Give a `binary_sensor` tile its own `icon` at 2×1 and larger.** The icon a
+`sensor` tile picks for itself comes from `measurement` — `temperature`,
+`humidity`, `pressure`, `power` — and a contact has none of those: its
+`device_class` names what it means, not what it measures. With no `icon` set,
+the tile therefore falls back to a question mark beside the word. The 1×1 size
+carries no icon at all and needs nothing.
+
+```json
+{"id": "t1", "type": "sensor", "pos": [0, 0], "size": [2, 1],
+ "binding": {"provider": "ha", "resource": "binary_sensor.front_door"},
+ "label": "Front door", "icon": "door-closed"}
+```
+
+`door-closed`, `window-open-variant`, `motion-sensor`, `water`, `garage` and
+`power-plug` are the names in `tools/fonts/icons.txt` that suit the common
+contacts.
+
 ## Themes
 
 Two ship in firmware: `midnight` (dark) and `minimal-light`. Themes are not part
