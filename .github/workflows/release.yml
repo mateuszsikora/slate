@@ -5,12 +5,16 @@
 # flasher/index.html to GitHub Pages pointing at those images. Nothing here is manual,
 # because the alternative is a page and a release that disagree about what is installed.
 #
+# The deployment is also §11.4's update channel: `ota/manifest.json` beside the page
+# names this release's image, its SHA-256 and the board it is for, and that is the file
+# a panel checks once a day. It is assembled by tools/flasher/build.sh from the images
+# the page already carries, so the two cannot disagree about what this release is.
+#
 # What this deliberately does not do:
 #
-# It does not sign anything and the device does not check for it. §11.4's release OTA is
-# #37 and a separate mechanism; until it lands, "receives updates" is a person visiting
-# this page again or running tools/ota/upload.sh. The README says so rather than letting
-# a download page imply a channel that does not exist.
+# It does not sign anything. The panel verifies the manifest's SHA-256 over TLS against
+# the certificate bundle (#37), which is what §11.4 asks for; a detached signature and
+# secure boot are a separate decision with an eFuse and a key custody story attached.
 #
 # It does not publish a second, merged factory image. The four images below are the ones
 # ESP-IDF produced together with the offsets it recorded for them, and a merged blob is a
@@ -281,8 +285,21 @@ jobs:
 
       # The offsets in the manifest come out of flash_project_args and are checked back
       # against firmware/partitions.csv inside this script; see tools/flasher/manifest.py.
-      - name: Build the flashing page
+      #
+      # SLATE_CHANNEL_BASE_URL is where this directory is about to be published, derived
+      # from the repository rather than taken from the default in the script — it ends up
+      # inside §11.4's manifest as the absolute URL panels download the image from, and a
+      # fork that published this page under its own name would otherwise hand its users a
+      # channel pointing back here.
+      - name: Build the flashing page and the update channel
+        env:
+          SLATE_CHANNEL_BASE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
         run: tools/flasher/build.sh "${{ needs.version.outputs.version }}" firmware/build-release
+
+      # The channel is what an installed panel will act on unattended, so it is printed
+      # into the run's log where a failed update can be read against it afterwards.
+      - name: Show the update channel
+        run: cat flasher/dist/ota/manifest.json
 
       - uses: actions/upload-pages-artifact@v5
         with:

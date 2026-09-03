@@ -1142,6 +1142,34 @@ summary:focus-visible,
   font-size: 0.84rem;
 }
 
+/* --- Firmware updates (§11.4) -------------------------------------------- */
+
+.update__state {
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.update__note {
+  margin: 10px 0 0;
+  font-size: 0.78rem;
+  color: var(--text-lo);
+}
+
+.update__progress {
+  margin-top: 10px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  overflow: hidden;
+}
+
+.update__progress span {
+  display: block;
+  height: 100%;
+  background: var(--ok);
+  transition: width 0.4s ease;
+}
+
 .device-actions {
   display: flex;
   flex-wrap: wrap;

@@ -58,9 +58,8 @@ document](docs/DESIGN.md):
   are in. The panel's QR contains only its address; authentication happens in
   the editor and never puts a credential in a URL.
 - **M8 — the release path exists; the first release has not been tagged.**
-  Pushing a `v*` tag builds the image, publishes it with checksums and deploys
-  the browser installer. One piece is still open: the panel does not fetch
-  updates on its own ([#37](https://github.com/mateuszsikora/slate/issues/37)).
+  Pushing a `v*` tag builds the image, publishes it with checksums, and deploys
+  the browser installer beside the manifest panels check for updates against.
   Enclosures are settled by pointing at a design that has been printed and
   fitted rather than by publishing one.
 
@@ -251,8 +250,35 @@ the next published snapshot showing the new value.
 
 ## Updating
 
-**Over WiFi, which is the normal way.** The panel accepts an image on an
-authenticated endpoint, which is what `tools/ota/upload.sh` posts to:
+**The panel offers releases, and installs one when you say so.** Once a day it
+fetches a small manifest over HTTPS from the same place the browser installer is
+published, and compares it with what it is running. Nothing is downloaded by
+that check and nothing is installed by it: the editor's **Firmware updates**
+panel is where an available release appears, and pressing *Install* is what
+starts the download. The panel verifies the SHA-256 the manifest names before it
+makes the new image bootable, then restarts — a wall panel does not get to
+reboot itself in the middle of an evening. If the new firmware does not come
+back, the bootloader returns to the previous one on its own.
+
+The dashboard, authentication state, External API keys, Home Assistant
+credentials and WiFi settings live outside the application partitions and are
+kept across an update.
+
+The same three things are available to a script:
+
+```bash
+curl -sS -H "Authorization: Bearer $TOKEN" http://192.168.1.42/api/v1/update
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" http://192.168.1.42/api/v1/update/check
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"version":"1.2.0"}' http://192.168.1.42/api/v1/update/install
+```
+
+Until a version is tagged there is nothing on that channel, and the panel says
+so as an unreachable one.
+
+**Over WiFi from your own build**, which is what development uses. The panel
+accepts an image on an authenticated endpoint, which is what
+`tools/ota/upload.sh` posts to:
 
 ```bash
 SLATE_TOKEN=<administrator session credential> tools/ota/upload.sh 192.168.1.42
@@ -266,13 +292,9 @@ successful exit means the image booted rather than merely uploaded. A freshly
 installed image that panics or never answers is rolled back to the previous one
 by the bootloader.
 
-The configuration, authentication state, External API keys and WiFi credentials
-live outside the application partitions and are not touched by an update.
-
-**The panel does not check for updates on its own.** There is no manifest, no
-signature and no HTTPS on this path; it is a development mechanism that a
-release can also travel over. The signed release channel is
-[#37](https://github.com/mateuszsikora/slate/issues/37).
+This path has no manifest, no signature and no HTTPS, and it is not meant to:
+it is a development mechanism between a desk and a wall, on a LAN, behind the
+device token. The channel above is what a panel updates itself from.
 
 ## Security
 

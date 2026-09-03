@@ -95,6 +95,9 @@ any endpoint that takes a body are `empty_body`, `invalid_json`, `too_large`
 | POST | `/mode` | `normal` or `edit` |
 | POST | `/identify` | flash the screen, to tell two panels apart |
 | POST | `/ota/upload` | install a firmware image |
+| GET | `/update` | the release channel: what is running, what is offered |
+| POST | `/update/check` | look at the manifest now |
+| POST | `/update/install` | install the offered release and restart |
 | GET | `/coredump` | the last crash dump |
 | POST | `/factory_reset` | erase everything and reboot |
 
@@ -349,8 +352,74 @@ Refusals: `not_an_image`, `invalid_image`, `truncated`, `pending_verify`,
 changes what the panel boots.
 
 `tools/ota/upload.sh` is this endpoint with the checks worth having around it.
-This is a development mechanism: no manifest, no signature, no HTTPS. The signed
-release channel is [#37](https://github.com/mateuszsikora/slate/issues/37).
+This is a development mechanism: no manifest, no versioning, no HTTPS. The
+release channel below is the other one.
+
+### Firmware updates
+
+```json
+{
+  "current": "1.0.0",
+  "manifest_url": "https://mateuszsikora.github.io/slate/ota/manifest.json",
+  "state": "idle",
+  "checked_s_ago": 3600,
+  "available": {"version": "1.1.0", "url": "https://…/firmware/1.1.0/slate.bin",
+                "sha256": "…"},
+  "error": null,
+  "progress": null
+}
+```
+
+`GET /update` is the whole channel as the panel sees it. `state` is `idle`,
+`checking`, `downloading` or `installed`; `progress` is `{"received": …,
+"total": …}` while an image is arriving and `null` otherwise. `available` is an
+**offer**, not a staged image: the panel has read a few hundred bytes of
+manifest and compared them with itself. `error` is the last failure in the
+vocabulary below, and survives beside an offer that is still valid — a check
+that could not reach the server did not make the release stop existing.
+`manifest_url` is `null` on a build with no channel, which is what
+`-DSLATE_UPDATE_MANIFEST_URL='""'` produces.
+
+The manifest is [`DESIGN.md`](DESIGN.md) §11.4's five fields, published by the
+release workflow beside the browser installer:
+
+```json
+{"version": "1.1.0", "board": "waveshare-s3-touch-7",
+ "url": "https://…/firmware/1.1.0/slate.bin", "sha256": "…", "min_schema": 1}
+```
+
+A release is offered only when `board` is this panel's model, `min_schema` is no
+higher than its `schema_max`, `url` is `https://`, and `version` is newer than
+the running one. A running version that is not `MAJOR.MINOR.PATCH[-suffix]` is a
+development build, and any release is newer than one of those.
+
+`POST /update/check` and `POST /update/install` both answer `202 Accepted` with
+`{}` and do the work afterwards — the panel serves HTTP from one task, and a TLS
+fetch on it would stop the rest of the API for seconds. Poll `GET /update` for
+the outcome. `check` takes no body. `install` takes `{"version": "1.1.0"}`,
+which must be the version being offered: the release somebody accepted is the
+release that gets installed, even if the channel moved in between. An absent
+body installs whatever is offered.
+
+The download is verified before it can boot. The image's header must be an
+ESP32-S3 application image, its own version must be the one the manifest
+promised, and its SHA-256 must be the manifest's — checked over the stream, so
+the boot partition is moved only for an image that passed. A failure here costs
+the *other* firmware slot and never the running one, exactly as
+`POST /ota/upload` does. The new image then gets one boot to answer `GET /info`
+before the bootloader takes it back.
+
+Refusals from the two `POST`s: `409` (`busy`, `no_update`, `version_mismatch`),
+`503 no_channel`, and the usual body errors (`unexpected_body`, `invalid_json`,
+`invalid_version`, `too_large`, `truncated`). Failures reported in `error`:
+`offline`, `unreachable`, `manifest_invalid`, `board_mismatch`,
+`schema_too_new`, `insecure_url`, `download_failed`, `checksum_mismatch`,
+`not_an_image`, `version_mismatch`, `invalid_image`, `too_large`,
+`no_ota_partition`, `pending_verify`, `ota_failed`, `out_of_memory`.
+
+Nothing on this path is automatic except the daily check, and the check
+downloads nothing. Installation is always a request, and always ends in a
+restart the person who asked for it chose the moment of.
 
 ### `GET /coredump`
 

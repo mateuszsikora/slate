@@ -85,11 +85,42 @@
 
 #pragma once
 
+#include <stddef.h>
+
+#include "esp_app_desc.h"
+#include "esp_app_format.h"
 #include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * How much of an image has to be in hand before it can be recognised: the image
+ * header, the first segment header, and the application description ESP-IDF
+ * places immediately after them.
+ */
+#define SLATE_OTA_IMAGE_PREFIX_BYTES \
+    (sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t))
+
+/**
+ * @brief Recognise the beginning of an application image for this board.
+ *
+ * @param prefix the first bytes of a candidate image
+ * @param len    how many of them are in hand
+ * @return the image's application description, or NULL when @p prefix is too
+ *         short, is not an ESP-IDF image, or is an image for another chip.
+ *
+ * The returned pointer is into @p prefix and lives exactly as long as it does;
+ * `version` is a fixed-size array that need not be NUL-terminated.
+ *
+ * Shared rather than duplicated because both ways an image reaches this device
+ * — §11.1's upload and §11.4's release channel — must refuse the same three
+ * things before a partition is erased, and two copies of that rule is one copy
+ * that can be relaxed by accident. An ESP32 image on an ESP32-S3 is a boot
+ * loop, and it is a plain mistake to make with two boards on one desk.
+ */
+const esp_app_desc_t *slate_ota_image_prefix(const void *prefix, size_t len);
 
 /**
  * @brief Register `POST /api/v1/ota/upload`.

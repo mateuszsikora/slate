@@ -19,7 +19,19 @@ extern "C" {
 #endif
 
 #define SLATE_CONFIG_SCHEMA_MAX 1
-#define SLATE_BAR_SLOT_COUNT    12
+
+/*
+ * The oldest schema a panel has to support before this firmware may be
+ * installed on it, and what §11.4's manifest publishes as `min_schema`:
+ * `tools/ota/manifest.py` reads this number out of this header rather than
+ * writing a second copy of it down. A panel compares it against its own
+ * SCHEMA_MAX — §4.1's `schema_max` — and declines a release it could not render
+ * its stored document with. The two are the same number while one schema
+ * exists; they separate the day a release stops accepting schema 1.
+ */
+#define SLATE_CONFIG_SCHEMA_MIN 1
+
+#define SLATE_BAR_SLOT_COUNT 12
 
 typedef enum {
     SLATE_COMPONENT_UNKNOWN = 0,

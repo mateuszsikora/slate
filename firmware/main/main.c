@@ -44,6 +44,7 @@
 #include "slate_store.h"
 #include "slate_time.h"
 #include "slate_ui.h"
+#include "slate_update.h"
 #include "slate_wifi.h"
 #include "slate_ws.h"
 
@@ -612,6 +613,15 @@ static void start_api(void)
     err = slate_ota_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "development OTA unavailable: %s — continuing", esp_err_to_name(err));
+    }
+
+    /* §11.4's release channel, beside the endpoint it has nothing else in
+     * common with. Its first look at the manifest is a minute from now, by
+     * which time start_network() below has had the station up for most of it;
+     * nothing here talks to the network during boot. */
+    err = slate_update_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "release updates unavailable: %s — continuing", esp_err_to_name(err));
     }
 
     /* §11.3's other half of the same idea: OTA is how firmware gets onto a panel

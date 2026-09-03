@@ -115,6 +115,23 @@ export interface DeviceStatus {
   storage_reset: boolean
 }
 
+/**
+ * `GET /update` — §11.4's release channel as the panel sees it.
+ *
+ * `available` is an offer and nothing more: the panel has downloaded a few
+ * hundred bytes of manifest and compared them against itself. Nothing is
+ * installed, and nothing reboots, until `POST /update/install`.
+ */
+export interface UpdateStatus {
+  current: string
+  manifest_url: string | null
+  state: 'idle' | 'checking' | 'downloading' | 'installed'
+  checked_s_ago: number | null
+  available: { version: string; url: string; sha256: string } | null
+  error: string | null
+  progress: { received: number; total: number } | null
+}
+
 export interface Tile {
   id: string
   type: string
@@ -286,6 +303,25 @@ export class DeviceClient {
     return this.request<void>('POST', '/factory_reset', {
       timeoutMs: FACTORY_RESET_TIMEOUT_MS,
     })
+  }
+
+  /** `GET /update` — what is running, what is offered, and what the last job did. */
+  update(): Promise<UpdateStatus> {
+    return this.request<UpdateStatus>('GET', '/update')
+  }
+
+  /** Ask for a check now rather than waiting for the daily one. Answers before it runs. */
+  checkForUpdate(): Promise<void> {
+    return this.request<void>('POST', '/update/check')
+  }
+
+  /**
+   * Install the offered release, naming it. The panel refuses a version other
+   * than the one it is offering, so the release somebody accepted is the
+   * release that gets installed even if the channel moved in between.
+   */
+  installUpdate(version: string): Promise<void> {
+    return this.request<void>('POST', '/update/install', { body: JSON.stringify({ version }) })
   }
 
   resources(provider: string): Promise<Resource[]> {

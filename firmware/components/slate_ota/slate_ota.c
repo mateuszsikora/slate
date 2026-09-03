@@ -42,12 +42,11 @@ static const char *TAG = "ota";
 #define CHUNK_BYTES 4096
 
 /*
- * What has to be in hand before esp_ota_begin() is allowed to erase anything:
- * the image header, the first segment header, and the application description
- * that ESP-IDF places immediately after them.
+ * What has to be in hand before esp_ota_begin() is allowed to erase anything.
+ * The number and the check that reads it are in slate_ota.h, because #37's
+ * release channel has to refuse the same bytes for the same reason.
  */
-#define IMAGE_PREFIX_BYTES \
-    (sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t))
+#define IMAGE_PREFIX_BYTES SLATE_OTA_IMAGE_PREFIX_BYTES
 
 _Static_assert(CHUNK_BYTES >= IMAGE_PREFIX_BYTES,
                "the first read must be able to hold the whole image prefix");
@@ -490,11 +489,16 @@ static size_t chunk_want(size_t total, size_t received)
  * being asked when someone flashes twice in a minute and wonders which one is
  * running.
  */
-static const esp_app_desc_t *image_prefix_description(const char *prefix)
+const esp_app_desc_t *slate_ota_image_prefix(const void *prefix, size_t len)
 {
-    const esp_image_header_t *header = (const esp_image_header_t *) prefix;
+    if (len < IMAGE_PREFIX_BYTES) {
+        return NULL;
+    }
+
+    const char *bytes = prefix;
+    const esp_image_header_t *header = (const esp_image_header_t *) bytes;
     const esp_app_desc_t *description =
-        (const esp_app_desc_t *) (prefix + sizeof(esp_image_header_t) +
+        (const esp_app_desc_t *) (bytes + sizeof(esp_image_header_t) +
                                   sizeof(esp_image_segment_header_t));
 
     if (header->magic != ESP_IMAGE_HEADER_MAGIC) {
@@ -564,8 +568,7 @@ static esp_err_t upload_handler(httpd_req_t *req)
         return slate_api_refuse_and_close(req, "400 Bad Request", "truncated");
     }
 
-    const esp_app_desc_t *incoming =
-        received < IMAGE_PREFIX_BYTES ? NULL : image_prefix_description(buffer);
+    const esp_app_desc_t *incoming = slate_ota_image_prefix(buffer, received);
     if (incoming == NULL) {
         ESP_LOGW(TAG, "body is not an %s application image", CONFIG_IDF_TARGET);
         free(buffer);

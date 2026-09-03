@@ -21,6 +21,7 @@ import { IntegrationsDialog } from './ui/IntegrationsDialog'
 import { LogPanel, type LogLine } from './ui/LogPanel'
 import { SettingsDialog } from './ui/SettingsDialog'
 import { TopBar } from './ui/TopBar'
+import { UpdatePanel } from './ui/UpdatePanel'
 import { Unlock } from './ui/Unlock'
 import { Unreachable } from './ui/Unreachable'
 import { Workspace } from './ui/Workspace'
@@ -347,6 +348,32 @@ export function App() {
     await client(token).identify()
   }, [client, token])
 
+  /* §11.4. The panel owns the schedule and the decision to install; these three
+   * only read it and carry one accept. */
+  const fetchUpdate = useCallback(() => {
+    if (token === null) {
+      return Promise.reject(new Error('no session'))
+    }
+    return client(token).update()
+  }, [client, token])
+
+  const checkForUpdate = useCallback(async () => {
+    if (token === null) {
+      throw new Error('no session')
+    }
+    await client(token).checkForUpdate()
+  }, [client, token])
+
+  const installUpdate = useCallback(
+    async (version: string) => {
+      if (token === null) {
+        throw new Error('no session')
+      }
+      await client(token).installUpdate(version)
+    },
+    [client, token],
+  )
+
   const factoryReset = useCallback(async () => {
     if (token === null) {
       throw new Error('no session')
@@ -631,6 +658,11 @@ export function App() {
             heartbeat={heartbeat}
             onIdentify={identifyPanel}
             onFactoryReset={factoryReset}
+          />
+          <UpdatePanel
+            onFetch={fetchUpdate}
+            onCheck={checkForUpdate}
+            onInstall={installUpdate}
           />
           <LogPanel lines={logs} connection={connection} />
         </aside>
