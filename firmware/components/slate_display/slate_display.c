@@ -924,6 +924,10 @@ static lv_obj_t *setup_label(lv_obj_t *parent, const char *text, uint32_t color,
  */
 static void setup_label_one_line(lv_obj_t *label)
 {
+    /* No NULL guard, unlike the slate_ui twin: there make_label() can return
+     * NULL and its callers test for it, here every row is dereferenced by the
+     * lv_obj_align() on the next line. A guard would only suggest a safety
+     * this call site does not have. */
     const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     /* Against the content box, not the outer bounds: a row that later gains
@@ -1488,6 +1492,17 @@ void slate_display_heap_metrics(slate_display_heap_metrics_t *out)
 _Static_assert(sizeof(SETUP_TEST_SSID) == SLATE_DISPLAY_SETUP_NETWORK_LEN,
                "the setup fixture must be a maximum-length SSID");
 
+/* The passphrase row is the reachable half of the same question: §9.2's
+ * SLATE_SETUP_AP_PASSWORD is a build-time knob, so a panel really can be
+ * carrying one of these. It is not held to one line and must not be — a
+ * truncated passphrase cannot be typed, which is the whole reason it is on the
+ * screen. What is checked is that the rows below it stay where they are, so a
+ * value that needs two lines gets two lines instead of the address row. */
+#define SETUP_TEST_PASSPHRASE \
+    "correct-horse-battery-staple-correct-horse-battery-staple-abcdef"
+_Static_assert(sizeof(SETUP_TEST_PASSPHRASE) == SLATE_DISPLAY_SETUP_PASSPHRASE_LEN,
+               "the setup fixture must be a maximum-length passphrase");
+
 typedef struct {
     SemaphoreHandle_t done;
     esp_err_t result;
@@ -1606,24 +1621,48 @@ static esp_err_t setup_selftest_on_task(void)
                 "the security row still carries the provisioned passphrase");
     hide_setup_overlay(NULL);
 
+    /* The card gives the passphrase 46 px before the "2  Open http://" row —
+     * two caption lines, which is what a 64-byte value needs at 408 px. */
+    overlay = setup_selftest_build("slate-a1b2c3", SETUP_TEST_PASSPHRASE, false);
+    security = overlay != NULL ? setup_find_label(overlay, "Password   ") : NULL;
+    lv_obj_t *open_row = overlay != NULL ? setup_find_label(overlay, "2   Open http://") : NULL;
+
+    SETUP_CHECK(security != NULL &&
+                    strcmp(lv_label_get_text(security),
+                           "Password   " SETUP_TEST_PASSPHRASE) == 0,
+                "a maximum-length passphrase is printed in full");
+    SETUP_CHECK(setup_rows_clear(security, open_row),
+                "the card's passphrase row clears the address row");
+    hide_setup_overlay(NULL);
+
     /* §9.4's banner keeps LV_LABEL_LONG_WRAP: it is a different presentation
      * and changing it is not this issue's subject. What it does not get to be
      * is unwatched. A maximum-length SSID fits its wider column with 3 px to
      * spare, and a type step or a moved y constant would silently spend that
      * and put the join row back on the passphrase — so the margin is asserted
      * rather than logged, and the measurement goes out beside it. */
-    overlay = setup_selftest_build(SETUP_TEST_SSID, "", true);
+    overlay = setup_selftest_build(SETUP_TEST_SSID, SETUP_TEST_PASSPHRASE, true);
     lv_obj_t *banner_join = overlay != NULL ? setup_find_label(overlay, "Scan to join") : NULL;
-    lv_obj_t *banner_security =
-        overlay != NULL ? setup_find_label(overlay, "No Wi-Fi password") : NULL;
+    lv_obj_t *banner_security = overlay != NULL ? setup_find_label(overlay, "Password: ") : NULL;
+    lv_obj_t *banner_address =
+        overlay != NULL ? setup_find_label(overlay, "Or open http://") : NULL;
     ESP_LOGI(TAG,
-             "selftest: recovery banner join row %" PRId32 " px high, %" PRId32 " px of room",
+             "selftest: recovery banner join %" PRId32 " px in %" PRId32 ", "
+             "passphrase %" PRId32 " px in %" PRId32,
              banner_join != NULL ? lv_obj_get_height(banner_join) : -1,
              banner_join != NULL && banner_security != NULL
                  ? lv_obj_get_y(banner_security) - lv_obj_get_y(banner_join)
+                 : -1,
+             banner_security != NULL ? lv_obj_get_height(banner_security) : -1,
+             banner_security != NULL && banner_address != NULL
+                 ? lv_obj_get_y(banner_address) - lv_obj_get_y(banner_security)
                  : -1);
     SETUP_CHECK(setup_rows_clear(banner_join, banner_security),
                 "the recovery banner join row clears its security row");
+    /* 24 px here against the card's 46 — the banner is the tighter of the two
+     * presentations and takes the same 64-byte value. */
+    SETUP_CHECK(setup_rows_clear(banner_security, banner_address),
+                "the banner's passphrase row clears the address row");
     hide_setup_overlay(NULL);
 
     /* The fixtures leave the backlight on, which is what §9.4 asks of a real
@@ -1650,9 +1689,12 @@ esp_err_t slate_display_selftest(void)
         ESP_LOGW(TAG, "setup selftest skipped: the panel did not initialise");
         return ESP_ERR_INVALID_STATE;
     }
-    /* Whether a real setup card is up is decided on the LVGL task, not here:
-     * §9.4's card is raised asynchronously and this check would be stale by
-     * the time the work ran. */
+    /* The two preconditions are checked in different places on purpose.
+     * s_ready is written once during initialisation and never again, so
+     * reading it here is as good as reading it there. Whether a setup card is
+     * on screen is not: §9.4 raises it asynchronously, so that one is only
+     * true where it is acted on, and the work is queued even when it will
+     * immediately decline. */
     SemaphoreHandle_t done = xSemaphoreCreateBinary();
     if (done == NULL) {
         return ESP_ERR_NO_MEM;

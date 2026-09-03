@@ -2962,6 +2962,43 @@ static esp_err_t selftest_on_task(void)
         }
     }
 
+    /* The editor-link screen's address row is the other label held to one line.
+     * Its value is an IPv4 literal with room to spare on a 404 px row, which is
+     * precisely the case the height must leave alone: one line of text is
+     * already exactly one line high. Built detached and destroyed again, so no
+     * presentation on screen is disturbed.
+     *
+     * Between the warm-up and the measured cycles. Behind 500 cycles it is a
+     * check that a panel whose update client reboots it mid-run never reaches;
+     * ahead of the warm-up it runs about a second before the station has an
+     * address, and skips instead. The warm-up absorbs the one-off allocation
+     * before any heap baseline and buys the DHCP lease the time it needs. */
+    ui_tree_t *editor_link = build_message_tree("Dashboard unavailable",
+                                               "Open the editor to arrange this panel.");
+    lv_obj_t *address_row = NULL;
+    lv_obj_t *hint_row = NULL;
+    if (editor_link != NULL) {
+        lv_obj_update_layout(editor_link->screen);
+        address_row = find_label_by_prefix(editor_link->screen, "Open http://");
+        hint_row = find_label_by_prefix(editor_link->screen, "Scan to open");
+    }
+    if (address_row == NULL && hint_row == NULL) {
+        /* No station address means no QR, no address row and nothing to check —
+         * the screen is then the message alone. */
+        ESP_LOGW(TAG, "selftest: %-48s SKIP", "editor-link address row (no station address)");
+    } else {
+        UI_CHECK(address_row != NULL && hint_row != NULL &&
+                     lv_label_get_long_mode(address_row) == LV_LABEL_LONG_DOT &&
+                     label_is_one_line(address_row) &&
+                     strstr(lv_label_get_text(address_row), "...") == NULL &&
+                     lv_obj_get_y(address_row) + lv_obj_get_height(address_row) <=
+                         lv_obj_get_y(hint_row),
+                 "the editor address renders in full and clears its hint");
+    }
+    if (editor_link != NULL) {
+        tree_destroy(editor_link);
+    }
+
     heap_sample_t endpoint_start;
     sample_heap(&endpoint_start);
 
@@ -4222,37 +4259,6 @@ static esp_err_t selftest_on_task(void)
     }
     UI_CHECK(publish_gesture_inspection_states() == ESP_OK,
              "manual gesture inspection dashboard left populated");
-
-    /* The editor-link screen's address row is the other label held to one line.
-     * Its value is an IPv4 literal with room to spare on a 404 px row, which is
-     * precisely the case the height must leave alone: one line of text is
-     * already exactly one line high. Built detached and destroyed again, so the
-     * dashboard left on screen above is not disturbed. */
-    ui_tree_t *editor_link = build_message_tree("Dashboard unavailable",
-                                               "Open the editor to arrange this panel.");
-    lv_obj_t *address_row = NULL;
-    lv_obj_t *hint_row = NULL;
-    if (editor_link != NULL) {
-        lv_obj_update_layout(editor_link->screen);
-        address_row = find_label_by_prefix(editor_link->screen, "Open http://");
-        hint_row = find_label_by_prefix(editor_link->screen, "Scan to open");
-    }
-    if (address_row == NULL && hint_row == NULL) {
-        /* No station address means no QR, no address row and nothing to check —
-         * the screen is then the message alone. */
-        ESP_LOGW(TAG, "selftest: %-48s SKIP", "editor-link address row (no station address)");
-    } else {
-        UI_CHECK(address_row != NULL && hint_row != NULL &&
-                     lv_label_get_long_mode(address_row) == LV_LABEL_LONG_DOT &&
-                     label_is_one_line(address_row) &&
-                     strstr(lv_label_get_text(address_row), "...") == NULL &&
-                     lv_obj_get_y(address_row) + lv_obj_get_height(address_row) <=
-                         lv_obj_get_y(hint_row),
-                 "the editor address renders in full and clears its hint");
-    }
-    if (editor_link != NULL) {
-        tree_destroy(editor_link);
-    }
 
     ESP_LOGI(TAG, "selftest: %u check(s), %u failure(s)", checks, failures);
 #undef UI_CHECK
