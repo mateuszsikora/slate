@@ -49,8 +49,9 @@ export function assembleHaResources(payloads: HaCatalogPayloads): Resource[] {
     const rawState = text(item?.['state'])
     if (resource === undefined || rawState === undefined) continue
 
-    const kind = resourceKind(resource)
-    if (kind === undefined) continue
+    const domain = resourceDomain(resource)
+    const kind = domain === undefined ? undefined : resourceKind(domain)
+    if (domain === undefined || kind === undefined) continue
 
     const attributes = record(item?.['attributes'])
     const meta = entities.get(resource)
@@ -64,7 +65,7 @@ export function assembleHaResources(payloads: HaCatalogPayloads): Resource[] {
       kind,
       name,
       area,
-      available: resourceAvailable(kind, rawState),
+      available: resourceAvailable(domain, rawState),
       state: {},
     })
   }
@@ -72,18 +73,30 @@ export function assembleHaResources(payloads: HaCatalogPayloads): Resource[] {
   return resources
 }
 
-function resourceKind(resource: string): Resource['kind'] | undefined {
+function resourceDomain(resource: string): string | undefined {
   const dot = resource.indexOf('.')
   if (dot <= 0 || dot === resource.length - 1) return undefined
-  const domain = resource.slice(0, dot)
-  return domain === 'light' || domain === 'cover' || domain === 'sensor' || domain === 'scene'
-    ? domain
-    : undefined
+  return resource.slice(0, dot)
 }
 
-function resourceAvailable(kind: string, state: string): boolean {
-  if (kind === 'light') return state === 'on' || state === 'off'
-  if (kind === 'cover') {
+/** The same four kinds the firmware adapter publishes — see design.md §5.6. */
+function resourceKind(domain: string): Resource['kind'] | undefined {
+  if (domain === 'light' || domain === 'cover' || domain === 'sensor' || domain === 'scene') {
+    return domain
+  }
+  // A binary_sensor is a read-only sensor whose value is a word, not a light:
+  // §5.2 ties `light` to a toggle a door contact cannot honour.
+  return domain === 'binary_sensor' ? 'sensor' : undefined
+}
+
+/**
+ * Keyed on the domain rather than the kind, because two domains now share
+ * `sensor` and they do not share a rule: a `sensor` may legitimately read
+ * `unknown`, while a `binary_sensor` that says so has not answered.
+ */
+function resourceAvailable(domain: string, state: string): boolean {
+  if (domain === 'light' || domain === 'binary_sensor') return state === 'on' || state === 'off'
+  if (domain === 'cover') {
     return ['open', 'closed', 'opening', 'closing', 'stopped'].includes(state)
   }
   return state !== 'unavailable'

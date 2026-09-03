@@ -6,6 +6,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -357,6 +358,67 @@ static slate_measurement_t measurement(const ha_entity_t *entity)
     return SLATE_MEASUREMENT_NONE;
 }
 
+/*
+ * §5.2 keeps `kind` at four values, so a `binary_sensor` normalizes to `sensor`
+ * with a textual value rather than earning a fifth. It is not a `light`: the
+ * on/off shape would fit, but `light` carries `toggle` and `set_power` in
+ * §5.2, and a door contact cannot honour either.
+ *
+ * The meaning lives entirely in `device_class`, so the words do too. These are
+ * Home Assistant's own — the phrasing its frontend shows for each class — so
+ * the panel says what the app the user came from says. `On`/`Off` is the
+ * fallback for an absent or unrecognised class, which is also HA's.
+ */
+typedef struct {
+    const char *device_class;
+    const char *on;
+    const char *off;
+} ha_binary_phrasing_t;
+
+static const ha_binary_phrasing_t k_binary_phrasings[] = {
+    {"door", "Open", "Closed"},
+    {"garage_door", "Open", "Closed"},
+    {"opening", "Open", "Closed"},
+    {"window", "Open", "Closed"},
+    {"carbon_monoxide", "Detected", "Clear"},
+    {"gas", "Detected", "Clear"},
+    {"motion", "Detected", "Clear"},
+    {"occupancy", "Detected", "Clear"},
+    {"smoke", "Detected", "Clear"},
+    {"sound", "Detected", "Clear"},
+    {"tamper", "Detected", "Clear"},
+    {"vibration", "Detected", "Clear"},
+    {"moisture", "Wet", "Dry"},
+    {"presence", "Home", "Away"},
+    {"lock", "Unlocked", "Locked"},
+    {"connectivity", "Connected", "Disconnected"},
+    {"problem", "Problem", "OK"},
+    {"safety", "Unsafe", "Safe"},
+    {"battery", "Low", "Normal"},
+    {"battery_charging", "Charging", "Not charging"},
+    {"cold", "Cold", "Normal"},
+    {"heat", "Hot", "Normal"},
+    {"light", "Detected", "No light"},
+    {"power", "Detected", "No power"},
+    {"moving", "Moving", "Not moving"},
+    {"running", "Running", "Not running"},
+    {"plug", "Plugged in", "Unplugged"},
+    {"update", "Update available", "Up-to-date"},
+};
+
+static const char *binary_sensor_text(const ha_entity_t *entity, bool on)
+{
+    if (entity->has_device_class) {
+        for (size_t i = 0; i < sizeof(k_binary_phrasings) / sizeof(k_binary_phrasings[0]);
+             i++) {
+            if (strcmp(entity->device_class, k_binary_phrasings[i].device_class) == 0) {
+                return on ? k_binary_phrasings[i].on : k_binary_phrasings[i].off;
+            }
+        }
+    }
+    return on ? "On" : "Off";
+}
+
 static bool parse_sensor_number(const char *text, double *out)
 {
     if (text == NULL || text[0] == '\0') {
@@ -505,6 +567,32 @@ static bool normalize_entity(ha_entity_t *entity, ha_entity_t *out,
                 strlcpy(sensor.unit, entity->unit, sizeof(sensor.unit));
             }
             sensor.measurement = measurement(entity);
+            entity->normalized_sensor = sensor;
+            entity->normalized_capabilities = (slate_capabilities_t) {0};
+        }
+        *available = current;
+    } else if (domain_is(entity->resource, "binary_sensor")) {
+        *kind = SLATE_KIND_SENSOR;
+        /* The light rule, not the sensor one. A `sensor` may legitimately read
+         * `unknown` as text, and the branch above shows it; here `unknown` is
+         * the absence of an answer, and §7.5's dash says that without claiming
+         * the door is closed. */
+        bool current = entity->present && entity->has_state &&
+                       (strcmp(entity->raw_state, "on") == 0 ||
+                        strcmp(entity->raw_state, "off") == 0);
+        if (!entity->normalized_sensor_ready) {
+            strlcpy(entity->normalized_sensor.text, "unknown",
+                    sizeof(entity->normalized_sensor.text));
+            entity->normalized_sensor_ready = true;
+        }
+        if (current) {
+            slate_sensor_state_t sensor = {0};
+            strlcpy(sensor.text,
+                    binary_sensor_text(entity, strcmp(entity->raw_state, "on") == 0),
+                    sizeof(sensor.text));
+            /* No unit and no measurement: `device_class` here names what the
+             * contact means, not what it measures, and §7.3 would read a
+             * measurement as a request to format a number. */
             entity->normalized_sensor = sensor;
             entity->normalized_capabilities = (slate_capabilities_t) {0};
         }
@@ -859,17 +947,21 @@ esp_err_t slate_ha_entities_selftest(void)
         "cover.office_blind",
         "sensor.room_temperature",
         "scene.relax",
+        "binary_sensor.front_door",
     };
+    const size_t id_count = sizeof(ids) / sizeof(ids[0]);
     bool binding_changed = false;
-    CHECK(slate_ha_entities_bind(ids, 4, &binding_changed) == ESP_OK && binding_changed,
+    CHECK(slate_ha_entities_bind(ids, id_count, &binding_changed) == ESP_OK &&
+              binding_changed,
           "bind explicit entity ids");
     const char *reordered[] = {
         "scene.relax",
+        "binary_sensor.front_door",
         "sensor.room_temperature",
         "cover.office_blind",
         "light.kitchen",
     };
-    CHECK(slate_ha_entities_bind(reordered, 4, &binding_changed) == ESP_OK &&
+    CHECK(slate_ha_entities_bind(reordered, id_count, &binding_changed) == ESP_OK &&
               !binding_changed,
           "unchanged entity set avoids resubscription");
     const char *duplicates[] = {"light.kitchen", "light.kitchen"};
@@ -890,7 +982,9 @@ esp_err_t slate_ha_entities_selftest(void)
         "\"friendly_name\":\"Room temperature\","
         "\"unit_of_measurement\":\"°C\",\"device_class\":\"temperature\"}},"
         "\"scene.relax\":{\"s\":\"2026-08-12T12:00:00.000000+00:00\",\"a\":{"
-        "\"friendly_name\":\"Relax\"}}}}"
+        "\"friendly_name\":\"Relax\"}},"
+        "\"binary_sensor.front_door\":{\"s\":\"on\",\"a\":{"
+        "\"friendly_name\":\"Front door\",\"device_class\":\"door\"}}}}"
     );
     CHECK(initial != NULL && process_event(initial, false) == ESP_OK,
           "expand initial additions");
@@ -978,6 +1072,126 @@ esp_err_t slate_ha_entities_selftest(void)
               slate_capabilities_have(&scene.normalized_capabilities,
                                       SLATE_ACTION_ACTIVATE),
           "map stateless scene and activation capability");
+
+    ha_entity_t contact;
+    slate_kind_t contact_kind;
+    bool contact_available = false;
+    LOCK();
+    bool mapped_contact = normalize_entity(find_entity(ids[4]), &contact, &contact_kind,
+                                           &contact_available);
+    UNLOCK();
+    CHECK(mapped_contact && contact_kind == SLATE_KIND_SENSOR && contact_available &&
+              !contact.normalized_sensor.numeric &&
+              strcmp(contact.normalized_sensor.text, "Open") == 0 &&
+              contact.normalized_sensor.unit[0] == '\0' &&
+              contact.normalized_sensor.measurement == SLATE_MEASUREMENT_NONE &&
+              contact.normalized_capabilities.actions == 0,
+          "map a binary_sensor onto a read-only textual sensor");
+
+    cJSON *door_closed = cJSON_Parse(
+        "{\"c\":{\"binary_sensor.front_door\":{\"+\":{\"s\":\"off\"}}}}"
+    );
+    CHECK(door_closed != NULL && process_event(door_closed, false) == ESP_OK,
+          "apply compressed binary_sensor update");
+    cJSON_Delete(door_closed);
+    LOCK();
+    mapped_contact = normalize_entity(find_entity(ids[4]), &contact, &contact_kind,
+                                      &contact_available);
+    UNLOCK();
+    CHECK(mapped_contact && contact_available &&
+              strcmp(contact.normalized_sensor.text, "Closed") == 0,
+          "binary_sensor follows the entity to the other phrasing");
+
+    /* `unknown` is not `off`. A sensor may read `unknown` as text and the
+     * branch above shows it; a contact that says so has not answered, and
+     * §7.5's dash is the honest rendering. */
+    static const struct {
+        const char *state;
+        const char *name;
+    } unanswered[] = {
+        {"unknown", "unknown binary_sensor is not available"},
+        {"unavailable", "unavailable binary_sensor keeps its last word"},
+    };
+    for (size_t i = 0; i < sizeof(unanswered) / sizeof(unanswered[0]); i++) {
+        char diff[128];
+        snprintf(diff, sizeof(diff),
+                 "{\"c\":{\"binary_sensor.front_door\":{\"+\":{\"s\":\"%s\"}}}}",
+                 unanswered[i].state);
+        cJSON *parsed = cJSON_Parse(diff);
+        CHECK(parsed != NULL && process_event(parsed, false) == ESP_OK,
+              "apply an unanswered binary_sensor state");
+        cJSON_Delete(parsed);
+        LOCK();
+        mapped_contact = normalize_entity(find_entity(ids[4]), &contact, &contact_kind,
+                                          &contact_available);
+        UNLOCK();
+        CHECK(mapped_contact && !contact_available &&
+                  strcmp(contact.normalized_sensor.text, "Closed") == 0,
+              unanswered[i].name);
+    }
+
+    /* One `device_class` per distinct phrasing, both ways round, plus the
+     * fallback for a contact that declares no class at all. The words are
+     * asserted here rather than in the table so that changing one is a visible
+     * change to a test, not a silent change to what the wall says. */
+    static const struct {
+        const char *device_class;
+        const char *on;
+        const char *off;
+    } phrasings[] = {
+        {"door", "Open", "Closed"},
+        {"motion", "Detected", "Clear"},
+        {"moisture", "Wet", "Dry"},
+        {"presence", "Home", "Away"},
+        {"lock", "Unlocked", "Locked"},
+        {"connectivity", "Connected", "Disconnected"},
+        {"problem", "Problem", "OK"},
+        {"safety", "Unsafe", "Safe"},
+        {"battery", "Low", "Normal"},
+        {"battery_charging", "Charging", "Not charging"},
+        {"cold", "Cold", "Normal"},
+        {"heat", "Hot", "Normal"},
+        {"light", "Detected", "No light"},
+        {"power", "Detected", "No power"},
+        {"moving", "Moving", "Not moving"},
+        {"running", "Running", "Not running"},
+        {"plug", "Plugged in", "Unplugged"},
+        {"update", "Update available", "Up-to-date"},
+        {NULL, "On", "Off"},
+    };
+    bool phrasings_ok = true;
+    for (size_t i = 0; i < sizeof(phrasings) / sizeof(phrasings[0]); i++) {
+        for (unsigned on = 0; on <= 1; on++) {
+            char class_attribute[64] = "";
+            if (phrasings[i].device_class != NULL) {
+                snprintf(class_attribute, sizeof(class_attribute),
+                         ",\"device_class\":\"%s\"", phrasings[i].device_class);
+            }
+            char full[256];
+            snprintf(full, sizeof(full),
+                     "{\"entity_id\":\"binary_sensor.probe\",\"state\":\"%s\","
+                     "\"attributes\":{\"friendly_name\":\"Probe\"%s}}",
+                     on ? "on" : "off", class_attribute);
+            cJSON *parsed = cJSON_Parse(full);
+            slate_resource_t probe;
+            const char *want = on ? phrasings[i].on : phrasings[i].off;
+            bool ok = parsed != NULL &&
+                      slate_ha_entities_normalize_full_state(parsed, &probe) == ESP_OK &&
+                      probe.kind == SLATE_KIND_SENSOR &&
+                      probe.presentation == SLATE_PRESENT_OK &&
+                      !probe.state.sensor.numeric &&
+                      strcmp(probe.state.sensor.text, want) == 0;
+            cJSON_Delete(parsed);
+            if (!ok) {
+                ESP_LOGE(TAG, "binary_sensor %s/%s did not read \"%s\"",
+                         phrasings[i].device_class != NULL ? phrasings[i].device_class
+                                                           : "(no device_class)",
+                         on ? "on" : "off", want);
+                phrasings_ok = false;
+            }
+        }
+    }
+    CHECK(phrasings_ok, "one device_class per binary_sensor phrasing reads its words");
 
     cJSON *change = cJSON_Parse(
         "{\"c\":{\"light.kitchen\":{\"+\":{\"s\":\"off\","

@@ -652,6 +652,22 @@ Use `subscribe_entities` with the explicit HA entity ids in the HA provider's su
 
 Re-subscription follows any successful `PUT /config` that changes the HA binding set and every reconnect. With no HA bindings, firmware deliberately sends no subscription: Home Assistant treats a missing or empty `entity_ids` filter as the full instance. The existing UI tree does not care why a fresh snapshot arrived.
 
+Five HA domains map onto §5.2's four kinds. An entity in any other domain is not normalized and never reaches the store, so the editor's picker does not offer it either:
+
+| HA domain | `kind` | `available` when the raw state is |
+|---|---|---|
+| `light` | `light` | `on` or `off` |
+| `cover` | `cover` | `open`, `closed`, `opening`, `closing` or `stopped` |
+| `sensor` | `sensor` | anything but `unavailable` |
+| `binary_sensor` | `sensor` | `on` or `off` |
+| `scene` | `scene` | anything but `unavailable` |
+
+`binary_sensor` is a `sensor` whose `value` is a word, not a fifth kind and not a `light`. The on/off shape would fit `light`, but §5.2 gives `light` a `toggle` and a `set_power` that a door contact cannot honour, and naming a read-only contact a light to borrow its dot is a lie the action bus would have to keep. Normalizing it to `sensor` needs no new vocabulary and renders in §7.3 today, since a sensor's value is already "numeric or textual".
+
+The word comes from `device_class`, which is where a `binary_sensor` keeps its meaning, and the words are Home Assistant's own, so the panel says what the app the user came from says. `On`/`Off` is the fallback for an absent or unrecognised class. `docs/CONFIGURATION.md` carries the table; the adapter's self-test asserts one class per distinct phrasing, so changing a word is a visible change to a test.
+
+`unknown` is not `off`. A `sensor` may legitimately read `unknown` and §7.3 shows that text; a `binary_sensor` that says so has not answered, so it goes unavailable and renders §7.5's dash rather than a word that is not true. That is why the table above keys availability on the domain and not on the kind.
+
 ### 5.7 Home Assistant resource picker
 
 Opening the HA picker makes the browser request four relay stages in sequence: `config/entity_registry/list_for_display`, `config/device_registry/list`, `config/area_registry/list` and `get_states`. None needs an administrator — S-4 measured the underlying registry reads from a `system-users` and a `system-read-only` token and got payloads byte-identical to the administrator's. Only mutating registry commands are gated. `list_for_display` is used instead of the full entity registry: on the measured instance it was 83 KB rather than 635 KB and had already removed disabled entities that cannot back a tile.
