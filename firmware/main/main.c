@@ -831,9 +831,10 @@ void app_main(void)
     }
 #endif
 
-    /* After start_network(), so a panel that genuinely came up in setup mode
-     * has already raised its card and the verifier declines instead of
-     * replacing §9.4's recovery address with a fixture. */
+    /* The verifier decides for itself whether it may run. §9.4's card is
+     * raised asynchronously from a wifi event, so no ordering against
+     * start_network() here could establish that it is safe to build a
+     * fixture — only the check on the LVGL task can. */
 #ifdef SLATE_DISPLAY_SELFTEST
     esp_err_t setup_card_test_err = slate_display_selftest();
     if (setup_card_test_err == ESP_ERR_INVALID_STATE) {

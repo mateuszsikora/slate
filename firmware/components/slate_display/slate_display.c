@@ -1565,6 +1565,16 @@ static esp_err_t setup_selftest_on_task(void)
         ESP_LOGI(TAG, "selftest: %-52s %s", description, passed_ ? "PASS" : "FAIL");  \
     } while (0)
 
+    /* Checked here rather than only where the work was requested. slate_setup
+     * raises §9.4's card from a wifi event, seconds after start_network()
+     * returned, so a card that appeared between the request and this task's
+     * turn would be deleted by the fixtures below — and only a state
+     * transition ever calls show, so nothing would put it back. */
+    if (slate_display_setup_active()) {
+        ESP_LOGW(TAG, "setup selftest skipped: a setup presentation is on screen");
+        return ESP_ERR_INVALID_STATE;
+    }
+
     lv_obj_t *overlay = setup_selftest_build(SETUP_TEST_SSID, "", false);
     lv_obj_t *join = overlay != NULL ? setup_find_label(overlay, "1   Scan to join") : NULL;
     lv_obj_t *security = overlay != NULL ? setup_find_label(overlay, "No Wi-Fi password") : NULL;
@@ -1596,10 +1606,12 @@ static esp_err_t setup_selftest_on_task(void)
                 "the security row still carries the provisioned passphrase");
     hide_setup_overlay(NULL);
 
-    /* §9.4's banner is LV_LABEL_LONG_WRAP by intent and is outside this
-     * verifier's subject. Measure it while the fixture is already here: its
-     * password row is 29 px below the join row, so an SSID that wraps would
-     * land in it, and that is a follow-up rather than something to assert. */
+    /* §9.4's banner keeps LV_LABEL_LONG_WRAP: it is a different presentation
+     * and changing it is not this issue's subject. What it does not get to be
+     * is unwatched. A maximum-length SSID fits its wider column with 3 px to
+     * spare, and a type step or a moved y constant would silently spend that
+     * and put the join row back on the passphrase — so the margin is asserted
+     * rather than logged, and the measurement goes out beside it. */
     overlay = setup_selftest_build(SETUP_TEST_SSID, "", true);
     lv_obj_t *banner_join = overlay != NULL ? setup_find_label(overlay, "Scan to join") : NULL;
     lv_obj_t *banner_security =
@@ -1610,6 +1622,8 @@ static esp_err_t setup_selftest_on_task(void)
              banner_join != NULL && banner_security != NULL
                  ? lv_obj_get_y(banner_security) - lv_obj_get_y(banner_join)
                  : -1);
+    SETUP_CHECK(setup_rows_clear(banner_join, banner_security),
+                "the recovery banner join row clears its security row");
     hide_setup_overlay(NULL);
 
     /* The fixtures leave the backlight on, which is what §9.4 asks of a real
@@ -1636,14 +1650,9 @@ esp_err_t slate_display_selftest(void)
         ESP_LOGW(TAG, "setup selftest skipped: the panel did not initialise");
         return ESP_ERR_INVALID_STATE;
     }
-    /* §9.4 makes the card on screen a recovery mechanism. A panel that really
-     * cannot reach its router must not have that replaced by a fixture and
-     * then removed, so the verifier declines rather than competing with it. */
-    if (slate_display_setup_active()) {
-        ESP_LOGW(TAG, "setup selftest skipped: a setup presentation is on screen");
-        return ESP_ERR_INVALID_STATE;
-    }
-
+    /* Whether a real setup card is up is decided on the LVGL task, not here:
+     * §9.4's card is raised asynchronously and this check would be stale by
+     * the time the work ran. */
     SemaphoreHandle_t done = xSemaphoreCreateBinary();
     if (done == NULL) {
         return ESP_ERR_NO_MEM;
