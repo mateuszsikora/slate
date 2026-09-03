@@ -26,6 +26,7 @@
  */
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -564,9 +565,6 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
     if (count > 0 && bindings == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (count > SLATE_STATE_MAX_RESOURCES) {
-        return ESP_ERR_INVALID_SIZE;
-    }
 
     /* Validated before anything is allocated, so a rejected configuration costs
      * the caller nothing and leaves the active one exactly where it was. */
@@ -605,8 +603,20 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
             duplicate = true;
             break;
         }
-        if (!duplicate) {
-            distinct++;
+        if (!duplicate && ++distinct > SLATE_STATE_MAX_RESOURCES) {
+            /* The cap counts what the table will hold, which §5.1 makes the
+             * resources the configuration references rather than the bindings
+             * that reference them. Comparing the caller's raw count instead
+             * refused documents slate_config accepts — it counts distinct pairs
+             * too — so a dashboard with several tiles on one light could pass
+             * validate and then fail apply. #138.
+             *
+             * Refusing on the survivor that crosses the line also keeps this
+             * bounded: an over-long list stops here rather than being walked to
+             * its end, which is what the old check ahead of the loop bought. */
+            ESP_LOGE(TAG, "more than %u distinct resource(s) bound",
+                     (unsigned) SLATE_STATE_MAX_RESOURCES);
+            return ESP_ERR_INVALID_SIZE;
         }
     }
 
@@ -1331,6 +1341,48 @@ esp_err_t slate_state_selftest(void)
     slate_state_bind(NULL, 0);
     CHECK(collapsed_cost == plain_cost && plain_cost >= 4 * sizeof(entry_t),
           "a collapsed duplicate is not allocated for");
+
+    /*
+     * §4.1's promise about validate is that it predicts what the write will do,
+     * and slate_config counts distinct pairs. So the edge that matters is a
+     * saturated document with more bindings than pairs — twelve bar items and a
+     * page of tiles all naming resources something else already binds — which
+     * has to be accepted here or it would be accepted by validate and refused by
+     * apply. The 257th *pair* is the refusal; the 257th binding is not. #138.
+     */
+    enum { OVER = 8 };
+    static char saturated_ids[SLATE_STATE_MAX_RESOURCES][8];
+    slate_binding_t *saturated =
+        calloc(SLATE_STATE_MAX_RESOURCES + OVER, sizeof(*saturated));
+    if (saturated == NULL) {
+        CHECK(false, "memory for the saturation fixture");
+    } else {
+        for (size_t i = 0; i < SLATE_STATE_MAX_RESOURCES; i++) {
+            snprintf(saturated_ids[i], sizeof(saturated_ids[i]), "r%u", (unsigned) i);
+            saturated[i] = (slate_binding_t) {"st-alpha", saturated_ids[i], SLATE_KIND_LIGHT};
+        }
+        for (size_t i = 0; i < OVER; i++) {
+            saturated[SLATE_STATE_MAX_RESOURCES + i] = saturated[i];
+        }
+        CHECK(slate_state_bind(saturated, SLATE_STATE_MAX_RESOURCES + OVER) == ESP_OK,
+              "a saturated set with more bindings than pairs binds");
+        CHECK(slate_state_count() == SLATE_STATE_MAX_RESOURCES,
+              "and holds one entry per pair, not per binding");
+
+        /* One pair past the cap, reached without touching the length: a
+         * duplicate becomes a pair of its own, so the only thing that differs
+         * from the set just accepted is the number of distinct pairs. */
+        static char one_too_many[8] = "over";
+        saturated[SLATE_STATE_MAX_RESOURCES] =
+            (slate_binding_t) {"st-alpha", one_too_many, SLATE_KIND_LIGHT};
+        CHECK(slate_state_bind(saturated, SLATE_STATE_MAX_RESOURCES + OVER) ==
+                  ESP_ERR_INVALID_SIZE,
+              "one pair past the cap is refused");
+        CHECK(slate_state_count() == SLATE_STATE_MAX_RESOURCES,
+              "and the saturated set is still the active one");
+        free(saturated);
+    }
+    slate_state_bind(NULL, 0);
 
     /*
      * The allocation half of "rebuilding the same configuration does not leak
