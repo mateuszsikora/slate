@@ -580,13 +580,28 @@ static uint32_t bar_resource_dot_color(const bar_item_view_t *view,
     if (resource == NULL || resource->presentation != SLATE_PRESENT_OK) {
         return theme->warn;
     }
-    /* A cover that reports no position is healthy and merely quiet about how
-     * open it is: the reading is a dash while the dot stays muted, because the
-     * warning colour here would claim the resource itself is in trouble. */
-    bool active = view->config->component == SLATE_COMPONENT_LIGHT
-                      ? resource->state.light.on
-                      : resource->state.cover.position != SLATE_STATE_ABSENT &&
-                            resource->state.cover.position > 0;
+    /* One branch per kind, so each reads only the variant of §5.2's union its
+     * own provider writes. A kind that has no dot today would otherwise
+     * inherit a cover's position the day it is given one — and the wrong
+     * colour would look like a theming mistake rather than a union one. */
+    bool active = false;
+    switch (view->config->component) {
+    case SLATE_COMPONENT_LIGHT:
+        active = resource->state.light.on;
+        break;
+    case SLATE_COMPONENT_COVER:
+        /* A cover that reports no position is healthy and merely quiet about
+         * how open it is: the reading is a dash while the dot stays muted,
+         * because the warning colour here would claim the resource itself is
+         * in trouble. */
+        active = resource->state.cover.position != SLATE_STATE_ABSENT &&
+                 resource->state.cover.position > 0;
+        break;
+    case SLATE_COMPONENT_SENSOR:
+    case SLATE_COMPONENT_SCENE:
+    case SLATE_COMPONENT_UNKNOWN:
+        break;
+    }
     return active ? theme->accent : theme->text_lo;
 }
 
