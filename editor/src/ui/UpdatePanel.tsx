@@ -74,6 +74,14 @@ export function UpdatePanel({ onFetch, onCheck, onInstall }: Props) {
     void action()
       .then(() => refresh())
       .catch((error: unknown) => {
+        /* `status === 0` is this client's own verdict that the *panel* did not
+         * answer, and its code is `unreachable` — the same word the panel uses
+         * for a channel that did not answer it. Reporting the first as the
+         * second would blame GitHub for a panel that fell off the WiFi. */
+        if (error instanceof ApiError && error.status === 0) {
+          setFailure('The panel did not answer.')
+          return
+        }
         setFailure(
           error instanceof ApiError && error.code !== 'unknown'
             ? updateError(error.code)

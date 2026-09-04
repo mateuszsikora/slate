@@ -61,11 +61,21 @@ test('every failure the update component can report has a sentence', () => {
     new URL('../../firmware/components/slate_update/slate_update.c', import.meta.url),
     'utf8',
   )
+  /* Four ways a code leaves that component: the worker's fail(), the string an
+   * internal step assigns to `error`, the arms of ota_error_code(), and the
+   * third argument of slate_api_refuse() — which a route uses to turn a bad
+   * request away. The last one is easy to leave out of a scan like this, and
+   * leaving it out is how a code reaches somebody as its own identifier. */
   const codes = new Set(
-    [...source.matchAll(/(?:fail\(|\*?error = |return )"([a-z_]+)"/g)].map((match) => match[1]),
+    [
+      ...source.matchAll(
+        /(?:fail\(|\*?error = |return |slate_api_refuse\(req,\s*"[^"]+",\s*)"([a-z_]+)"/g,
+      ),
+    ].map((match) => match[1]),
   )
 
   assert.ok(codes.has('checksum_mismatch'), 'the scan found the component')
+  assert.ok(codes.has('invalid_json'), 'the scan reaches slate_api_refuse() codes')
   for (const code of codes) {
     assert.ok(code in UPDATE_MESSAGES, `no editor message for ${code}`)
   }

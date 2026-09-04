@@ -28,6 +28,14 @@ export const UPDATE_MESSAGES: Record<string, string> = {
   no_update: 'There is nothing to install.',
   busy: 'The panel is already checking or installing.',
   no_channel: 'This firmware was built without an update channel.',
+  /* The panel's request-shape refusals. This editor builds both requests
+   * correctly and should never see one, but a code with no sentence reaches a
+   * person as the code itself — and these are the ones a second client, or the
+   * next route added here, would run into first. */
+  unexpected_body: 'The panel refused that request: it carried a body the route does not take.',
+  truncated: 'The request did not reach the panel in one piece.',
+  invalid_json: 'The panel could not read that request as JSON.',
+  invalid_version: 'That request did not name a version the panel could read.',
 }
 
 /** One §4 error code as a sentence. An unknown code is shown, never swallowed. */

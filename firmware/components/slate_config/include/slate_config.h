@@ -24,10 +24,17 @@ extern "C" {
  * The oldest schema a panel has to support before this firmware may be
  * installed on it, and what §11.4's manifest publishes as `min_schema`:
  * `tools/ota/manifest.py` reads this number out of this header rather than
- * writing a second copy of it down. A panel compares it against its own
- * SCHEMA_MAX — §4.1's `schema_max` — and declines a release it could not render
- * its stored document with. The two are the same number while one schema
- * exists; they separate the day a release stops accepting schema 1.
+ * writing a second copy of it down.
+ *
+ * The receiving panel compares that number against SCHEMA_MAX above — §4.1's
+ * `schema_max`, the newest schema it can render — and declines anything higher.
+ * **That is the panel's capability, not the schema of the document it is
+ * holding**, and the two are the same answer only while one schema exists. The
+ * day a second one does, this comparison is the line to revisit: a panel at
+ * SCHEMA_MAX 3 still storing a schema-1 document would pass a `min_schema` 2
+ * gate and come back unable to render what it kept, and the check that closes
+ * that needs the active document's own schema, which slate_update cannot ask
+ * for today without depending on the UI runtime.
  */
 #define SLATE_CONFIG_SCHEMA_MIN 1
 

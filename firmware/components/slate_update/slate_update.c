@@ -301,8 +301,11 @@ static bool copy_field(const cJSON *root, const char *name, char *out, size_t si
  * channel may serve several boards and several configuration schemas, and a
  * panel that installed the wrong one would come back either unbootable or
  * unable to render the document it kept. `min_schema` is the oldest
- * configuration schema a panel must support to take this image, which is
- * exactly what §4.1's `schema_max` reports.
+ * configuration schema a panel must support to take this image, and what it is
+ * compared against here is SLATE_CONFIG_SCHEMA_MAX — §4.1's `schema_max`, this
+ * panel's capability rather than its stored document's version. That header
+ * says why the distinction is inert today and what has to change on the day it
+ * is not.
  */
 static bool parse_manifest(const char *json, size_t len, release_t *out, const char **error)
 {
@@ -796,15 +799,39 @@ refuse:
 
 /* --- Worker ------------------------------------------------------------- */
 
+/**
+ * A wait in ticks, computed in 64 bits.
+ *
+ * Not pdMS_TO_TICKS(): it multiplies inside TickType_t, which is 32 bits here,
+ * and a day at CONFIG_FREERTOS_HZ=1000 does not survive that product —
+ * 86 400 000 × 1000 wraps to 500 654 080, and §11.4's daily check becomes one
+ * every eight minutes and twenty-one seconds. Nothing about that is visible
+ * from a desk: the channel still works, it is just contacted 172 times a day,
+ * each time with a TLS handshake, by a panel whose own editor says it looks
+ * once a day.
+ *
+ * The result fits comfortably — a day is 86.4e6 ticks against a 4.29e9 range —
+ * so it is only the intermediate value that needed the wider type.
+ */
+static TickType_t us_to_ticks(int64_t microseconds)
+{
+    return (TickType_t) ((microseconds * configTICK_RATE_HZ) / 1000000LL);
+}
+
+/* The longest wait this component asks for, in the type it is asked in. A tick
+ * rate that made a daily check unrepresentable would otherwise reintroduce the
+ * silence above with a different number in it. */
+_Static_assert((CHECK_PERIOD_US / 1000000LL) * configTICK_RATE_HZ <= UINT32_MAX,
+               "the daily check does not fit a TickType_t at this tick rate");
+
 static void update_task(void *arg)
 {
     (void) arg;
     int64_t next_check_us = esp_timer_get_time() + FIRST_CHECK_DELAY_US;
 
     for (;;) {
-        int64_t now = esp_timer_get_time();
-        TickType_t wait = next_check_us > now ? pdMS_TO_TICKS((next_check_us - now) / 1000)
-                                              : (TickType_t) 0;
+        int64_t remaining_us = next_check_us - esp_timer_get_time();
+        TickType_t wait = remaining_us > 0 ? us_to_ticks(remaining_us) : (TickType_t) 0;
 
         uint32_t jobs = 0;
         xTaskNotifyWait(0, UINT32_MAX, &jobs, wait);
@@ -819,8 +846,16 @@ static void update_task(void *arg)
         /* An explicit check and the daily one are the same work, and both
          * restart the clock: somebody who just pressed the button does not want
          * a second check thirty seconds later. How long that clock is depends
-         * on what the check ran into, which is what check() returns. */
-        next_check_us = esp_timer_get_time() + check();
+         * on what the check ran into, which is what check() returns.
+         *
+         * The interval is logged rather than assumed. A schedule is the one
+         * property of this component that cannot be observed by watching it for
+         * a minute, and the arithmetic that produces it has already been wrong
+         * once — see us_to_ticks(). A line per check makes the next such
+         * mistake a thing somebody reads instead of a thing somebody measures. */
+        int64_t interval_us = check();
+        next_check_us = esp_timer_get_time() + interval_us;
+        ESP_LOGI(TAG, "next check in %" PRId64 " s", interval_us / 1000000);
     }
 }
 
