@@ -189,9 +189,9 @@ Upstream: <https://github.com/Templarian/MaterialDesign-Webfont>
 
 ### Montserrat 14 and Font Awesome 5 Free, by way of LVGL
 
-`CONFIG_LV_FONT_MONTSERRAT_14=y` keeps one of LVGL's built-in faces in the image
-as the allocator-safe fallback that LVGL internals and any pre-widget
-presentation fall back to. It is a generated file like the two above, and its
+`CONFIG_LV_FONT_MONTSERRAT_14=y` keeps one of LVGL's built-in faces in the
+image, for LVGL's own internals and for any presentation built before
+`slate_theme`'s faces exist. It is a generated file like the two above, and its
 header names the two sources it was generated from — so both belong here:
 
 - **Montserrat-Medium** — Copyright 2011 The Montserrat Project Authors, SIL
