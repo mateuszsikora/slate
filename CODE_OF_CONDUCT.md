@@ -59,13 +59,14 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-[the private reporting form for this repository](https://github.com/mateuszsikora/slate/security/advisories/new),
-which is the only channel here that is private to you and the maintainer — the
-form is labelled for vulnerabilities, and a report under this document is
-welcome on it anyway. If the maintainer is the subject of your report, use
-[GitHub's own abuse reporting](https://github.com/contact/report-abuse)
-instead. All complaints will be reviewed and investigated promptly and fairly.
+reported at [GitHub's abuse reporting](https://github.com/contact/report-abuse),
+which is private, is read by people who are not the maintainer, and can act on
+its own — including when the maintainer is the subject of the report. To reach
+the maintainer directly and privately instead, [the private reporting form for
+this repository](https://github.com/mateuszsikora/slate/security/advisories/new)
+is the only such channel it has; the form is labelled for vulnerabilities, and a
+report under this document is welcome on it anyway. All complaints will be
+reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the
 reporter of any incident.
