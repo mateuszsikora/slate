@@ -611,9 +611,16 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
              * too — so a dashboard with several tiles on one light could pass
              * validate and then fail apply. #138.
              *
-             * Refusing on the survivor that crosses the line also keeps this
-             * bounded: an over-long list stops here rather than being walked to
-             * its end, which is what the old check ahead of the loop bought. */
+             * The old check bounded the walk as well, and this does not: a long
+             * list naming few pairs never reaches the refusal and is scanned to
+             * its end, quadratically, because the duplicate search above reads
+             * every earlier binding rather than every earlier pair. What bounds
+             * it now is the document: §3.1 stops at 64 KB and a binding costs
+             * tens of bytes of JSON, so the ceiling is a few thousand of them
+             * and a few million strcmp of a short id, once, on the task that is
+             * rebuilding the tree anyway. If that ever
+             * shows up in an apply, the fix is a better duplicate search and
+             * not a cap on the raw count: a cap on the raw count is #138. */
             ESP_LOGE(TAG, "more than %u distinct resource(s) bound",
                      (unsigned) SLATE_STATE_MAX_RESOURCES);
             return ESP_ERR_INVALID_SIZE;
@@ -1372,9 +1379,8 @@ esp_err_t slate_state_selftest(void)
         /* One pair past the cap, reached without touching the length: a
          * duplicate becomes a pair of its own, so the only thing that differs
          * from the set just accepted is the number of distinct pairs. */
-        static char one_too_many[8] = "over";
         saturated[SLATE_STATE_MAX_RESOURCES] =
-            (slate_binding_t) {"st-alpha", one_too_many, SLATE_KIND_LIGHT};
+            (slate_binding_t) {"st-alpha", "over", SLATE_KIND_LIGHT};
         CHECK(slate_state_bind(saturated, SLATE_STATE_MAX_RESOURCES + OVER) ==
                   ESP_ERR_INVALID_SIZE,
               "one pair past the cap is refused");
