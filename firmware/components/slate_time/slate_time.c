@@ -1,7 +1,7 @@
 /*
  * Slate — clock. See include/slate_time.h for the contract.
  *
- * design.md §3.3, §6.1, §9.4.
+ * DESIGN.md §3.3, §6.1, §9.4.
  */
 
 #include "slate_time.h"

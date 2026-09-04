@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Fetch a core dump off a Slate panel and symbolicate it (design.md §11.3).
+# Fetch a core dump off a Slate panel and symbolicate it (DESIGN.md §11.3).
 #
 #   SLATE_TOKEN=... tools/coredump/fetch.sh <host> [elf] [output]
 #
@@ -31,7 +31,7 @@ set -euo pipefail
 
 usage() {
     cat >&2 <<'EOF'
-Fetch a core dump off a Slate panel and symbolicate it (design.md §11.3).
+Fetch a core dump off a Slate panel and symbolicate it (DESIGN.md §11.3).
 
   SLATE_TOKEN=... tools/coredump/fetch.sh <host> [elf] [output]
 
@@ -52,7 +52,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 HOST="$1"
 ELF="${2:-${REPO_ROOT}/firmware/build/slate.elf}"
 OUTPUT="${3:-${REPO_ROOT}/firmware/build/coredump.bin}"
-: "${SLATE_TOKEN:?set SLATE_TOKEN to the device token (design.md §4.3)}"
+: "${SLATE_TOKEN:?set SLATE_TOKEN to the device token (DESIGN.md §4.3)}"
 
 case "${HOST}" in
     http://*|https://*) BASE="${HOST}" ;;

@@ -1,7 +1,7 @@
 /*
  * Slate — the setup access point and the browser setup portal.
  *
- * design.md §9 (all of it), §9.2 (the access point), §9.4 (when it is raised),
+ * DESIGN.md §9 (all of it), §9.2 (the access point), §9.4 (when it is raised),
  * §4.1 (`/wifi/scan`, `POST /wifi`, `DELETE /wifi`), §4.3 (the one place the
  * token rule is relaxed), §6.2 (what the second interface costs), §12.
  *

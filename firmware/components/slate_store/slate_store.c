@@ -1,7 +1,7 @@
 /*
  * Slate — persistent store. See include/slate_store.h for the contract.
  *
- * design.md §4.3, §6.3, §12.
+ * DESIGN.md §4.3, §6.3, §12.
  */
 
 #include "slate_store.h"

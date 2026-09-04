@@ -2,7 +2,7 @@
  * Slate — the release update channel. See include/slate_update.h for the
  * contract and for why the download is not esp_https_ota().
  *
- * design.md §11.4, §4.1, §6.3.
+ * DESIGN.md §11.4, §4.1, §6.3.
  */
 
 #include "slate_update.h"

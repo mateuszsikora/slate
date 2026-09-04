@@ -9,7 +9,7 @@ cmake_minimum_required(VERSION 3.16)
 #
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
-# design.md §6.2 puts LVGL's fixed 2 MiB heap in PSRAM. LVGL's built-in
+# DESIGN.md §6.2 puts LVGL's fixed 2 MiB heap in PSRAM. LVGL's built-in
 # allocator normally declares that pool as a static array, which would put it
 # in internal RAM and fail long before reaching two megabytes. These definitions
 # redirect the one pool allocation to slate_display. They have to be build-wide:

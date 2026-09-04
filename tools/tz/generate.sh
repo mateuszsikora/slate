@@ -11,7 +11,7 @@
 # review, these are ~600 readable names and rules. Committing them also means a
 # machine with no tzdata can build both firmware and editor.
 #
-# Why the mapping exists at all: design.md §3.3 puts an IANA zone name in the
+# Why the mapping exists at all: DESIGN.md §3.3 puts an IANA zone name in the
 # configuration, and newlib's TZ variable takes a POSIX rule string. There is no
 # zone database on the device — a panel that shipped one would have to be
 # reflashed twice a year, which §11.4 is explicitly trying to avoid.

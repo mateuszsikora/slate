@@ -1,5 +1,5 @@
 /*
- * The device WebSocket, contract v1 (design.md §4.2).
+ * The device WebSocket, contract v1 (DESIGN.md §4.2).
  *
  * The upgrade carries no credential — the token would otherwise sit in the
  * browser's history and in every access log between here and the panel — so

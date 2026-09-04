@@ -1,7 +1,7 @@
 /*
  * Slate — WiFi station and the §9.4 connection state machine.
  *
- * design.md §9.3 (the failure vocabulary), §9.4 (the state machine), §6.1
+ * DESIGN.md §9.3 (the failure vocabulary), §9.4 (the state machine), §6.1
  * (stack), §4.1 (`/info.network`, `/status`).
  *
  *

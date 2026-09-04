@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build the browser flashing page (design.md §9.1 step 1, §14 M8).
+# Build the browser flashing page (DESIGN.md §9.1 step 1, §14 M8).
 #
 #   tools/flasher/build.sh <version> [build-dir] [out-dir]
 #

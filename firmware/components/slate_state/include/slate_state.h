@@ -1,7 +1,7 @@
 /*
  * Slate — provider-neutral state store and subscription contract.
  *
- * design.md ADR-3, §5.1 (the provider boundary), §5.2 (normalized resources
+ * DESIGN.md ADR-3, §5.1 (the provider boundary), §5.2 (normalized resources
  * and state), §3.3 (bindings), §6.2 (memory), §6.4 (the rebuild), §7.5 (what a
  * component has to be able to render).
  *

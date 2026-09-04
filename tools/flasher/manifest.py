@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble the ESP Web Tools manifest and the images it flashes (design.md §9.1).
+"""Assemble the ESP Web Tools manifest and the images it flashes (DESIGN.md §9.1).
 
     tools/flasher/manifest.py --build-dir firmware/build-release \
                               --version 1.0.0 --out flasher/dist

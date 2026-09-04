@@ -1,7 +1,7 @@
 /*
  * Slate — authenticated WebSocket diagnostics and editor event channel.
  *
- * design.md §4.2 and §11.3. The component owns the protocol and the retained
+ * DESIGN.md §4.2 and §11.3. The component owns the protocol and the retained
  * log ring. It does not own UI objects: mode is a small piece of shared state,
  * and later UI/configuration components use the functions below without
  * receiving an HTTP server or WebSocket handle.

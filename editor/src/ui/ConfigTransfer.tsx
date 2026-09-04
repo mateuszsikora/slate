@@ -1,5 +1,5 @@
 /*
- * JSON import and export from design.md §10.
+ * JSON import and export from DESIGN.md §10.
  *
  * An imported document remains a browser-side candidate until the device has
  * validated it and the user explicitly publishes it. Keeping those steps
@@ -31,7 +31,7 @@ interface Props {
 
 type Activity = 'idle' | 'validating' | 'publishing'
 
-/** The browser enforces the same document-size boundary as design.md §3.1. */
+/** The browser enforces the same document-size boundary as DESIGN.md §3.1. */
 const CONFIG_MAX_BYTES = 64 * 1024
 
 const VALIDATION_MESSAGES: Record<string, string> = {

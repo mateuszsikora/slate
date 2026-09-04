@@ -1,7 +1,7 @@
 /*
  * Slate — mDNS advertisement. See include/slate_mdns.h.
  *
- * design.md §4.3 (the name), §9.2 (it exists on the access point as well),
+ * DESIGN.md §4.3 (the name), §9.2 (it exists on the access point as well),
  * §10 (what the editor does with it).
  */
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Publish one normalized resource snapshot through External API
-# (design.md §5.2, §5.4).
+# (DESIGN.md §5.2, §5.4).
 #
 #   SLATE_API_KEY=... tools/direct/publish.sh <host> [snapshot.json]
 #
@@ -38,7 +38,7 @@ set -euo pipefail
 
 usage() {
     cat >&2 <<'EOF'
-Publish a normalized resource snapshot through External API (design.md §5.4).
+Publish a normalized resource snapshot through External API (DESIGN.md §5.4).
 
   SLATE_API_KEY=... tools/direct/publish.sh <host> [snapshot.json]
 

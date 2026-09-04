@@ -1,7 +1,7 @@
 /*
  * Slate — the setup access point. See include/slate_setup.h for the contract.
  *
- * design.md §9.2, §9.4, §6.2, §12.
+ * DESIGN.md §9.2, §9.4, §6.2, §12.
  *
  * The access point is raised and torn down on one task, fed by one queue, for
  * the reason slate_wifi.c gives for the same arrangement one component over: the

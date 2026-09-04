@@ -15,7 +15,7 @@ interface Props {
 }
 
 /**
- * The provider and resource half of a binding (design.md §3.3), with §5.7's
+ * The provider and resource half of a binding (DESIGN.md §3.3), with §5.7's
  * catalog behind it. Tiles and system-bar items ask the same question, so they
  * ask it with the same control rather than with two that drift apart.
  */

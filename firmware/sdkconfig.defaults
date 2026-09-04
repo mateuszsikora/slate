@@ -34,13 +34,13 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
-# --- Development OTA rollback (design.md §11.2) ---
+# --- Development OTA rollback (DESIGN.md §11.2) ---
 # A freshly uploaded image gets one boot in PENDING_VERIFY. slate_ota confirms
 # it only after GET /api/v1/info answers on a real station or setup-AP address;
 # any reset before then makes the bootloader return to the previous slot.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
-# --- Core dump (design.md §11.3) ---
+# --- Core dump (DESIGN.md §11.3) ---
 # A panic writes an ELF core dump into the `coredump` partition #5 reserved, and
 # GET /api/v1/coredump serves it. The ELF format rather than the binary one
 # because it is what esp-coredump symbolicates a backtrace from; the binary
@@ -91,7 +91,7 @@ CONFIG_ESP_COREDUMP_CHECK_BOOT=n
 # server up as those land. The default 3584 B is not enough headroom for that.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# --- HTTP/WebSocket diagnostics (design.md §4.2, §11.3) ---
+# --- HTTP/WebSocket diagnostics (DESIGN.md §4.2, §11.3) ---
 # The upgrade itself is public and the first application frame authenticates.
 # POST_HANDSHAKE is what starts the five-second deadline before any frame has
 # arrived; registering a client only from the data handler cannot time out a
@@ -99,7 +99,7 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 
-# --- Home Assistant WebSocket client (design.md §5.5, issue #16) ---
+# --- Home Assistant WebSocket client (DESIGN.md §5.5, issue #16) ---
 # The manual fallback may point at an HTTPS Home Assistant URL. Verify public
 # certificates against the same compact common-roots bundle S-3 measured;
 # disabling verification would send the long-lived token to an unauthenticated
@@ -107,7 +107,7 @@ CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
 
-# --- Display and LVGL (design.md §6.1–§6.2, issue #6) ---
+# --- Display and LVGL (DESIGN.md §6.1–§6.2, issue #6) ---
 # S-2 measured frame time with these cache settings. The RGB peripheral reads
 # two 800×480 RGB565 framebuffers continuously from PSRAM; the 64-byte line and
 # 64 KiB data cache are the geometry Espressif recommends for that path.
@@ -159,7 +159,7 @@ CONFIG_LV_BUILD_DEMOS=n
 CONFIG_LWIP_DHCP_GET_NTP_SRV=y
 CONFIG_LWIP_SNTP_MAX_SERVERS=2
 
-# --- mDNS interfaces (design.md §4.3) ---
+# --- mDNS interfaces (DESIGN.md §4.3) ---
 # `slate-<mac>.local` has to answer on the station and on the setup access
 # point, because §4.3 promises the same name works before the panel has ever
 # joined a network. Both are the mdns component's own defaults; they are pinned

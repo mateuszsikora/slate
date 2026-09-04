@@ -4,11 +4,11 @@
 # pinned MDI release. Comments and blank lines are ignored.
 #
 # Selection rule: an icon earns its place by being reachable from the component
-# set in design.md §7 or from a state those components must render. Nothing here
-# is speculative — design.md §8 budgets 60–80 glyphs and every one of them costs
+# set in DESIGN.md §7 or from a state those components must render. Nothing here
+# is speculative — DESIGN.md §8 budgets 60–80 glyphs and every one of them costs
 # flash at every size the font is rendered in.
 
-# --- System bar and connection state (design.md §3.2, §6.5) ---
+# --- System bar and connection state (DESIGN.md §3.2, §6.5) ---
 wifi
 wifi-off
 wifi-strength-1
@@ -23,7 +23,7 @@ home-outline
 pencil-outline
 refresh
 
-# --- light (design.md §7.1) ---
+# --- light (DESIGN.md §7.1) ---
 lightbulb
 lightbulb-outline
 lightbulb-on
@@ -40,7 +40,7 @@ white-balance-sunny
 white-balance-incandescent
 palette
 
-# --- cover (design.md §7.2) ---
+# --- cover (DESIGN.md §7.2) ---
 window-shutter
 window-shutter-open
 window-shutter-alert
@@ -58,7 +58,7 @@ arrow-up
 arrow-down
 stop
 
-# --- sensor (design.md §7.3) — device_class selects the icon ---
+# --- sensor (DESIGN.md §7.3) — device_class selects the icon ---
 thermometer
 thermometer-low
 thermometer-high
@@ -87,7 +87,7 @@ lock
 lock-open-variant
 leaf
 
-# --- scene (design.md §7.4) ---
+# --- scene (DESIGN.md §7.4) ---
 movie-open-outline
 sofa-outline
 silverware-fork-knife
@@ -99,7 +99,7 @@ sleep
 coffee-outline
 briefcase-outline
 
-# --- Fallbacks (design.md §3.1, §7.5) ---
+# --- Fallbacks (DESIGN.md §3.1, §7.5) ---
 # An unknown component type and a missing entity must render something, never
 # crash and never leave an empty tile.
 help-circle-outline

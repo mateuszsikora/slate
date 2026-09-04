@@ -1,7 +1,7 @@
 /*
  * Slate — mDNS advertisement.
  *
- * design.md §4.3, §9.2, §10.
+ * DESIGN.md §4.3, §9.2, §10.
  *
  * The panel answers to `slate-<mac6>.local` and advertises the HTTP service the
  * editor and the API are served from. §4.3 asks for this because the device

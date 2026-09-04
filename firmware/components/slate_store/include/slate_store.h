@@ -1,7 +1,7 @@
 /*
  * Slate — persistent store.
  *
- * design.md §4.3 (device token), §6.3 (partition layout), §12 (secrets).
+ * DESIGN.md §4.3 (device token), §6.3 (partition layout), §12 (secrets).
  *
  * Two kinds of storage, chosen by what the data is rather than by how big it
  * is:

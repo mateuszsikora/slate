@@ -1,4 +1,4 @@
-/* The page, theme, publish and connection controls from design.md §10. */
+/* The page, theme, publish and connection controls from DESIGN.md §10. */
 
 import type { Config, DeviceInfo, ProviderStatus } from '../lib/api'
 import { providerLabel } from '../lib/providers'

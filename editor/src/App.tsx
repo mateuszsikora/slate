@@ -1,5 +1,5 @@
 /*
- * The editor shell and visual dashboard editor (design.md §10).
+ * The editor shell and visual dashboard editor (DESIGN.md §10).
  * Session and connection state stay here beside #32's draft, preview and
  * publication lifecycle so a reconnect cannot silently publish stale work.
  */

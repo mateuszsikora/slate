@@ -1,5 +1,5 @@
 /*
- * Finding the panel again after its address changed (design.md §4.3).
+ * Finding the panel again after its address changed (DESIGN.md §4.3).
  *
  * The address in a bookmark does not have to be the address the panel has
  * today. The device advertises itself as `slate-<mac6>.local`, and that name is

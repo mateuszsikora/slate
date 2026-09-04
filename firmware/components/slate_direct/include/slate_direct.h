@@ -1,7 +1,7 @@
 /*
  * Slate — the direct integration provider.
  *
- * design.md ADR-3, §5.4 (this adapter), §5.1 (the provider boundary), §5.2
+ * DESIGN.md ADR-3, §5.4 (this adapter), §5.1 (the provider boundary), §5.2
  * (normalized snapshots), §5.3 (semantic actions), §4.1 (`POST /direct/state`),
  * §4.2 (`provider_attach`, `action`, `action_result`).
  *

@@ -1,5 +1,5 @@
 /*
- * The device API, contract v1 (design.md §4.1).
+ * The device API, contract v1 (DESIGN.md §4.1).
  *
  * ADR-3 and ADR-4: the browser talks to the device and to nothing else, over
  * the same documented API any other client uses. There is no backend here to
@@ -88,7 +88,7 @@ export interface Binding {
   resource: string
 }
 
-/** The provider-neutral discovery vocabulary from design.md §5.2. */
+/** The provider-neutral discovery vocabulary from DESIGN.md §5.2. */
 export interface Resource {
   provider: string
   resource: string
