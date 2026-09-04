@@ -87,8 +87,11 @@ _Static_assert(CHUNK_BYTES >= SLATE_OTA_IMAGE_PREFIX_BYTES,
  *
  * READ_BYTES is therefore the granularity of that check rather than a transfer
  * size — the flash write below still takes whatever came back. It buys a factor
- * of four over asking for the whole buffer, at four times the calls, each of
- * which is a memcpy out of a TLS record the client has already read.
+ * of four over asking for the whole buffer, and it is not free: three runs of
+ * the same 1 761 920 B image over the same WiFi took 16.92 s at 1 KB against
+ * 15.83 s at 4 KB, so 6.9 % — 1.1 s once per release, for a check that runs
+ * four times as often. Measured rather than assumed, because the first version
+ * of this comment assumed.
  *
  * What is left is honest to state: against a peer that trickles at exactly the
  * wrong rate the budget bounds the loop, not one call inside it. Closing that
@@ -501,7 +504,16 @@ static bool fetch_manifest(release_t *out, const char **error, bool *answered)
      * being empty is not the channel being down, and a panel fresh out of the
      * flasher should not spend its first day claiming the release host is
      * broken. */
-    if (open_with_redirects(client, &announced, "no_release", error) == ESP_OK) {
+    esp_err_t opened = open_with_redirects(client, &announced, "no_release", error);
+    if (opened != ESP_OK && strcmp(*error, "no_release") == 0) {
+        /* "Nothing here" is a reply, and by the rule above the channel is the
+         * authority on it: an offer cached from an earlier manifest does not
+         * outlive the manifest's disappearance. The image it names lives in the
+         * same deployment, so keeping it would leave an Install button that can
+         * only reach the 404 the check just got. */
+        *answered = true;
+    }
+    if (opened == ESP_OK) {
         if (announced > MANIFEST_MAX_BYTES) {
             ESP_LOGW(TAG, "manifest announces %" PRId64 " B", announced);
             *error = "manifest_invalid";
@@ -732,6 +744,13 @@ static bool install(void)
 
     const int64_t budget_ends = esp_timer_get_time() + DOWNLOAD_BUDGET_US;
     size_t received = 0;
+    /* This loop is one call while the prefix (288 B) is smaller than the window
+     * (1 KB): read_window() does not clamp, and esp_http_client_read() returns
+     * short only at EOF or error, which the next pass refuses anyway. The check
+     * below is therefore a formality here rather than a bound — it starts to
+     * bind if either constant moves, and a peer trickling through the prefix is
+     * the residual the constants above describe. Giving the prefix a window of
+     * its own would trade one unreachable bound for a smaller unreachable one. */
     while (received < SLATE_OTA_IMAGE_PREFIX_BYTES && received < total) {
         if (esp_timer_get_time() > budget_ends) {
             ESP_LOGW(TAG, "download budget expired inside the first %u B",
