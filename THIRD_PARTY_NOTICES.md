@@ -159,8 +159,8 @@ libraries above do, even though nothing in the firmware tree depends on it.
 The notice is not inside that document. React's published files open with an
 `@license` banner and the production build drops them: `grep -c '@license'
 editor/dist/index.html` answers 0. Vite's minifier can be told to keep them, and
-deliberately is not — the bundle is 296 KB of minified output whose longest line
-runs to 133 KB, which is not somewhere a notice can be found. This file is.
+deliberately is not — the bundle is 289 KB of minified output whose longest line
+runs to 130 KB, which is not somewhere a notice can be found. This file is.
 
 Upstream: <https://github.com/facebook/react>
 

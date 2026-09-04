@@ -55,11 +55,13 @@ needed to read a crash report about it.
 ## Third-party software
 
 `slate-{{VERSION}}.bin` is not all Slate's code: LVGL draws it, littlefs stores
-its configuration, ESP-IDF and the libraries it vendors run it, the editor
-inside it is built with React, and two font subsets are compiled into it. Each
-arrives under its own license, and
+its configuration, ESP-IDF and the toolchain run it, the editor inside it is
+built with React, and three font faces are compiled in. Nor is any of those all
+its own author's code — LVGL, ESP-IDF and the toolchain each vendor libraries
+they did not write, and those travel in the image too. Each arrives under its
+own license, and
 [`THIRD_PARTY_NOTICES.md`](https://github.com/{{REPO}}/blob/v{{VERSION}}/THIRD_PARTY_NOTICES.md)
-names every one of them, with the complete texts in
+names them all, with the complete texts in
 [`LICENSES/`](https://github.com/{{REPO}}/tree/v{{VERSION}}/LICENSES). Links
 rather than files, but links to the tag this image was built from: somebody who
 downloaded a binary has no clone to read those notices out of.
