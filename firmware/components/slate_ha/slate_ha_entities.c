@@ -659,8 +659,16 @@ static bool normalize_entity(ha_entity_t *entity, ha_entity_t *out,
         /* Outside `current`, because `device_class` is an attribute and not a
          * state: what a resource is stays true while it has nothing to report.
          * §7.5 dims the tile and shows a dash for the value; the icon is the
-         * one part of it that is still honest. */
-        entity->normalized_sensor.category = category(entity);
+         * one part of it that is still honest.
+         *
+         * But only while there is an entity to read it from. `present` is the
+         * difference between "has nothing to say" and "there is nothing here":
+         * a resubscription and a removal both clear the attributes without the
+         * entity having lost a `device_class`, and recomputing the category
+         * from that cleared copy would publish NONE over a known one. */
+        if (entity->present) {
+            entity->normalized_sensor.category = category(entity);
+        }
         *available = current;
     } else if (domain_is(entity->resource, "binary_sensor")) {
         *kind = SLATE_KIND_SENSOR;
@@ -690,9 +698,15 @@ static bool normalize_entity(ha_entity_t *entity, ha_entity_t *out,
         }
         /* A contact that has never answered is the case #133 exists for: it is
          * unavailable, so §7.5 gives it a dash — but it is still a door, and
-         * before this line it was a dash beside a question mark. Assigned after
-         * the block above, which replaces the whole struct. */
-        entity->normalized_sensor.category = category(entity);
+         * without this it was a dash beside a question mark. Assigned after the
+         * block above, which replaces the whole struct, and gated on `present`
+         * for the reason given in the `sensor` branch: a reconnect clears the
+         * attributes of every bound entity before the new state arrives, and
+         * this is the one line that could overwrite a good category with the
+         * question mark it exists to remove. */
+        if (entity->present) {
+            entity->normalized_sensor.category = category(entity);
+        }
         *available = current;
     } else if (domain_is(entity->resource, "scene")) {
         *kind = SLATE_KIND_SCENE;
@@ -1468,6 +1482,71 @@ esp_err_t slate_ha_entities_selftest(void)
     CHECK(bad_diff != NULL && process_event(bad_diff, false) == ESP_ERR_INVALID_ARG,
           "malformed compressed diff is refused");
     cJSON_Delete(bad_diff);
+
+    /*
+     * A reconnect, on entities that already have a category.
+     *
+     * §5.6 re-subscribes on every reconnect, and slate_ha_entities_prepare_
+     * subscription() marks every bound entity unavailable first — which clears
+     * its attributes, `device_class` among them. The category has to survive
+     * that: the entity did not lose anything, the socket did, and a tile that
+     * answers a dropped WebSocket with a question mark is the symptom #133
+     * exists to remove, arriving through a different door.
+     *
+     * Last in the file because prepare_subscription() takes the state away from
+     * every entity, so nothing after it could assume one.
+     */
+    cJSON *restated = cJSON_Parse(
+        "{\"a\":{\"binary_sensor.front_door\":{\"s\":\"on\",\"a\":{"
+        "\"friendly_name\":\"Front door\",\"device_class\":\"door\"}},"
+        "\"sensor.room_temperature\":{\"s\":\"21.5\",\"a\":{"
+        "\"friendly_name\":\"Room temperature\","
+        "\"unit_of_measurement\":\"°C\",\"device_class\":\"temperature\"}}}}"
+    );
+    bool restated_ok = restated != NULL &&
+                       slate_ha_entities_bind(ids, id_count, &binding_changed) == ESP_OK &&
+                       process_event(restated, false) == ESP_OK;
+    cJSON_Delete(restated);
+    LOCK();
+    mapped_contact = restated_ok && normalize_entity(find_entity(ids[4]), &contact,
+                                                     &contact_kind, &contact_available);
+    mapped_sensor = restated_ok && normalize_entity(find_entity(ids[2]), &sensor,
+                                                    &sensor_kind, &sensor_available);
+    UNLOCK();
+    CHECK(mapped_contact && contact_available &&
+              contact.normalized_sensor.category == SLATE_CATEGORY_DOOR && mapped_sensor &&
+              sensor.normalized_sensor.category == SLATE_CATEGORY_TEMPERATURE,
+          "entities carry a category before the reconnect");
+
+    CHECK(slate_ha_entities_prepare_subscription() == ESP_OK,
+          "resubscribe marks bound entities unavailable again");
+    LOCK();
+    mapped_contact = normalize_entity(find_entity(ids[4]), &contact, &contact_kind,
+                                      &contact_available);
+    mapped_sensor = normalize_entity(find_entity(ids[2]), &sensor, &sensor_kind,
+                                     &sensor_available);
+    UNLOCK();
+    CHECK(mapped_contact && !contact_available &&
+              contact.normalized_sensor.category == SLATE_CATEGORY_DOOR &&
+              strcmp(contact.normalized_sensor.text, "Open") == 0 && mapped_sensor &&
+              !sensor_available &&
+              sensor.normalized_sensor.category == SLATE_CATEGORY_TEMPERATURE,
+          "a reconnect does not take a category away with the attributes");
+
+    /* The other caller of clear_raw_attributes(): an entity Home Assistant no
+     * longer has. The tile goes to a dash either way, and keeping the door is
+     * what stops that dash from acquiring a question mark beside it. */
+    cJSON *gone = cJSON_Parse("{\"r\":[\"binary_sensor.front_door\"]}");
+    CHECK(gone != NULL && process_event(gone, false) == ESP_OK,
+          "apply a removal of a bound contact");
+    cJSON_Delete(gone);
+    LOCK();
+    mapped_contact = normalize_entity(find_entity(ids[4]), &contact, &contact_kind,
+                                      &contact_available);
+    UNLOCK();
+    CHECK(mapped_contact && !contact_available &&
+              contact.normalized_sensor.category == SLATE_CATEGORY_DOOR,
+          "a removed entity keeps the category it had");
 
     CHECK(slate_ha_entities_bind(NULL, 0, &binding_changed) == ESP_OK && binding_changed,
           "empty set unsubscribes everything");
