@@ -1,0 +1,136 @@
+# Nearly every report about a panel needs the same four facts before anything can
+# be reproduced — module marking, firmware version, provider and install path —
+# and asking for them one round trip at a time is how a report goes cold. They
+# are required fields here for that reason and no other.
+name: Bug report
+description: Something the panel does that it should not
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Suspected vulnerability?** Do not file it here — [`SECURITY.md`](https://github.com/mateuszsikora/slate/blob/main/SECURITY.md)
+        has the private channel, and also the list of documented trades (plain
+        HTTP, the open setup access point, the core dump endpoint) that look
+        like findings and are not.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What the panel, the editor or the screen actually did.
+      placeholder: |
+        The tile for light.living_room stays greyed out after a tap and never
+        comes back. The light itself turns on.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      description: |
+        Sometimes this is the whole bug. One rule catches everybody once:
+        answering an action is not confirming it — what clears a tile's pending
+        state is the next published snapshot showing the new value.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: |
+        From a state someone else can get to. If it only happens sometimes, say
+        how often and what it seems to follow.
+      placeholder: |
+        1. Flash 1.0.0, complete first-run setup against Home Assistant.
+        2. Add a light tile bound to light.living_room.
+        3. Tap it.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: Module marking
+      description: |
+        Printed on the metal can of the module itself, not on the box. Check it
+        rather than trusting the vendor documentation, which describes this
+        board as carrying an N8R8 that at least some units are not. The
+        partition table is drawn for 16 MB and does not fit 8 MB.
+      options:
+        - ESP32-S3-WROOM-1-N16R8 — 16 MB flash and 8 MB PSRAM (what Slate supports)
+        - ESP32-S3-WROOM-1-N8R8 — 8 MB flash
+        - Something else — or I cannot read the marking
+    validations:
+      required: true
+
+  - type: input
+    id: firmware-version
+    attributes:
+      label: Firmware version
+      description: |
+        The editor's **Device** panel shows it, and so does
+        `curl http://<panel>/api/v1/info`. If you built it yourself, the commit
+        you built from.
+      placeholder: 1.0.0, or 9258474 built from source
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      description: Tick every one the panel was configured with.
+      multiple: true
+      options:
+        - Home Assistant
+        - Direct — an External API key posting state
+        - Neither — the panel never got that far
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install-path
+    attributes:
+      label: How this firmware got onto the panel
+      description: |
+        The paths differ in what they write. An erase from the browser installer
+        takes the dashboard, security settings, API keys and WiFi credentials
+        with it; an update over the air keeps all of them.
+      options:
+        - The browser installer at mateuszsikora.github.io/slate
+        - Built from source — flashed over a cable with idf.py flash
+        - A release installed over the air from the editor
+        - Development OTA — tools/ota/upload.sh
+    validations:
+      required: true
+
+  - type: input
+    id: home-assistant-version
+    attributes:
+      label: Home Assistant version
+      description: Only if Home Assistant is involved.
+      placeholder: '2026.8.2'
+
+  - type: textarea
+    id: config
+    attributes:
+      label: The dashboard document, or the part of it that matters
+      description: |
+        Export it from the editor. It never contains your WiFi passphrase or
+        your Home Assistant token — those live in NVS and no endpoint returns
+        them — but check it for anything else you would rather not publish.
+      render: json
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        The boot log over the cable (`idf.py monitor`), the editor's log view,
+        or the browser console for an editor problem. If the panel crashed, say
+        so — a core dump is read against the `.elf` and `.map` published with
+        the release, so the version above is what makes it useful.
+      render: shell

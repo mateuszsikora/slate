@@ -1,0 +1,63 @@
+# Deliberately shorter than the bug form. What a feature request needs is the
+# problem behind it and which part of the design it lands in — a request that
+# names neither costs more to triage than it does to write.
+name: Feature request
+description: Something the panel should be able to do and cannot
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        [`docs/DESIGN.md`](https://github.com/mateuszsikora/slate/blob/main/docs/DESIGN.md)
+        is the source of truth for what Slate is, and §1 records the decisions
+        that are settled: no layout is hardcoded, components are semantic rather
+        than primitive, the browser talks only to the device, the device API is
+        a public contract, there is no second renderer, assets are compiled in.
+        A request that runs against one of those is worth making — say which one
+        and why it should move.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: |
+        The situation, not the solution. A panel on a wall, a thing you want on
+        it, and what stops you today.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why-not-today
+    attributes:
+      label: Why the current components or providers do not cover it
+      description: |
+        [`docs/CONFIGURATION.md`](https://github.com/mateuszsikora/slate/blob/main/docs/CONFIGURATION.md)
+        lists what a tile can be. The direct provider takes anything that can
+        POST JSON, which covers a surprising amount without new firmware — say
+        why it does not cover this.
+    validations:
+      required: true
+
+  - type: input
+    id: design-section
+    attributes:
+      label: Which part of the design this touches
+      description: A `docs/DESIGN.md` section, if you can name one.
+      placeholder: §7 components, or §5 the configuration document
+
+  - type: textarea
+    id: sketch
+    attributes:
+      label: What it might look like
+      description: |
+        Optional, and only worth writing if you already have it in your head —
+        the JSON for a tile, the endpoint, the screen. It is much easier to
+        argue with a concrete shape than with a description of one.
+
+  - type: markdown
+    attributes:
+      value: |
+        This is a personal project with one maintainer, one supported board and
+        no support commitment, so a good request can still be answered with
+        "not this". If it is something you would build yourself, say so — that
+        changes the conversation.

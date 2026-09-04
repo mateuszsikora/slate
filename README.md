@@ -345,6 +345,10 @@ they are worth knowing before the panel goes on a wall.
 PIN failures are rate-limited. There is no general API rate limit or origin
 allow-list; either would be added if a concrete scenario asked for it.
 
+[`SECURITY.md`](SECURITY.md) reads this section from the other side: which of
+these trades are settled and will not move, what a finding outside them looks
+like, and the private channel one goes to instead of a public issue.
+
 ## Building from source
 
 You need:
