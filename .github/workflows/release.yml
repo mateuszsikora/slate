@@ -98,12 +98,13 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-  # The first of the two settings in the header, asked for before anything is built. Its
-  # own job rather than a step beside the deploy, because the firmware build stands between
-  # those two points: a tag pushed without the setting would otherwise spend the whole
-  # ESP-IDF build before reaching a question that costs one API call. firmware waits for
-  # this, so the expensive half of the workflow does not start until the answer is yes —
-  # which costs nothing, since publish waits for the deploy regardless.
+  # The first of the two settings in the header, asked for before the firmware is built.
+  # Its own job rather than a step beside the deploy, because the ESP-IDF build stands
+  # between those two points and a tag pushed without the setting would otherwise pay for
+  # all of it before reaching a question that costs one API call. firmware waits for this;
+  # assets does not, and is left alone deliberately — it starts beside this job and takes
+  # longer than it, so on the path where everything works this job costs no wall clock at
+  # all, and gating it too would only buy back a font build on the path that fails anyway.
   #
   # Only an absent site is an error. Anything else the API says is a warning: this job
   # exists to explain one known failure, not to become a second one.
@@ -123,9 +124,19 @@ jobs:
               *'Not Found'*|*'does not support'*)
                 # Printed as well as summarised, because a 404 here has a second, much
                 # less likely cause — a token that cannot see the repository at all — and
-                # the error below names only the likely one.
+                # the errors below name only the likely one.
                 echo "$pages"
-                echo '::error::the Pages API has no site for this repository: set Settings → Pages → Source to "GitHub Actions" and re-run this workflow'
+                # Which of the two errors is the difference between an instruction and a
+                # dead end. On a private repository on the free plan there is no Source to
+                # set: the menu is not there, `POST /pages` answers 422, and the only move
+                # is the one this cannot ask for. Asked of the repository rather than read
+                # out of the message above, because the answer that arrives here is a plain
+                # 404 either way — the 422 is what creating a site answers, not reading one.
+                if [ "$(gh api "repos/$REPO" --jq .private 2>/dev/null)" = true ]; then
+                  echo '::error::this repository has no Pages site and, being private on this plan, cannot have one — Settings → Pages → Source appears once the repository is public'
+                else
+                  echo '::error::this repository has no Pages site: set Settings → Pages → Source to "GitHub Actions" and re-run this workflow'
+                fi
                 exit 1 ;;
               *)
                 # Flattened: an annotation renders its first line and drops the rest, and
