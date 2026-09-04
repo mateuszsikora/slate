@@ -618,9 +618,9 @@ esp_err_t slate_state_bind(const slate_binding_t *bindings, size_t count)
              * it now is the document: §3.1 stops at 64 KB and a binding costs
              * tens of bytes of JSON, so the ceiling is a few thousand of them
              * and a few million strcmp of a short id, once, on the task that is
-             * rebuilding the tree anyway. If that ever
-             * shows up in an apply, the fix is a better duplicate search and
-             * not a cap on the raw count: a cap on the raw count is #138. */
+             * rebuilding the tree anyway. If that ever shows up in an apply, the
+             * fix is a better duplicate search and not a cap on the raw count:
+             * a cap on the raw count is #138. */
             ESP_LOGE(TAG, "more than %u distinct resource(s) bound",
                      (unsigned) SLATE_STATE_MAX_RESOURCES);
             return ESP_ERR_INVALID_SIZE;
