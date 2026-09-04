@@ -1,0 +1,14 @@
+# Blank issues stay on. The backlog in this repository is written as prose issues
+# by the maintainer, and neither form above fits one of those; disabling the blank
+# option would make the templates a tax on the person who wrote them.
+blank_issues_enabled: true
+contact_links:
+  - name: Security report
+    url: https://github.com/mateuszsikora/slate/security/advisories/new
+    about: Report a vulnerability privately. SECURITY.md lists what counts as one — several of the trades in README §Security look like findings and are not.
+  - name: Configuration reference
+    url: https://github.com/mateuszsikora/slate/blob/main/docs/CONFIGURATION.md
+    about: The dashboard document — grid, components, settings, and what each validation error means.
+  - name: Device API reference
+    url: https://github.com/mateuszsikora/slate/blob/main/docs/API.md
+    about: The device API and the direct provider, endpoint by endpoint. Read this before reporting that a request was refused.
