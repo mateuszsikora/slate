@@ -10,7 +10,9 @@
 # build-*/ would now disappear from git add without a word. Nothing in the tree
 # is named that today, and a build directory anywhere is far likelier to be
 # output than source; a source directory that wants one of these names can be
-# unignored with an explicit ! rule.
+# unignored as a directory with an explicit ! rule. As a directory is the whole
+# of it — git does not descend into an excluded one, so !docs/build/keep.md is
+# silently still ignored where !docs/build/ re-includes what is under it.
 build/
 build-*/
 sdkconfig
@@ -46,10 +48,11 @@ firmware/components/slate_theme/assets/slate_icons.h
 # the rule says which ones rather than claiming every dist in the tree.
 editor/dist/
 
-# The flashing page's vendored ESP Web Tools bundle and the directory
-# tools/flasher/build.sh assembles for deployment. dist/ contains a copy of the
-# firmware images as well, so it is build output twice over: flasher/index.html
-# and flasher/package-lock.json are the sources of truth, and
+# The directory tools/flasher/build.sh assembles for deployment, carrying the
+# vendored ESP Web Tools bundle it copies out of node_modules/ — which is itself
+# covered by the rule at the top. dist/ contains a copy of the firmware images
+# as well, so it is build output twice over: flasher/index.html and
+# flasher/package-lock.json are the sources of truth, and
 # .github/workflows/release.yml regenerates the rest on every tag.
 flasher/dist/
 
