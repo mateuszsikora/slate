@@ -33,9 +33,13 @@ WiFi credentials, which live outside the application partitions. A full flash
 keeps them too unless the flash is erased first — the browser installer offers
 that as a checkbox and says what it costs.
 
-The panel does not check for updates on its own. The signed release channel is
-https://github.com/{{REPO}}/issues/37; until it exists, installing a new version
-is one of the two commands above.
+Neither command is how most panels will get this release. A panel already running
+Slate checks once a day against the manifest published beside the installer page
+above, and what it finds waits in the editor's **Firmware updates** panel until
+somebody presses *Install* — nothing is downloaded by the check, and a wall panel
+does not get to reboot itself in the middle of an evening. It verifies the
+SHA-256 the manifest names before it makes the image bootable, and the bootloader
+returns to the previous version on its own if the new one does not come back.
 
 ## Verify
 

@@ -226,12 +226,16 @@
 
       <h2>Updates</h2>
       <p>
-        This page installs a fixed version over a cable. The panel does not yet
-        check for updates on its own — the signed release channel is
-        <a href="https://github.com/mateuszsikora/slate/issues/37">#37</a>. Until
-        it lands, a later version is installed either from this page again or
-        over WiFi with the tool in the repository, and neither disturbs the
-        configuration.
+        <strong>The panel offers releases, and installs one when you say so.</strong>
+        This page installs a fixed version over a cable; after that the panel
+        checks once a day against a small manifest published beside this page,
+        and what it finds waits in the editor's <em>Firmware updates</em> panel.
+        Nothing is downloaded by that check and nothing restarts unasked — a wall
+        panel does not get to reboot itself in the middle of an evening.
+      </p>
+      <p>
+        A version can still be installed from this page again, or over WiFi with
+        the tool in the repository. None of the three disturbs the configuration.
       </p>
 
       <footer>
