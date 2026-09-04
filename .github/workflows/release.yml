@@ -126,17 +126,30 @@ jobs:
                 # less likely cause — a token that cannot see the repository at all — and
                 # the errors below name only the likely one.
                 echo "$pages"
-                # Which of the two errors is the difference between an instruction and a
-                # dead end. On a private repository on the free plan there is no Source to
-                # set: the menu is not there, `POST /pages` answers 422, and the only move
-                # is the one this cannot ask for. Asked of the repository rather than read
-                # out of the message above, because the answer that arrives here is a plain
-                # 404 either way — the 422 is what creating a site answers, not reading one.
-                if [ "$(gh api "repos/$REPO" --jq .private 2>/dev/null)" = true ]; then
-                  echo '::error::this repository has no Pages site and, being private on this plan, cannot have one — Settings → Pages → Source appears once the repository is public'
-                else
-                  echo '::error::this repository has no Pages site: set Settings → Pages → Source to "GitHub Actions" and re-run this workflow'
+                # Which error follows is the difference between an instruction and a dead
+                # end. On a private repository on the free plan there is no Source to set:
+                # the menu is not there, `POST /pages` answers 422, and the only move is one
+                # this cannot ask for. Asked of the repository rather than read out of the
+                # message above, because the answer that arrives here is a plain 404 either
+                # way — the 422 is what creating a site answers, not reading one.
+                #
+                # Three cases, not two, and an unreadable answer is its own. Defaulting it
+                # to "public" would print the impossible instruction on exactly the
+                # repository this was written for, and there is more than one way not to get
+                # an answer: a rate limit, a bad minute at the API, or a token that cannot
+                # see the repository — the same cause the comment above gives for a 404.
+                if ! private=$(gh api "repos/$REPO" --jq .private 2>&1); then
+                  echo "could not read whether the repository is private: $(printf '%s' "$private" | tr '\n' ' ')"
+                  private=unknown
                 fi
+                case "$private" in
+                  true)
+                    echo '::error::this repository has no Pages site and, being private on this plan, cannot have one — Settings → Pages → Source appears once the repository is public' ;;
+                  false)
+                    echo '::error::this repository has no Pages site: set Settings → Pages → Source to "GitHub Actions" and re-run this workflow' ;;
+                  *)
+                    echo '::error::this repository has no Pages site. If it is public, set Settings → Pages → Source to "GitHub Actions"; if it is private on this plan, that menu appears only once it is public' ;;
+                esac
                 exit 1 ;;
               *)
                 # Flattened: an annotation renders its first line and drops the rest, and
