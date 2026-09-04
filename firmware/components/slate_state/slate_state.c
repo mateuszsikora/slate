@@ -167,6 +167,8 @@ _Static_assert(sizeof(STATUS_NAMES) / sizeof(STATUS_NAMES[0]) == SLATE_PROVIDER_
                "every provider status needs a name");
 _Static_assert(sizeof(ACTION_NAMES) / sizeof(ACTION_NAMES[0]) == SLATE_ACTION_COUNT,
                "every action needs a name");
+_Static_assert(sizeof(CATEGORY_NAMES) / sizeof(CATEGORY_NAMES[0]) == SLATE_CATEGORY_COUNT,
+               "every category needs a name");
 _Static_assert(sizeof(PRESENTATION_NAMES) / sizeof(PRESENTATION_NAMES[0]) ==
                    SLATE_PRESENT_INCOMPATIBLE + 1,
                "every presentation needs a name");
@@ -239,7 +241,7 @@ bool slate_measurement_from_str(const char *name, slate_measurement_t *out)
 
 const char *slate_category_str(slate_category_t category)
 {
-    return category < SLATE_CATEGORY_COUNT ? CATEGORY_NAMES[category] : NULL;
+    return (unsigned) category < SLATE_CATEGORY_COUNT ? CATEGORY_NAMES[category] : NULL;
 }
 
 bool slate_category_from_str(const char *name, slate_category_t *out)

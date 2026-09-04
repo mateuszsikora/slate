@@ -3984,6 +3984,28 @@ static esp_err_t selftest_on_task(void)
                  lv_obj_get_style_opa(humidity->tile, LV_PART_MAIN) == LV_OPA_50,
              "unavailable sensor keeps its unit and renders a dimmed dash");
 
+    /* A contact that has not answered is still a door. §7.5 takes the word
+     * away, because a value that stopped being true must not stay on the wall;
+     * the icon is not a value and stays. */
+    const slate_snapshot_t contact_gone = {
+        .resource = "contact",
+        .kind = SLATE_KIND_SENSOR,
+        .name = "Front door",
+        .available = false,
+        .state.sensor = {.numeric = false, .text = "Open",
+                         .category = SLATE_CATEGORY_DOOR},
+    };
+    esp_err_t contact_gone_err = slate_state_publish("direct", &contact_gone);
+    if (contact_gone_err == ESP_OK) {
+        slate_state_drain(discard_changed, NULL);
+        update_all();
+    }
+    contact = find_view("direct", "contact");
+    UI_CHECK(contact_gone_err == ESP_OK && sensor_view_text("contact", "-", "") &&
+                 contact != NULL && contact->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(contact->sensor.icon), SLATE_ICON_DOOR_CLOSED) == 0,
+             "an unanswered contact loses its word and keeps its door");
+
     ui_tree_t *sensor_tree = s_tree;
     slate_provider_status_t sensor_direct_status =
         slate_state_provider_status("direct");

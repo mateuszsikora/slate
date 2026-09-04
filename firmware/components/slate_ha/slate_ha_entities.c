@@ -653,10 +653,14 @@ static bool normalize_entity(ha_entity_t *entity, ha_entity_t *out,
                 strlcpy(sensor.unit, entity->unit, sizeof(sensor.unit));
             }
             sensor.measurement = measurement(entity);
-            sensor.category = category(entity);
             entity->normalized_sensor = sensor;
             entity->normalized_capabilities = (slate_capabilities_t) {0};
         }
+        /* Outside `current`, because `device_class` is an attribute and not a
+         * state: what a resource is stays true while it has nothing to report.
+         * §7.5 dims the tile and shows a dash for the value; the icon is the
+         * one part of it that is still honest. */
+        entity->normalized_sensor.category = category(entity);
         *available = current;
     } else if (domain_is(entity->resource, "binary_sensor")) {
         *kind = SLATE_KIND_SENSOR;
@@ -677,14 +681,18 @@ static bool normalize_entity(ha_entity_t *entity, ha_entity_t *out,
             strlcpy(sensor.text,
                     binary_sensor_text(entity, strcmp(entity->raw_state, "on") == 0),
                     sizeof(sensor.text));
-            /* A category but no unit and no measurement: `device_class` here
-             * names what the contact means, not what it measures. §5.2 has one
-             * field for each, so the door reaches §7.3 as a door without
-             * claiming a magnitude the tile would then try to format. */
-            sensor.category = category(entity);
+            /* No unit and no measurement: `device_class` here names what the
+             * contact means, not what it measures. §5.2 has one field for each,
+             * so the door reaches §7.3 as a door without claiming a magnitude
+             * the tile would then try to format. */
             entity->normalized_sensor = sensor;
             entity->normalized_capabilities = (slate_capabilities_t) {0};
         }
+        /* A contact that has never answered is the case #133 exists for: it is
+         * unavailable, so §7.5 gives it a dash — but it is still a door, and
+         * before this line it was a dash beside a question mark. Assigned after
+         * the block above, which replaces the whole struct. */
+        entity->normalized_sensor.category = category(entity);
         *available = current;
     } else if (domain_is(entity->resource, "scene")) {
         *kind = SLATE_KIND_SCENE;
@@ -1328,8 +1336,18 @@ esp_err_t slate_ha_entities_selftest(void)
                      k_categories[i].device_class);
             categories_reachable = false;
         }
+        /* A class listed twice is dead code the two-way check above cannot
+         * see: the second row is never reached, and the second answer is the
+         * one a reader of the table would believe. */
+        for (size_t j = i + 1; j < sizeof(k_categories) / sizeof(k_categories[0]); j++) {
+            if (strcmp(k_categories[i].device_class, k_categories[j].device_class) == 0) {
+                ESP_LOGE(TAG, "device_class %s is in the table twice",
+                         k_categories[i].device_class);
+                categories_reachable = false;
+            }
+        }
     }
-    CHECK(categories_reachable, "every category is named by a device_class and back");
+    CHECK(categories_reachable, "every category is named by one device_class and back");
 
     /* The two domains through one table: a contact with no magnitude, and a
      * numeric reading whose class is outside §5.2's four measurements. Both
@@ -1340,19 +1358,33 @@ esp_err_t slate_ha_entities_selftest(void)
         const char *device_class;
         slate_category_t category;
         slate_measurement_t measurement;
+        slate_presentation_t presentation;
     } categorised[] = {
         {"binary_sensor.probe", "on", "window", SLATE_CATEGORY_WINDOW,
-         SLATE_MEASUREMENT_NONE},
+         SLATE_MEASUREMENT_NONE, SLATE_PRESENT_OK},
         {"binary_sensor.probe", "off", "motion", SLATE_CATEGORY_MOTION,
-         SLATE_MEASUREMENT_NONE},
+         SLATE_MEASUREMENT_NONE, SLATE_PRESENT_OK},
         {"binary_sensor.probe", "on", "carbon_monoxide", SLATE_CATEGORY_GAS,
-         SLATE_MEASUREMENT_NONE},
+         SLATE_MEASUREMENT_NONE, SLATE_PRESENT_OK},
         {"sensor.probe", "412", "illuminance", SLATE_CATEGORY_ILLUMINANCE,
-         SLATE_MEASUREMENT_NONE},
-        {"sensor.probe", "41", "battery", SLATE_CATEGORY_BATTERY, SLATE_MEASUREMENT_NONE},
+         SLATE_MEASUREMENT_NONE, SLATE_PRESENT_OK},
+        {"sensor.probe", "41", "battery", SLATE_CATEGORY_BATTERY, SLATE_MEASUREMENT_NONE,
+         SLATE_PRESENT_OK},
         {"sensor.probe", "21.5", "temperature", SLATE_CATEGORY_TEMPERATURE,
-         SLATE_MEASUREMENT_TEMPERATURE},
-        {"sensor.probe", "8", "irradiance", SLATE_CATEGORY_NONE, SLATE_MEASUREMENT_NONE},
+         SLATE_MEASUREMENT_TEMPERATURE, SLATE_PRESENT_OK},
+        {"sensor.probe", "8", "irradiance", SLATE_CATEGORY_NONE, SLATE_MEASUREMENT_NONE,
+         SLATE_PRESENT_OK},
+        /* The panel that came up before the Zigbee integration did, and the
+         * contact whose battery died before anyone bound it. A `device_class`
+         * is an attribute, so it is there to be read even though no state ever
+         * arrived — and the whole point of #133 is that this tile stops being
+         * a dash beside a question mark. */
+        {"binary_sensor.probe", "unknown", "door", SLATE_CATEGORY_DOOR,
+         SLATE_MEASUREMENT_NONE, SLATE_PRESENT_UNAVAILABLE},
+        {"binary_sensor.probe", "unavailable", "moisture", SLATE_CATEGORY_MOISTURE,
+         SLATE_MEASUREMENT_NONE, SLATE_PRESENT_UNAVAILABLE},
+        {"sensor.probe", "unavailable", "battery", SLATE_CATEGORY_BATTERY,
+         SLATE_MEASUREMENT_NONE, SLATE_PRESENT_UNAVAILABLE},
     };
     bool categorised_ok = true;
     for (size_t i = 0; i < sizeof(categorised) / sizeof(categorised[0]); i++) {
@@ -1366,19 +1398,21 @@ esp_err_t slate_ha_entities_selftest(void)
         bool ok = parsed != NULL &&
                   slate_ha_entities_normalize_full_state(parsed, &probe) == ESP_OK &&
                   probe.kind == SLATE_KIND_SENSOR &&
+                  probe.presentation == categorised[i].presentation &&
                   probe.state.sensor.category == categorised[i].category &&
                   probe.state.sensor.measurement == categorised[i].measurement;
         cJSON_Delete(parsed);
         if (!ok) {
-            ESP_LOGE(TAG, "%s/%s did not normalize to category %s",
+            ESP_LOGE(TAG, "%s/%s (%s) did not normalize to category %s",
                      categorised[i].entity, categorised[i].device_class,
+                     categorised[i].state,
                      slate_category_str(categorised[i].category) != NULL
                          ? slate_category_str(categorised[i].category)
                          : "(none)");
             categorised_ok = false;
         }
     }
-    CHECK(categorised_ok, "a device_class becomes a category in both sensor domains");
+    CHECK(categorised_ok, "a device_class becomes a category, answered or not");
 
     cJSON *change = cJSON_Parse(
         "{\"c\":{\"light.kitchen\":{\"+\":{\"s\":\"off\","

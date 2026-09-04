@@ -707,6 +707,8 @@ The word comes from `device_class`, which is where a `binary_sensor` keeps its m
 
 The same `device_class` also supplies §5.2's `category`, which is what puts a door rather than a question mark beside the word. One table serves both sensor domains, because the class names are one namespace and a `battery` is a battery whether it arrives as `41` or as `Low`; several classes share a category wherever the panel draws them the same way. A numeric `sensor` therefore gains an icon for the classes outside §5.2's four measurements — `illuminance`, `battery`, `aqi` and the rest — which used to reach §7.3 with nothing to choose from. A class this firmware has no glyph for supplies no category and falls back to the question mark, which is the honest answer for one entity rather than the rule for a domain.
 
+The category does not depend on the state, because `device_class` is an attribute and not a state. A contact whose first observed state is `unknown` — a panel that came up before its Zigbee integration did, a sensor whose battery died before anyone bound it — is unavailable and renders §7.5's dash, and is still drawn as a door. Taking the icon away with the value would put the question mark back exactly where it was worst.
+
 `unknown` is not `off`. A `sensor` may legitimately read `unknown` and §7.3 shows that text; a `binary_sensor` that says so has not answered, so it goes unavailable and renders §7.5's dash rather than a word that is not true. That is why the table above keys availability on the domain and not on the kind.
 
 ### 5.7 Home Assistant resource picker
