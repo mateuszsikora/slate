@@ -40,3 +40,10 @@ flasher/dist/
 
 # Python bytecode from the helpers in tools/
 __pycache__/
+
+# Scratch notes agents pass between themselves while working the same
+# repository — plans, todo lists, half-finished findings. They belong to a
+# workspace rather than to a change, so `git add -A` must not sweep them into
+# the repository's history. Unanchored on purpose: scratch is scratch wherever
+# it sits, and nothing tracked is named .context.
+.context/
