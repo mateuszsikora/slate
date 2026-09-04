@@ -2,7 +2,7 @@
  * Slate — core dump retrieval. See include/slate_coredump.h for the
  * integration contract.
  *
- * design.md §11.3, §4.1, §4.3, §6.3.
+ * DESIGN.md §11.3, §4.1, §4.3, §6.3.
  */
 
 #include "slate_coredump.h"

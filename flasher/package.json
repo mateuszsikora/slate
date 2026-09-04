@@ -1,7 +1,7 @@
 {
   "name": "slate-flasher",
   "private": true,
-  "description": "Pins the ESP Web Tools build vendored into the flashing page (design.md §9.1).",
+  "description": "Pins the ESP Web Tools build vendored into the flashing page (DESIGN.md §9.1).",
   "license": "MIT",
   "dependencies": {
     "esp-web-tools": "10.4.0"

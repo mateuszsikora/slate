@@ -12,7 +12,7 @@ Read every Markdown file in the repository before touching code:
 find . -name '*.md' -not -path './node_modules/*' -not -path './.git/*'
 ```
 
-At minimum: `README.md`, `docs/design.md` (the full design — architecture decisions, config format, device API, milestones), and this file. `docs/design.md` is the source of truth; issues reference its sections. If an issue and the design document disagree, the design document wins — say so in the issue rather than silently following the issue.
+At minimum: `README.md`, `docs/DESIGN.md` (the full design — architecture decisions, config format, device API, milestones), and this file. `docs/DESIGN.md` is the source of truth; issues reference its sections. If an issue and the design document disagree, the design document wins — say so in the issue rather than silently following the issue.
 
 ## 2. Pick an issue
 
@@ -47,7 +47,7 @@ gh issue view <issue-number> --comments
 
 - Read **every comment, oldest to newest**, including ones left by other agents on an earlier claim of the same issue.
 - Where comments contradict the body, the **latest comment from the maintainer wins**. Say in your plan which part of the body you are overriding and why.
-- Follow the trail: referenced issues (`#12`), linked PRs, and the `docs/design.md` sections the issue names. A closed linked PR usually explains why a first attempt was abandoned.
+- Follow the trail: referenced issues (`#12`), linked PRs, and the `docs/DESIGN.md` sections the issue names. A closed linked PR usually explains why a first attempt was abandoned.
 - If the issue was previously claimed and handed back, find the question that blocked it and check whether it has been answered. If it has not, do not re-claim the issue.
 - Note any comment that answers a question you would otherwise have had to ask — quote it in your plan so a reviewer can see where the decision came from.
 
@@ -55,7 +55,7 @@ gh issue view <issue-number> --comments
 
 Write a short plan as a comment on the issue:
 
-- Which design.md sections govern this work.
+- Which DESIGN.md sections govern this work.
 - Which files you will add or change.
 - How you will verify the "Done when" criteria — concretely, on hardware where the issue implies hardware.
 - Anything in the issue that is ambiguous or that you believe is wrong.
@@ -63,7 +63,7 @@ Write a short plan as a comment on the issue:
 **Ask questions when you need them.** Post them as an issue comment, remove the `in-progress` label so another agent can pick the issue up once it is answered, and stop. Do not guess on:
 
 - pin assignments, partition sizes, or anything that forces a serial reflash to change later;
-- the shape of a public API response — `docs/design.md` §4 is a contract, and changing it later breaks clients;
+- the shape of a public API response — `docs/DESIGN.md` §4 is a contract, and changing it later breaks clients;
 - anything requiring physical hardware access or credentials you do not have.
 
 Proceed without asking when the design document already answers the question.

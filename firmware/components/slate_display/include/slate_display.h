@@ -1,7 +1,7 @@
 /*
  * Slate — RGB panel and the single-owner LVGL task.
  *
- * design.md §6.1–§6.2. The task created by slate_display_init() is the only
+ * DESIGN.md §6.1–§6.2. The task created by slate_display_init() is the only
  * task allowed to call LVGL. API handlers, the Home Assistant client and later
  * UI components cross that boundary through slate_display_post(); none of them
  * receives an lv_obj_t or a display handle.

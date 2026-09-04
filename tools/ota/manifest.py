@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write the release manifest a panel checks for updates against (design.md §11.4).
+"""Write the release manifest a panel checks for updates against (DESIGN.md §11.4).
 
     tools/ota/manifest.py --dist flasher/dist --version 1.0.0 \
                           --base-url https://mateuszsikora.github.io/slate/

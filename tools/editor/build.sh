@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build the editor bundle the firmware serves (design.md §10).
+# Build the editor bundle the firmware serves (DESIGN.md §10).
 #
 # Run from anywhere; paths are resolved relative to this script. Requires node
 # and network access on first run.

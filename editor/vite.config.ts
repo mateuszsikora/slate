@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import { viteSingleFile } from 'vite-plugin-singlefile'
 
 /*
- * The build emits one file. design.md §10 puts the bundle on the device's
+ * The build emits one file. DESIGN.md §10 puts the bundle on the device's
  * LittleFS and firmware/components/slate_editor seeds it there out of the
  * image, so a single document is what makes that seed one atomic write and
  * §10's "under 400 KB gzipped" one number the firmware build measures rather

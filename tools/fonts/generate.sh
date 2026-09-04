@@ -16,7 +16,7 @@
 # The firmware project itself arrives in M1 — this script creates its output
 # directory, so it runs standalone until then.
 #
-# Why these parameters — all from design.md §8:
+# Why these parameters — all from DESIGN.md §8:
 #   - Three type steps: hero 44 px, body 20 px, caption 15 px.
 #   - bpp 4. Without antialiasing everything looks dated regardless of the rest.
 #   - Coverage: Latin-1 plus Polish diacritics.

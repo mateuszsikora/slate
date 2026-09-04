@@ -3,7 +3,7 @@ import type { BarItem } from './api'
 export const BAR_SLOT_COUNT = 12
 
 /**
- * The component names a bar item may carry (design.md §3.2). A bound item names
+ * The component names a bar item may carry (DESIGN.md §3.2). A bound item names
  * its component exactly as a tile does, which is where the binding's kind comes
  * from; `scene` is stateless and has no bar presentation.
  */

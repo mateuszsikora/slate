@@ -1,7 +1,7 @@
 /*
  * Slate — the release update channel (§11.4).
  *
- * design.md §11.4 (the manifest, the daily check, installation on explicit
+ * DESIGN.md §11.4 (the manifest, the daily check, installation on explicit
  * request), §4.1 (the three routes below are contract), §6.3 (the two
  * application slots and the partitions that survive an update), §12.
  *

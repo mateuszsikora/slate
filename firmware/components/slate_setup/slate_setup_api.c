@@ -1,7 +1,7 @@
 /*
  * Slate — the setup page and §4.1's three `/wifi` endpoints.
  *
- * design.md §4.1 (the routes), §4.3 (why three of them need no token on the
+ * DESIGN.md §4.1 (the routes), §4.3 (why three of them need no token on the
  * access point), §9.2 (the cached scan, the compiled-in page), §9.3 (why
  * `POST /wifi` cannot answer the question it is asked), §9.6 and §4.1 (the
  * `ipv4` object, both modes of it).

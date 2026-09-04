@@ -1,7 +1,7 @@
 /*
  * Slate — core dumps off the panel without a cable (§11.3).
  *
- * design.md §11.3 (the bullet this implements), §4.1 (`GET /coredump` in the
+ * DESIGN.md §11.3 (the bullet this implements), §4.1 (`GET /coredump` in the
  * route table), §4.3 and §14 (the device token), §6.3 (the 128 KB `coredump`
  * partition and why it is that size).
  *

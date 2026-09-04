@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Install a firmware image on a Slate panel over the network (design.md §11.1).
+# Install a firmware image on a Slate panel over the network (DESIGN.md §11.1).
 #
 #   SLATE_TOKEN=... tools/ota/upload.sh <host> [image]
 #
@@ -31,7 +31,7 @@ set -euo pipefail
 
 usage() {
     cat >&2 <<'EOF'
-Install a firmware image on a Slate panel over the network (design.md §11.1).
+Install a firmware image on a Slate panel over the network (DESIGN.md §11.1).
 
   SLATE_TOKEN=... tools/ota/upload.sh <host> [image]
 
@@ -50,7 +50,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 HOST="$1"
 IMAGE="${2:-${REPO_ROOT}/firmware/build/slate.bin}"
-: "${SLATE_TOKEN:?set SLATE_TOKEN to the device token (design.md §4.3)}"
+: "${SLATE_TOKEN:?set SLATE_TOKEN to the device token (DESIGN.md §4.3)}"
 
 case "${HOST}" in
     http://*|https://*) BASE="${HOST}" ;;

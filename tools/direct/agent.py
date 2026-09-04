@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Answer a Slate panel's semantic actions through the External API.
 
-design.md §4.2 (the WebSocket), §5.2 (normalized state), §5.3 (semantic actions
+DESIGN.md §4.2 (the WebSocket), §5.2 (normalized state), §5.3 (semantic actions
 and optimistic updates), §5.4 (the `direct` provider behind External API).
 
     SLATE_API_KEY=... tools/direct/agent.py <host> [--fail]

@@ -2,7 +2,7 @@
  * Slate — the direct integration provider. See include/slate_direct.h for what
  * this component owns and what it deliberately leaves to #18.
  *
- * design.md ADR-3, §4.1, §4.2, §5.1 to §5.4.
+ * DESIGN.md ADR-3, §4.1, §4.2, §5.1 to §5.4.
  */
 
 #include "slate_direct.h"

@@ -2,7 +2,7 @@
  * Slate — development OTA and boot health. See include/slate_ota.h for the
  * integration contract.
  *
- * design.md §11.1, §11.2, §4.1, §4.3.
+ * DESIGN.md §11.1, §11.2, §4.1, §4.3.
  */
 
 #include "slate_ota.h"

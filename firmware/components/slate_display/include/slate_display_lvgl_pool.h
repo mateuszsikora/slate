@@ -1,5 +1,5 @@
 /*
- * The backing allocation for LVGL's built-in heap (design.md §6.2).
+ * The backing allocation for LVGL's built-in heap (DESIGN.md §6.2).
  *
  * This header is included while the managed LVGL component is compiled; see
  * firmware/CMakeLists.txt. It intentionally contains no Slate component types

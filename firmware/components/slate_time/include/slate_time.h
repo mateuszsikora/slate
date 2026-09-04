@@ -1,7 +1,7 @@
 /*
  * Slate — clock: SNTP and the timezone.
  *
- * design.md §3.3 (`settings.timezone`, the night schedule), §6.1 (SNTP in the
+ * DESIGN.md §3.3 (`settings.timezone`, the night schedule), §6.1 (SNTP in the
  * stack), §9.4 (why the clock cannot be set in setup mode).
  *
  *

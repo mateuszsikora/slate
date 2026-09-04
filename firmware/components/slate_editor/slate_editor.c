@@ -2,7 +2,7 @@
  * Slate — the editor bundle. See include/slate_editor.h for why one document
  * exists in two places.
  *
- * design.md §10, §4.3, §6.3.
+ * DESIGN.md §10, §4.3, §6.3.
  */
 
 #include "slate_editor.h"

@@ -1,7 +1,7 @@
 /*
  * Slate — authenticated WebSocket diagnostics and editor event channel.
  *
- * design.md §4.2 and §11.3. Log producers only format into an 8 KiB record
+ * DESIGN.md §4.2 and §11.3. Log producers only format into an 8 KiB record
  * ring. All network writes are queued onto esp_http_server's own task, where a
  * session-generation check prevents an fd reused by a new, unauthenticated
  * client from receiving the previous client's backlog.

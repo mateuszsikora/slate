@@ -1,7 +1,7 @@
 /*
  * Slate — development OTA and boot health (§11.1, §11.2).
  *
- * design.md §11.1 (the endpoint), §11.2 (rollback), §4.1 (the route table),
+ * DESIGN.md §11.1 (the endpoint), §11.2 (rollback), §4.1 (the route table),
  * §4.3 and §14 (the token applies to every write, development OTA included),
  * §6.3 (the two application slots this writes between).
  *

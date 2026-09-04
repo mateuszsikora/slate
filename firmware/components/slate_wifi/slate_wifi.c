@@ -1,7 +1,7 @@
 /*
  * Slate — WiFi station. See include/slate_wifi.h for the contract.
  *
- * design.md §9.3, §9.4, §4.1.
+ * DESIGN.md §9.3, §9.4, §4.1.
  *
  * The whole of §9.4 is one loop on one task, deliberately. The alternative —
  * event handlers arming esp_timer callbacks that arm each other — spreads a

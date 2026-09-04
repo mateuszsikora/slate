@@ -1,7 +1,7 @@
 /*
  * Slate — HTTP API v1.
  *
- * design.md ADR-3/ADR-4, §4.1 (routes), §4.3 (authentication).
+ * DESIGN.md ADR-3/ADR-4, §4.1 (routes), §4.3 (authentication).
  *
  * The server and the authentication policy live in one component. Later
  * components register their routes through slate_api_register_uri() rather

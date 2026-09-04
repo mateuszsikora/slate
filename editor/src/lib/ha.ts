@@ -79,7 +79,7 @@ function resourceDomain(resource: string): string | undefined {
   return resource.slice(0, dot)
 }
 
-/** The same four kinds the firmware adapter publishes — see design.md §5.6. */
+/** The same four kinds the firmware adapter publishes — see DESIGN.md §5.6. */
 function resourceKind(domain: string): Resource['kind'] | undefined {
   if (domain === 'light' || domain === 'cover' || domain === 'sensor' || domain === 'scene') {
     return domain

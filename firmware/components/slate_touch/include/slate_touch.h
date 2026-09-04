@@ -1,7 +1,7 @@
 /*
  * Slate — GT911 capacitive touch, as an LVGL input device.
  *
- * design.md §6.1. This component owns the two pins that belong to the touch
+ * DESIGN.md §6.1. This component owns the two pins that belong to the touch
  * controller and nothing else on the board: the interrupt line on the SoC and
  * the reset line on the CH422G. The I²C bus and expander belong to
  * slate_display, which brought them up for the panel and lends them here rather

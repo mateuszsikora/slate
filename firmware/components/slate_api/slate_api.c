@@ -1,7 +1,7 @@
 /*
  * Slate — HTTP API v1. See include/slate_api.h for the integration contract.
  *
- * design.md ADR-3/ADR-4, §4.1, §4.3, §9.3 and §12.
+ * DESIGN.md ADR-3/ADR-4, §4.1, §4.3, §9.3 and §12.
  */
 
 #include "slate_api.h"

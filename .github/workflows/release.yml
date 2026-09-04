@@ -1,4 +1,4 @@
-# Slate releases — design.md §14 M8, "someone without ESP-IDF gets a running panel".
+# Slate releases — DESIGN.md §14 M8, "someone without ESP-IDF gets a running panel".
 #
 # A tag is the whole trigger. Pushing `v1.2.3` builds the release image from that tag,
 # publishes it as a GitHub Release with checksums, and deploys the browser flasher of

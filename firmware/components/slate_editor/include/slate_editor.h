@@ -1,7 +1,7 @@
 /*
  * Slate — the editor bundle.
  *
- * design.md §10 (the editor), §4.3 (how a browser gets to it), §6.3 (where it
+ * DESIGN.md §10 (the editor), §4.3 (how a browser gets to it), §6.3 (where it
  * lives), ADR-3 and ADR-4 (it is a client of the public API, not a privileged
  * part of the firmware).
  *

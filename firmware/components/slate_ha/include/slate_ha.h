@@ -1,7 +1,7 @@
 /*
  * Slate — Home Assistant connection provider.
  *
- * design.md ADR-3, §4.1, §5.1, §5.5 and §12. Home Assistant transport
+ * DESIGN.md ADR-3, §4.1, §5.1, §5.5 and §12. Home Assistant transport
  * details terminate in this component; the state store sees only provider
  * lifecycle status and the UI runtime cannot name a WebSocket frame.
  */

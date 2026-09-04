@@ -1,7 +1,7 @@
 # Slate partition table — ESP32-S3-WROOM-1-N16R8, 16 MB flash.
 #
 # Settled in issue #5 against the S-3 measurements (docs/spikes/s3.md); the
-# reasoning behind every size is in design.md §6.3. Changing this table later
+# reasoning behind every size is in DESIGN.md §6.3. Changing this table later
 # forces a full serial flash, which is why it is written before firmware code.
 #
 # The table fills the flash exactly, from 0x9000 to 0x1000000. nvs absorbs the
