@@ -9,11 +9,13 @@ provided with the distribution". This file is that documentation.
 
 It covers one firmware image: the libraries linked into it (§6.1), the editor
 bundle it seeds onto the filesystem (§10), the root certificates it trusts
-(§11.4), and the font subsets it draws with (ADR-6). A release publishes two
-further images beside it — `bootloader-<version>.bin` and
-`partition-table-<version>.bin` — and both are covered by the ESP-IDF entry
-below and by nothing else: the bootloader links Espressif's code only, and the
-partition table is generated from `firmware/partitions.csv`.
+(§11.4), and the font subsets it draws with (ADR-6). A release publishes three
+further images beside it — `bootloader-<version>.bin`,
+`partition-table-<version>.bin` and `ota-data-initial-<version>.bin` — and none
+of them needs an entry of its own. The bootloader links Espressif's code and
+nothing else, so the ESP-IDF entry below covers it; the other two are
+generated, one from `firmware/partitions.csv` and one 8 KB of `0xff` saying
+that no OTA slot has been chosen yet.
 
 The last section is the exception. It is about the browser flashing page, which
 is in no image and reaches nobody who does not open it.
@@ -21,10 +23,10 @@ is in no image and reaches nobody who does not open it.
 Versions are the ones pinned in
 [`firmware/dependencies.lock`](firmware/dependencies.lock),
 [`editor/package-lock.json`](editor/package-lock.json) and
-[`flasher/package-lock.json`](flasher/package-lock.json). What is listed as linked
-was read out of the link map of a built image rather than off the dependency
-files, because those name what the build may use and the map names what the
-image actually contains.
+[`flasher/package-lock.json`](flasher/package-lock.json). What is listed as
+linked was read out of the link map of a built image rather than off the
+dependency files, because those name what the build may use and the map names
+what the image actually contains.
 
 ## Libraries linked into firmware images
 
@@ -175,8 +177,8 @@ Upstream: <https://github.com/facebook/react>
 `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` compiles a set of certificate authority
 roots into the image — 17 928 bytes of it, more than the face LVGL brings and a
 quarter of what the hero subset costs — and §11.4's update check is what it
-exists for. It is not Mbed TLS's code and the
-Apache-2.0 entry above does not reach it; it only travels in the same archive.
+exists for. It is not Mbed TLS's code and the Apache-2.0 entry above does not
+reach it; it only travels in the same archive.
 
 The data is Mozilla's. ESP-IDF's `cacrt_all.pem` says where it came from in its
 own header — "Certificate data from Mozilla as of: Tue Feb 25 04:12:03 2025
