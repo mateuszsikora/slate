@@ -248,6 +248,12 @@ static esp_err_t register_route(const httpd_uri_t *uri, slate_api_auth_t auth)
         }
     }
     if (route == NULL) {
+        /* Named here because it arrives everywhere else as a component
+         * reporting ESP_ERR_NO_MEM on a device with megabytes free: the
+         * caller that overflows the table is simply the one that registered
+         * last, and nothing about its message says the table is the cause. */
+        ESP_LOGE(TAG, "no route slot left for %s — SLATE_API_MAX_URI_HANDLERS is %d", uri->uri,
+                 SLATE_API_MAX_URI_HANDLERS);
         return ESP_ERR_NO_MEM;
     }
 

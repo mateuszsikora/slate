@@ -21,9 +21,24 @@
 extern "C" {
 #endif
 
-#define SLATE_API_BASE_PATH        "/api/v1"
-#define SLATE_SETUP_AP_ADDRESS     "192.168.4.1"
-#define SLATE_API_MAX_URI_HANDLERS 30
+#define SLATE_API_BASE_PATH    "/api/v1"
+#define SLATE_SETUP_AP_ADDRESS "192.168.4.1"
+
+/*
+ * Every route on the device, plus room to add one without this being the
+ * change that breaks something else. §4.1's table and `GET /` came to 31 slots
+ * when #37 added three, and the symptom of running out is worth knowing
+ * because it is not the one anybody would guess: registration is ordered by
+ * component initialisation, so the overflow lands on whichever route was
+ * registered *last* — the configuration API's `POST /config/validate` at the
+ * time — and reaches the boot log as that component reporting ESP_ERR_NO_MEM.
+ * register_route() now names the real cause in a line of its own.
+ *
+ * The cost of a spare slot is one route_t in .bss and one pointer inside
+ * esp_http_server; a few hundred bytes buys a component that cannot silently
+ * lose its endpoint.
+ */
+#define SLATE_API_MAX_URI_HANDLERS 36
 
 /* §4.1's `model`, and the same string §10's editor and mDNS advertise. One
  * board model per binary (ADR-1), so it is a constant rather than a lookup. */

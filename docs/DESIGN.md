@@ -295,6 +295,9 @@ Base: `http://<ip>/api/v1`. `/info` and `/session` are the public browser bootst
 | POST   | `/mode`            | `{"mode": "normal"\|"edit"}` |
 | POST   | `/identify`        | flashes the screen — for telling panels apart |
 | POST   | `/ota/upload`      | development OTA; raw `.bin` body (section 11.1) |
+| GET    | `/update`          | release channel state: running version, offered release, last check (section 11.4) |
+| POST   | `/update/check`    | check the manifest now instead of waiting for the daily check |
+| POST   | `/update/install`  | install the offered release and restart; the body names the version being accepted |
 | GET    | `/coredump`        | last core dump, if any |
 | POST   | `/factory_reset`   | wipes NVS and LittleFS |
 
@@ -1091,9 +1094,15 @@ Manifest at a stable URL:
 }
 ```
 
-`esp_https_ota` with checksum verification, a daily check, and installation only on explicit request — a wall panel must not reboot itself mid-evening.
+Checksum verification, a daily check, and installation only on explicit request — a wall panel must not reboot itself mid-evening.
 
 Configuration and tokens must survive updates. They live in NVS and LittleFS, outside the application partitions. Every release is regression-tested for this.
+
+Three routes carry it: `GET /update` is the channel as the panel sees it, `POST /update/check` looks now, and `POST /update/install` accepts a named version. The check downloads the manifest and nothing else; a release is offered only when its `board`, `min_schema` and `version` all say it belongs on this panel, and `min_schema` is compared against section 4.1's `schema_max`.
+
+**The download is not `esp_https_ota()`, and the reason is the checksum.** That API never exposes the bytes it writes, so the manifest's `sha256` could only be compared after `esp_https_ota_finish()` — which is the call that moves the boot partition. A checksum verified after committing to the image it describes is not a verification, and the window between the two is a power cut away from booting something nobody checked. The download is therefore the loop `esp_https_ota` runs internally — the same `esp_http_client`, the same certificate bundle, `esp_ota_write()` on the far side — with the hash taken over the stream as it passes. `esp_ota_set_boot_partition()` is reached only by an image whose bytes are the bytes the manifest named, and a failure costs the inactive slot, never the running one (section 11.1 draws the same line). The image that does boot starts in `PENDING_VERIFY` and answers to section 11.2 like any other.
+
+Signing is deliberately absent. TLS with the certificate bundle authenticates the channel and the manifest's SHA-256 authenticates the image against it; a detached signature would add a private key to keep and, to be worth anything against a local attacker with the flash in hand, secure boot and a burnt eFuse. That is a separate decision with its own recovery story, not a line in this section.
 
 ## 12. Security
 
@@ -1107,6 +1116,7 @@ Minimal by design — the device sits on a LAN, not on the internet.
 - The WiFi passphrase written by `POST /wifi` lives in NVS and is never returned by the API, and it never enters the configuration JSON — §10 makes that file something people export, import and share, and a credential does not belong in a document with those properties.
 - **The setup access point is open by default**, and its setup page can change WiFi and administrator-PIN settings. The threat model is a room: a WPA2 passphrase can be set when radio range extends into a shared building, and is then displayed on the setup screen beside the SSID.
 - No HTTPS on the device. A deliberate trade-off: a self-signed certificate on an ESP32 is a worse experience than its absence on a local network.
+- **The release channel (§11.4) is the one thing the panel talks to outside the LAN**, and it is outbound, daily, and a few hundred bytes of JSON: no identifier, no configuration and no credential leaves the device, and the request carries only what an HTTP GET carries. It is verified in the direction that matters — TLS against the compiled-in certificate bundle, then the manifest's SHA-256 over the downloaded image — because that traffic is the one path on which a wrong answer becomes running firmware. A build with `SLATE_UPDATE_MANIFEST_URL` empty has no channel and makes no such request, which is the honest way to have a panel that never leaves the LAN.
 - **`GET /coredump` (§11.3) returns memory, so it is the one endpoint whose body is not a curated document.** An ELF core dump carries task stacks, which is where a secret is on its way to or from NVS. Three things keep the two rules above true rather than approximately true. The dump is token-gated like every write, with no setup-access-point exception. `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` stays off, so `.bss`, `.data` and the heap are not in the dump — and the device token, which lives in `.bss`, is therefore not in it either. And the code paths that hold a passphrase or any provider credential on a stack zero it as soon as they are done, for this reason and with this section named at the call site; that is a habit the firmware has to keep, not a property of the endpoint. Enabling `CAPTURE_DRAM` would break the arrangement, which is a second reason it is off.
 
 Origin allow-lists will be added if a concrete scenario requires them.

@@ -325,7 +325,9 @@ jobs:
   # ESP Web Tools that no longer resolves would otherwise surface as a broken release.
   #
   # It does not flash anything and cannot: Web Serial needs a browser and a board.
-  # What this proves is that the artifact set is complete and self-consistent.
+  # What this proves is that the artifact set is complete and self-consistent — which
+  # since #37 includes §11.4's update manifest, assembled from the same images by the
+  # same script, and just as unattended on a tag as the page is.
   flasher:
     name: flasher
     runs-on: ubuntu-latest
@@ -357,6 +359,12 @@ jobs:
             echo
             echo '```json'
             cat flasher/dist/manifest.json
+            echo '```'
+            echo
+            echo '### Update channel (§11.4)'
+            echo
+            echo '```json'
+            cat flasher/dist/ota/manifest.json
             echo '```'
             echo
             echo "page and bundle: $(du -sh flasher/dist/index.html flasher/dist/esp-web-tools | tr '\t' ' ' | tr '\n' ';')"

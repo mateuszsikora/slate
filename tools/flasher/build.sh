@@ -13,8 +13,13 @@
 #              are not written down here.
 #   out-dir    default flasher/dist.
 #
+# SLATE_CHANNEL_BASE_URL overrides where the result will be published, which is
+# what §11.4's update manifest has to name an absolute image URL with. It
+# defaults to the project's Pages deployment.
+#
 # Output is a directory that can be served as-is: the page, the vendored ESP Web
-# Tools bundle, the manifest, and the images the manifest names. Nothing in it
+# Tools bundle, both manifests — ESP Web Tools' and §11.4's update channel in
+# ota/ — and the images they name. Nothing in it
 # refers to another origin, which is the property that matters — a flashing page
 # that half-loads is worse than one that does not load at all, and a browser
 # refusing a cross-origin fetch of a firmware image is a failure with no visible
@@ -42,6 +47,15 @@ VERSION="$1"
 absolute() { case "$1" in /*) printf '%s\n' "$1" ;; *) printf '%s\n' "${PWD}/$1" ;; esac; }
 BUILD_DIR="$(absolute "${2:-${REPO_ROOT}/firmware/build}")"
 OUT_DIR="$(absolute "${3:-${FLASHER_DIR}/dist}")"
+
+# Where this directory is going to be served from, which is the one thing a
+# build cannot know and §11.4's manifest cannot do without: it is the URL the
+# panel downloads the image from. The default is the project's own Pages
+# deployment and the same address the firmware checks by default
+# (firmware/components/slate_update/slate_update.c); the release workflow
+# derives it from the repository instead of trusting this copy, and a local
+# HTTPS test server is the other reason it is a variable.
+CHANNEL_BASE_URL="${SLATE_CHANNEL_BASE_URL:-https://mateuszsikora.github.io/slate/}"
 
 # `v1.0.0` is the tag; `1.0.0` is the version. §11.4's manifest and §4.1's
 # firmware_version both carry the second form, and a page that showed the first
@@ -74,6 +88,15 @@ python3 "${SCRIPT_DIR}/manifest.py" \
     --build-dir "${BUILD_DIR}" \
     --version "${VERSION}" \
     --out "${OUT_DIR}" \
+    --repo "${REPO_ROOT}"
+
+# §11.4's manifest, into the same directory and from the same images. The panel
+# and the browser install one release from one deployment; see
+# tools/ota/manifest.py for why this is not a job of its own.
+python3 "${REPO_ROOT}/tools/ota/manifest.py" \
+    --dist "${OUT_DIR}" \
+    --version "${VERSION}" \
+    --base-url "${CHANNEL_BASE_URL}" \
     --repo "${REPO_ROOT}"
 
 echo "flasher: ${OUT_DIR}"
