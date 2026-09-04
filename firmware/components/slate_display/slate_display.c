@@ -1612,6 +1612,12 @@ static esp_err_t setup_selftest_on_task(void)
     const char *long_text = join != NULL ? lv_label_get_text(join) : "";
     const int32_t long_y = join != NULL ? lv_obj_get_y(join) : -1;
 
+    /* First, so the two checks under it are known to be about the 408 px
+     * column. Without the QR it would be 680, the ellipsis check would FAIL
+     * anyway, and the failure would read as broken truncation rather than as
+     * an unencodable payload. */
+    SETUP_CHECK(overlay != NULL && setup_find(overlay, &lv_qrcode_class, NULL) != NULL,
+                "the SSID fixture encoded its QR, so the column is narrow");
     SETUP_CHECK(join != NULL && lv_label_get_long_mode(join) == LV_LABEL_LONG_DOT &&
                     setup_row_is_one_line(join),
                 "a maximum-length SSID leaves the join row one line high");
