@@ -1,9 +1,14 @@
-# ESP-IDF build output
-firmware/build/
-firmware/build-*/
+# ESP-IDF build output. Unanchored on purpose: a build directory is build output
+# wherever it sits, and firmware/ is not the only place one appears — the spikes
+# built into their own build-*/ directories, which the anchored rules never
+# reached. One configuration leaves ~15 MB of liblvgl__lvgl.a alone, and build
+# output that is merely untracked rather than ignored is what agent tooling
+# snapshots into the object store, where no commit hook or CI job will see it.
+build/
+build-*/
 firmware/sdkconfig
 firmware/sdkconfig.old
-firmware/managed_components/
+managed_components/
 
 # firmware/dependencies.lock is NOT ignored. It records the exact component
 # versions a build resolved, and joltwallet/littlefs decides the on-disk
@@ -18,7 +23,7 @@ firmware/components/slate_theme/assets/slate_font_*.c
 firmware/components/slate_theme/assets/slate_icons.h
 
 # Font generation scratch — upstream TTFs are fetched, not vendored
-tools/fonts/.work/
+.work/
 
 # The editor's dependencies and its build output. The bundle is a ~200 KB
 # single-file document generated from editor/src; the firmware build compresses
