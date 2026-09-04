@@ -580,13 +580,34 @@ static uint32_t bar_resource_dot_color(const bar_item_view_t *view,
     if (resource == NULL || resource->presentation != SLATE_PRESENT_OK) {
         return theme->warn;
     }
-    /* A cover that reports no position is healthy and merely quiet about how
-     * open it is: the reading is a dash while the dot stays muted, because the
-     * warning colour here would claim the resource itself is in trouble. */
-    bool active = view->config->component == SLATE_COMPONENT_LIGHT
-                      ? resource->state.light.on
-                      : resource->state.cover.position != SLATE_STATE_ABSENT &&
-                            resource->state.cover.position > 0;
+    /* One branch per kind, keyed on the component the configuration declares
+     * rather than on the last snapshot's. That is safe because the binding was
+     * registered with this component's kind (§5.2), and a snapshot arriving
+     * under a different one is refused as INCOMPATIBLE — which the early
+     * return above has already turned into the warning colour. So by here the
+     * declared kind is the kind that wrote the union, and one branch per kind
+     * keeps it that way: a kind with no dot today would otherwise inherit a
+     * cover's position the day it is given one, and the wrong colour would
+     * look like a theming mistake rather than a union one. */
+    bool active = false;
+    switch (view->config->component) {
+    case SLATE_COMPONENT_LIGHT:
+        active = resource->state.light.on;
+        break;
+    case SLATE_COMPONENT_COVER:
+        /* A cover that reports no position keeps the muted dot rather than the
+         * warning one: it is a healthy resource being quiet about how open it
+         * is, not one in trouble. SLATE_STATE_ABSENT is negative and `> 0`
+         * would exclude it on its own; it is named because that is the case
+         * being decided here, not an accident of the sentinel's value. */
+        active = resource->state.cover.position != SLATE_STATE_ABSENT &&
+                 resource->state.cover.position > 0;
+        break;
+    case SLATE_COMPONENT_SENSOR:
+    case SLATE_COMPONENT_SCENE:
+    case SLATE_COMPONENT_UNKNOWN:
+        break;
+    }
     return active ? theme->accent : theme->text_lo;
 }
 
@@ -2243,6 +2264,25 @@ static slate_config_t *bar_test_config(bool multiple_pages)
     return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
 }
 
+/* A bar of its own for §7.2's position, because the twelve slots above are
+ * spoken for. The dot's colour is decided per component kind, and a cover is
+ * the only other kind that has one — so without this fixture half of that
+ * decision is reached by no assertion at all. */
+static slate_config_t *cover_bar_test_config(void)
+{
+    static const char JSON[] =
+        "{\"schema\":1,\"theme\":\"midnight\",\"home_page\":\"home\",\"bar\":["
+        "{\"type\":\"cover\",\"provider\":\"ui-fixture\",\"resource\":\"bar-cover\","
+        "\"label\":\"Kitchen blind\",\"slot\":0,\"span\":2}],"
+        "\"pages\":[{\"id\":\"home\",\"title\":\"Home\",\"tiles\":[]}]}";
+    slate_config_t *config = NULL;
+    slate_config_report_t report;
+    slate_config_parse_status_t status =
+        slate_config_parse(JSON, sizeof(JSON) - 1, &config, &report);
+    slate_config_report_free(&report);
+    return status == SLATE_CONFIG_PARSE_OK ? config : NULL;
+}
+
 static slate_config_t *empty_bar_test_config(void)
 {
     static const char JSON[] =
@@ -3528,6 +3568,51 @@ static esp_err_t selftest_on_task(void)
              "single-page configured bar leaves its counter slot empty");
     if (single_bar != NULL) {
         slate_config_free(single_bar);
+    }
+
+    /* The other kind that carries a dot, and the one the colour switch would
+     * have gone on serving to everybody. A cover reads its own position: part
+     * open is the accent, closed is muted, and a cover that reports no
+     * position at all is muted rather than warned — it is a healthy resource
+     * being quiet about how open it is, which is not the same as one in
+     * trouble.
+     *
+     * After the single-page rebuild rather than before it, so that rebuild
+     * still arrives with the tree standing on a page its configuration does
+     * not have — which is the step that exercises page_index_for()'s fallback,
+     * and it should keep doing so. */
+    slate_config_t *cover_bar = cover_bar_test_config();
+    bar_item_view_t *bar_cover = NULL;
+    UI_CHECK(cover_bar != NULL && rebuild_on_task(cover_bar) == ESP_OK &&
+                 (bar_cover = find_bar_item("cover")) != NULL && bar_cover->dot != NULL &&
+                 bar_cover->value != NULL && bar_cover->label != NULL &&
+                 publish_cover_state("bar-cover", 60, SLATE_COVER_IDLE, true) == ESP_OK &&
+                 strcmp(lv_label_get_text(bar_cover->value), "60%") == 0 &&
+                 strcmp(lv_label_get_text(bar_cover->label), "Kitchen blind") == 0 &&
+                 lv_color_eq(lv_obj_get_style_bg_color(bar_cover->dot, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->accent)),
+             "a part-open bar cover lights its dot from its own position");
+    UI_CHECK(bar_cover != NULL &&
+                 publish_cover_state("bar-cover", 0, SLATE_COVER_IDLE, true) == ESP_OK &&
+                 strcmp(lv_label_get_text(bar_cover->value), "Closed") == 0 &&
+                 lv_color_eq(lv_obj_get_style_bg_color(bar_cover->dot, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->text_lo)),
+             "a closed bar cover mutes its dot");
+    UI_CHECK(bar_cover != NULL &&
+                 publish_cover_state("bar-cover", SLATE_STATE_ABSENT, SLATE_COVER_IDLE,
+                                     true) == ESP_OK &&
+                 strcmp(lv_label_get_text(bar_cover->value), "-") == 0 &&
+                 lv_color_eq(lv_obj_get_style_bg_color(bar_cover->dot, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->text_lo)),
+             "a cover with no position is muted rather than warned");
+    UI_CHECK(bar_cover != NULL &&
+                 publish_cover_state("bar-cover", 60, SLATE_COVER_IDLE, false) == ESP_OK &&
+                 strcmp(lv_label_get_text(bar_cover->value), "-") == 0 &&
+                 lv_color_eq(lv_obj_get_style_bg_color(bar_cover->dot, LV_PART_MAIN),
+                             lv_color_hex(s_tree->theme->warn)),
+             "an unavailable bar cover warns rather than reporting a position");
+    if (cover_bar != NULL) {
+        slate_config_free(cover_bar);
     }
 
     slate_config_t *empty_bar = empty_bar_test_config();
