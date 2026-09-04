@@ -33,6 +33,30 @@ libraries, and ahead of the font subsets below.
 
 Upstream: <https://github.com/lvgl/lvgl>
 
+#### What LVGL brings with it
+
+LVGL's own MIT license does not cover everything in its tree, which is why it
+keeps a `LICENSE.txt` beside each vendored library and a `COPYRIGHTS.md` that
+says so. Three of them reach a Slate image:
+
+- **QR Code generator** — Copyright © Project Nayuki, MIT:
+  [`LICENSES/QR-Code-generator-MIT.txt`](LICENSES/QR-Code-generator-MIT.txt).
+  `CONFIG_LV_USE_QRCODE=y` draws §9's setup and editor-address codes on the
+  panel rather than storing a bitmap. Upstream:
+  <https://github.com/nayuki/QR-Code-generator>
+- **mpaland/printf** — Copyright © 2014 Marco Paland, MIT:
+  [`LICENSES/printf-MIT.txt`](LICENSES/printf-MIT.txt). It is LVGL's built-in
+  `snprintf`, which arrives with the default standard-library backend rather
+  than with an option anybody turned on. Upstream:
+  <https://github.com/mpaland/printf>
+- **TLSF** — Copyright © 2006-2016 Matthew Conte, 3-clause BSD:
+  [`LICENSES/TLSF-BSD-3-Clause.txt`](LICENSES/TLSF-BSD-3-Clause.txt). The same
+  allocator ESP-IDF's heap uses, listed again below; an image carries both
+  copies, and this one manages §6.2's 2 MB pool.
+
+Its built-in Montserrat face is compiled in as well; it is font software and it
+is in the fonts section below.
+
 ### littlefs 2.11 and esp_littlefs 1.22.3
 
 Two projects under two licenses arrive as one component: `joltwallet/littlefs`
@@ -106,7 +130,8 @@ What a Slate image links, with the license text for each:
   `esp_http_server` reads a request line with.
 - **TLSF allocator** — Copyright © 2006-2016 Matthew Conte, 3-clause BSD:
   [`LICENSES/TLSF-BSD-3-Clause.txt`](LICENSES/TLSF-BSD-3-Clause.txt). ESP-IDF's
-  heap is built on it.
+  heap is built on it. An image carries two copies of this code, because LVGL's
+  built-in allocator is the same allocator; one license text covers both.
 - **Xtensa HAL** — Copyright © 2003, 2006, 2010 Tensilica Inc., MIT:
   [`LICENSES/Xtensa-libhal-MIT.txt`](LICENSES/Xtensa-libhal-MIT.txt).
 - **libgcc and libstdc++** — Copyright © Free Software Foundation, Inc.,
@@ -134,15 +159,16 @@ libraries above do, even though nothing in the firmware tree depends on it.
 The notice is not inside that document. React's published files open with an
 `@license` banner and the production build drops them: `grep -c '@license'
 editor/dist/index.html` answers 0. Vite's minifier can be told to keep them, and
-deliberately is not — the bundle is one 300 KB line that nobody will read a
-notice out of, and this file is somewhere it can be found.
+deliberately is not — the bundle is 296 KB of minified output whose longest line
+runs to 133 KB, which is not somewhere a notice can be found. This file is.
 
 Upstream: <https://github.com/facebook/react>
 
 ## Fonts embedded in firmware images
 
 The generated C sources are build artifacts (ADR-6); these notices apply to the
-subsets and to the firmware images that contain them.
+subsets and to the firmware images that contain them. The first two faces are
+Slate's own subsets; the third arrives already generated, inside LVGL.
 
 ### Inter 4.0
 
@@ -160,6 +186,25 @@ under the Apache License, Version 2.0. The complete license is in
 [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt).
 
 Upstream: <https://github.com/Templarian/MaterialDesign-Webfont>
+
+### Montserrat 14 and Font Awesome 5 Free, by way of LVGL
+
+`CONFIG_LV_FONT_MONTSERRAT_14=y` keeps one of LVGL's built-in faces in the image
+as the allocator-safe fallback that LVGL internals and any pre-widget
+presentation fall back to. It is a generated file like the two above, and its
+header names the two sources it was generated from — so both belong here:
+
+- **Montserrat-Medium** — Copyright 2011 The Montserrat Project Authors, SIL
+  Open Font License 1.1:
+  [`LICENSES/Montserrat-OFL-1.1.txt`](LICENSES/Montserrat-OFL-1.1.txt).
+  Upstream: <https://github.com/JulietaUla/Montserrat>
+- **Font Awesome 5 Free** — Fonticons, Inc. The glyphs LVGL merged into that
+  face are icons, which Font Awesome Free licenses under CC BY 4.0, while its
+  font files are under SIL OFL 1.1 and its code under MIT; the download's whole
+  license covers all three and is in
+  [`LICENSES/FontAwesome5-Free.txt`](LICENSES/FontAwesome5-Free.txt).
+  Attribution is what all three ask for, and this entry is it.
+  Upstream: <https://fontawesome.com>
 
 ## Bundled by the flashing page
 
