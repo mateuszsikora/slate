@@ -155,6 +155,21 @@ bool slate_display_setup_active(void);
 /** @brief Which backlight variant is live on this board. */
 slate_display_backlight_mode_t slate_display_backlight_mode(void);
 
+#ifdef SLATE_DISPLAY_SELFTEST
+/**
+ * @brief Check §9's setup card against the worst input §9.2 allows.
+ *
+ * Builds the card on the LVGL task from a maximum-length SSID and asserts the
+ * join row stays one line high and clear of the security row under it.
+ *
+ * It refuses, with ESP_ERR_INVALID_STATE, when a real setup presentation is on
+ * screen at the moment the fixtures would be built — §9.4's card is raised
+ * asynchronously, and only a state transition puts it back, so deleting one
+ * that appeared after the call would strand the panel's recovery address.
+ */
+esp_err_t slate_display_selftest(void);
+#endif
+
 /**
  * @brief Copy the latest LVGL allocator snapshot.
  *

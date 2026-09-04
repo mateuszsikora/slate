@@ -929,6 +929,8 @@ Steps 6–8 are M6 and later. From M1 the setup page carries the WiFi form and n
 | DHCP | served by the device, which is also the gateway |
 | Portal | a DNS responder answering every query with the device address, so phones open the page unprompted |
 
+The row naming the network is one line high and truncates rather than growing; the explanatory rows below it wrap on purpose. The name is always `slate-<mac6>` and fits with room to spare, so this is a constraint on the presentation rather than on any value it is handed today: the field is as long as the standard allows, and a join row that wrapped instead of truncating would be sitting on the passphrase printed under it — the row that a person with no network is reading off the screen.
+
 The setup page is **compiled into the firmware**, not served from LittleFS. It has to work on a device that has never had a filesystem, and LittleFS is what a bad OTA or a first flash is most likely to leave empty. The cost is trivial against the flash S-3 measured — 22.4 % of a 6 MB slot — and the page is a gzipped single file with no external references, targeted under 24 KB.
 
 The captive portal is best-effort and never the only way in. Answering every DNS query is how a captive portal is detected in the first place, so both iOS and Android will label the network as having no internet and offer to leave it. The address is printed on the screen precisely so that offer costs nothing.

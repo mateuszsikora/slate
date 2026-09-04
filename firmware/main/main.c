@@ -841,6 +841,22 @@ void app_main(void)
     }
 #endif
 
+    /* The verifier decides for itself whether it may run. §9.4's card is
+     * raised asynchronously from a wifi event, so no ordering against
+     * start_network() here could establish that it is safe to build a
+     * fixture — only the check on the LVGL task can. */
+#ifdef SLATE_DISPLAY_SELFTEST
+    esp_err_t setup_card_test_err = slate_display_selftest();
+    if (setup_card_test_err == ESP_ERR_INVALID_STATE) {
+        /* Declined rather than failed, and slate_display has already logged
+         * which of the two reasons it was. */
+        ESP_LOGW(TAG, "setup card selftest did not run");
+    } else if (setup_card_test_err != ESP_OK) {
+        ESP_LOGE(TAG, "setup card selftest failed: %s",
+                 esp_err_to_name(setup_card_test_err));
+    }
+#endif
+
     /* Before the health check is armed, not after: the panic is supposed to
      * happen while the image is still unverified, and the health task runs at a
      * higher priority than this one — so leaving it to the scheduler would make

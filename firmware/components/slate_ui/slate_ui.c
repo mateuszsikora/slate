@@ -1762,8 +1762,10 @@ static ui_tree_t *build_message_tree(const char *title, const char *message)
             tree_destroy(tree);
             return NULL;
         }
-        lv_label_set_long_mode(address_label, LV_LABEL_LONG_DOT);
         lv_obj_set_width(address_label, text_width);
+        /* The hint sits 32 px below this row. A width alone would not keep the
+         * address out of it — see slate_component_label_one_line(). */
+        slate_component_label_one_line(address_label);
         lv_obj_align(address_label, LV_ALIGN_TOP_LEFT, text_x, 44);
         lv_obj_align(hint, LV_ALIGN_TOP_LEFT, text_x, 76);
     }
@@ -1935,6 +1937,11 @@ void slate_ui_network_connected(void)
 
 #define UI_TEST_WARMUP 10
 #define UI_TEST_CYCLES 500
+/* Frames the editor-link check will wait for a station address before deciding
+ * the row cannot exist. At settle_frame()'s 30 ms this is about six seconds on
+ * top of the warm-up, which is a slow lease rather than the one this panel
+ * happens to get. A panel with no router exhausts it and skips, correctly. */
+#define UI_TEST_STATION_FRAMES 200
 
 typedef struct {
     size_t subscriptions;
@@ -2504,6 +2511,15 @@ static void settle_frame(void)
     vTaskDelay(pdMS_TO_TICKS(30));
     lv_obj_invalidate(lv_screen_active());
     lv_refr_now(NULL);
+}
+
+/* The same precondition editor_url() applies, asked separately: the editor-link
+ * address row exists only when there is an address to put in it. */
+static bool station_has_address(void)
+{
+    slate_wifi_status_t status;
+    slate_wifi_status(&status);
+    return status.connected && status.ip[0] != '\0';
 }
 
 static lv_obj_t *activate_selftest_anchor(void)
@@ -3160,6 +3176,26 @@ static bool sensor_view_text(const char *resource, const char *value, const char
            strcmp(lv_label_get_text(view->sensor.unit), unit) == 0;
 }
 
+/* The editor-link rows are not bindings, so find_view() cannot reach them.
+ * Matched on what they say rather than on their index among the card's
+ * children: LV_LABEL_LONG_DOT rewrites a row's tail, never its head. */
+static lv_obj_t *find_label_by_prefix(lv_obj_t *parent, const char *prefix)
+{
+    const uint32_t count = lv_obj_get_child_count(parent);
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t *child = lv_obj_get_child(parent, i);
+        if (lv_obj_check_type(child, &lv_label_class) &&
+            strncmp(lv_label_get_text(child), prefix, strlen(prefix)) == 0) {
+            return child;
+        }
+        lv_obj_t *nested = find_label_by_prefix(child, prefix);
+        if (nested != NULL) {
+            return nested;
+        }
+    }
+    return NULL;
+}
+
 static bool label_is_one_line(lv_obj_t *label)
 {
     const lv_font_t *font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
@@ -3267,6 +3303,49 @@ static esp_err_t selftest_on_task(void)
             UI_CHECK(false, "warm-up rebuild completed");
             return ESP_FAIL;
         }
+    }
+
+    /* The editor-link screen's address row is the other label held to one line.
+     * Its value is an IPv4 literal with room to spare on a 404 px row, which is
+     * precisely the case the height must leave alone: one line of text is
+     * already exactly one line high. Built detached and destroyed again, so no
+     * presentation on screen is disturbed.
+     *
+     * Between the warm-up and the measured cycles: behind 500 cycles it is a
+     * check a panel whose update client reboots it mid-run never reaches, and
+     * the warm-up absorbs the one-off allocation before any heap baseline.
+     *
+     * The address is then waited for rather than assumed to have arrived. A
+     * position that merely lands after one observed network's DHCP is a
+     * coincidence, not a check: on a slower lease it would skip and the run
+     * would still say every check passed. */
+    for (int i = 0; i < UI_TEST_STATION_FRAMES && !station_has_address(); i++) {
+        settle_frame();
+    }
+    ui_tree_t *editor_link = build_message_tree("Dashboard unavailable",
+                                               "Open the editor to arrange this panel.");
+    lv_obj_t *address_row = NULL;
+    lv_obj_t *hint_row = NULL;
+    if (editor_link != NULL) {
+        lv_obj_update_layout(editor_link->screen);
+        address_row = find_label_by_prefix(editor_link->screen, "Open http://");
+        hint_row = find_label_by_prefix(editor_link->screen, "Scan to open");
+    }
+    if (address_row == NULL && hint_row == NULL) {
+        /* The wait above expired: this panel has no router, so the screen is
+         * the message alone and there is no row to be right about. */
+        ESP_LOGW(TAG, "selftest: %-48s SKIP", "editor-link address row (no station address)");
+    } else {
+        UI_CHECK(address_row != NULL && hint_row != NULL &&
+                     lv_label_get_long_mode(address_row) == LV_LABEL_LONG_DOT &&
+                     label_is_one_line(address_row) &&
+                     strstr(lv_label_get_text(address_row), "...") == NULL &&
+                     lv_obj_get_y(address_row) + lv_obj_get_height(address_row) <=
+                         lv_obj_get_y(hint_row),
+                 "the editor address renders in full and clears its hint");
+    }
+    if (editor_link != NULL) {
+        tree_destroy(editor_link);
     }
 
     heap_sample_t endpoint_start;

@@ -14,3 +14,7 @@ idf_component_register(
     REQUIRES esp_lcd esp_timer esp_psram slate_theme
     PRIV_REQUIRES esp_driver_i2c slate_ch422g slate_touch
 )
+
+if(DEFINED SLATE_DISPLAY_SELFTEST)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE SLATE_DISPLAY_SELFTEST=${SLATE_DISPLAY_SELFTEST})
+endif()

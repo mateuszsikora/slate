@@ -37,6 +37,9 @@ idf_component_register(
 #                              not write flash.
 #   -DSLATE_HA_SELFTEST=1      exercise WebSocket URL/backoff rules, compressed
 #                              entity diffs, and light/sensor/scene normalization.
+#   -DSLATE_DISPLAY_SELFTEST=1 build §9's setup card from the longest SSID §9.2
+#                              allows and check its rows do not run into each
+#                              other. Declines while a real setup card is up.
 #   -DSLATE_UI_SELFTEST=1      exercise the real declarative runtime on the
 #                              panel, including 500 varied rebuild cycles.
 #   -DSLATE_UI_LEAK_BYTES=64   negative control for the UI heap verifier. It is
@@ -74,6 +77,7 @@ idf_component_register(
 foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_WS_SELFTEST SLATE_STATE_SELFTEST
              SLATE_DIRECT_SELFTEST SLATE_ACTION_SELFTEST SLATE_CONFIG_API_SELFTEST SLATE_HA_SELFTEST
              SLATE_OTA_ROLLBACK_SELFTEST
+             SLATE_DISPLAY_SELFTEST
              SLATE_UI_SELFTEST SLATE_UI_LEAK_BYTES SLATE_BRIGHTNESS_SELFTEST SLATE_TIME_SELFTEST
              SLATE_COREDUMP_SELFTEST SLATE_SETUP_AP_PASSWORD)
     if(DEFINED ${knob})
