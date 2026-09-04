@@ -1496,8 +1496,13 @@ _Static_assert(sizeof(SETUP_TEST_SSID) == SLATE_DISPLAY_SETUP_NETWORK_LEN,
  * SLATE_SETUP_AP_PASSWORD is a build-time knob, so a panel really can be
  * carrying one of these. It is not held to one line and must not be — a
  * truncated passphrase cannot be typed, which is the whole reason it is on the
- * screen. What is checked is that the rows below it stay where they are, so a
- * value that needs two lines gets two lines instead of the address row. */
+ * screen. What is checked is that the rows below it stay where they are, and
+ * the two presentations have different amounts of room for that: the card
+ * leaves 46 px, two caption lines, which is what this value needs in its 408 px
+ * column; the banner leaves 24 px, one line, and this value measures 18 px in
+ * its wider 592 px column. Six pixels is exactly why that one is a check rather
+ * than a hope. The fixture is the longest value the field can hold, so nothing
+ * a panel can be provisioned with is longer than what is measured here. */
 #define SETUP_TEST_PASSPHRASE \
     "correct-horse-battery-staple-correct-horse-battery-staple-abcdef"
 _Static_assert(sizeof(SETUP_TEST_PASSPHRASE) == SLATE_DISPLAY_SETUP_PASSPHRASE_LEN,
@@ -1508,25 +1513,36 @@ typedef struct {
     esp_err_t result;
 } setup_selftest_request_t;
 
-/* The rows are found by what they say rather than by their position among the
+/* Rows are found by what they say rather than by their position among the
  * card's children, so reordering the presentation does not silently move a
  * check onto a different label. LV_LABEL_LONG_DOT rewrites the tail, never the
- * head, so a prefix still identifies a truncated row. */
-static lv_obj_t *setup_find_label(lv_obj_t *parent, const char *prefix)
+ * head, so a prefix still identifies a truncated row.
+ *
+ * A NULL prefix matches the first object of the class instead, which is how the
+ * QR is located. A prefix is only meaningful for lv_label_class — it is read
+ * with lv_label_get_text() — so any other class must pass NULL. */
+static lv_obj_t *setup_find(lv_obj_t *parent, const lv_obj_class_t *class_p,
+                            const char *prefix)
 {
     const uint32_t count = lv_obj_get_child_count(parent);
     for (uint32_t i = 0; i < count; i++) {
         lv_obj_t *child = lv_obj_get_child(parent, i);
-        if (lv_obj_check_type(child, &lv_label_class) &&
-            strncmp(lv_label_get_text(child), prefix, strlen(prefix)) == 0) {
+        if (lv_obj_check_type(child, class_p) &&
+            (prefix == NULL ||
+             strncmp(lv_label_get_text(child), prefix, strlen(prefix)) == 0)) {
             return child;
         }
-        lv_obj_t *nested = setup_find_label(child, prefix);
+        lv_obj_t *nested = setup_find(child, class_p, prefix);
         if (nested != NULL) {
             return nested;
         }
     }
     return NULL;
+}
+
+static lv_obj_t *setup_find_label(lv_obj_t *parent, const char *prefix)
+{
+    return setup_find(parent, &lv_label_class, prefix);
 }
 
 /* Built through the work function the queue would have called: this already
@@ -1631,6 +1647,14 @@ static esp_err_t setup_selftest_on_task(void)
                     strcmp(lv_label_get_text(security),
                            "Password   " SETUP_TEST_PASSPHRASE) == 0,
                 "a maximum-length passphrase is printed in full");
+    /* The card has the same two geometries the banner does — 408 px with the
+     * QR, 680 px without — and at 680 this passphrase fits on one line, so the
+     * clearance below would pass without having been asked anything. The
+     * banner's payload is longer and its symbol smaller, so its QR succeeding
+     * does imply this one's; that implication is not written anywhere the
+     * compiler can see, which is the reason this is a check and not a note. */
+    SETUP_CHECK(overlay != NULL && setup_find(overlay, &lv_qrcode_class, NULL) != NULL,
+                "the card fixture encoded its QR, so the column is narrow");
     SETUP_CHECK(setup_rows_clear(security, open_row),
                 "the card's passphrase row clears the address row");
     hide_setup_overlay(NULL);
@@ -1657,6 +1681,12 @@ static esp_err_t setup_selftest_on_task(void)
              banner_security != NULL && banner_address != NULL
                  ? lv_obj_get_y(banner_address) - lv_obj_get_y(banner_security)
                  : -1);
+    /* The passphrase goes into the QR payload too. Had it failed to encode,
+     * setup_qr() would have returned NULL and the column would be 732 px
+     * instead of 592 — the measurement above would then be true of a layout
+     * no panel ever shows. */
+    SETUP_CHECK(overlay != NULL && setup_find(overlay, &lv_qrcode_class, NULL) != NULL,
+                "the banner fixture encoded its QR, so the column is narrow");
     SETUP_CHECK(setup_rows_clear(banner_join, banner_security),
                 "the recovery banner join row clears its security row");
     /* 24 px here against the card's 46 — the banner is the tighter of the two

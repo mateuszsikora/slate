@@ -1684,6 +1684,11 @@ void slate_ui_network_connected(void)
 
 #define UI_TEST_WARMUP 10
 #define UI_TEST_CYCLES 500
+/* Frames the editor-link check will wait for a station address before deciding
+ * the row cannot exist. At settle_frame()'s 30 ms this is about six seconds on
+ * top of the warm-up, which is a slow lease rather than the one this panel
+ * happens to get. A panel with no router exhausts it and skips, correctly. */
+#define UI_TEST_STATION_FRAMES 200
 
 typedef struct {
     size_t subscriptions;
@@ -2226,6 +2231,15 @@ static void settle_frame(void)
     vTaskDelay(pdMS_TO_TICKS(30));
     lv_obj_invalidate(lv_screen_active());
     lv_refr_now(NULL);
+}
+
+/* The same precondition editor_url() applies, asked separately: the editor-link
+ * address row exists only when there is an address to put in it. */
+static bool station_has_address(void)
+{
+    slate_wifi_status_t status;
+    slate_wifi_status(&status);
+    return status.connected && status.ip[0] != '\0';
 }
 
 static lv_obj_t *activate_selftest_anchor(void)
@@ -2968,11 +2982,17 @@ static esp_err_t selftest_on_task(void)
      * already exactly one line high. Built detached and destroyed again, so no
      * presentation on screen is disturbed.
      *
-     * Between the warm-up and the measured cycles. Behind 500 cycles it is a
-     * check that a panel whose update client reboots it mid-run never reaches;
-     * ahead of the warm-up it runs about a second before the station has an
-     * address, and skips instead. The warm-up absorbs the one-off allocation
-     * before any heap baseline and buys the DHCP lease the time it needs. */
+     * Between the warm-up and the measured cycles: behind 500 cycles it is a
+     * check a panel whose update client reboots it mid-run never reaches, and
+     * the warm-up absorbs the one-off allocation before any heap baseline.
+     *
+     * The address is then waited for rather than assumed to have arrived. A
+     * position that merely lands after one observed network's DHCP is a
+     * coincidence, not a check: on a slower lease it would skip and the run
+     * would still say every check passed. */
+    for (int i = 0; i < UI_TEST_STATION_FRAMES && !station_has_address(); i++) {
+        settle_frame();
+    }
     ui_tree_t *editor_link = build_message_tree("Dashboard unavailable",
                                                "Open the editor to arrange this panel.");
     lv_obj_t *address_row = NULL;
@@ -2983,8 +3003,8 @@ static esp_err_t selftest_on_task(void)
         hint_row = find_label_by_prefix(editor_link->screen, "Scan to open");
     }
     if (address_row == NULL && hint_row == NULL) {
-        /* No station address means no QR, no address row and nothing to check —
-         * the screen is then the message alone. */
+        /* The wait above expired: this panel has no router, so the screen is
+         * the message alone and there is no row to be right about. */
         ESP_LOGW(TAG, "selftest: %-48s SKIP", "editor-link address row (no station address)");
     } else {
         UI_CHECK(address_row != NULL && hint_row != NULL &&
