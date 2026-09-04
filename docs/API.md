@@ -397,9 +397,13 @@ development build, and any release is newer than one of those.
 `{}` and do the work afterwards — the panel serves HTTP from one task, and a TLS
 fetch on it would stop the rest of the API for seconds. Poll `GET /update` for
 the outcome. `check` takes no body. `install` takes `{"version": "1.1.0"}`,
-which must be the version being offered: the release somebody accepted is the
-release that gets installed, even if the channel moved in between. An absent
-body installs whatever is offered.
+which must be the version the panel is currently offering, and an absent body
+installs whatever that is. What the check buys is narrow and worth stating
+exactly: a daily check landing between the moment a client read the offer and
+the moment somebody pressed the button cannot silently redirect the install to a
+different version. It is not a promise that the accepted release still exists —
+the panel installs from the URL it cached at its last check, and a channel that
+has since moved on answers `release_gone` (see below).
 
 The download is verified before it can boot. The image's header must be an
 ESP32-S3 application image, its own version must be the one the manifest
@@ -412,10 +416,20 @@ before the bootloader takes it back.
 Refusals from the two `POST`s: `409` (`busy`, `no_update`, `version_mismatch`),
 `503 no_channel`, and the usual body errors (`unexpected_body`, `invalid_json`,
 `invalid_version`, `too_large`, `truncated`). Failures reported in `error`:
-`offline`, `unreachable`, `manifest_invalid`, `board_mismatch`,
-`schema_too_new`, `insecure_url`, `download_failed`, `checksum_mismatch`,
-`not_an_image`, `version_mismatch`, `invalid_image`, `too_large`,
-`no_ota_partition`, `pending_verify`, `ota_failed`, `out_of_memory`.
+`offline`, `unreachable`, `no_release`, `release_gone`, `manifest_invalid`,
+`board_mismatch`, `schema_too_new`, `insecure_url`, `download_failed`,
+`checksum_mismatch`, `not_an_image`, `version_mismatch`, `invalid_image`,
+`too_large`, `no_ota_partition`, `pending_verify`, `ota_failed`,
+`out_of_memory`.
+
+Three of those are about the channel and are worth telling apart, because they
+look alike from a browser and are not alike at all. `unreachable` is a host that
+did not answer. `no_release` is a manifest that is not there — the state of
+every panel before the first tag, and not a fault. `release_gone` is the image
+URL of a cached offer answering `404`: the deployment carries one release at a
+time, so an offer this panel read before the newest tag names a file that is no
+longer published. The panel treats that as its own cue to look again, so the
+current release is normally on screen by the time somebody reads the message.
 
 Nothing on this path is automatic except the daily check, and the check
 downloads nothing. Installation is always a request, and always ends in a

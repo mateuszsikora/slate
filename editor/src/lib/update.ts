@@ -10,6 +10,9 @@ import type { UpdateStatus } from './api'
 export const UPDATE_MESSAGES: Record<string, string> = {
   offline: 'The panel is not on a network, so it could not check.',
   unreachable: 'The update server did not answer.',
+  no_release: 'The update channel has no release published yet.',
+  release_gone:
+    'That release is no longer published. The panel is looking for the current one.',
   manifest_invalid: 'The update server answered with something that is not a Slate manifest.',
   board_mismatch: 'That channel publishes firmware for a different board.',
   schema_too_new: 'That release needs a newer configuration format than this firmware supports.',

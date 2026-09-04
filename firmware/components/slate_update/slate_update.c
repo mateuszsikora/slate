@@ -73,12 +73,31 @@ static const char *TAG = "update";
 _Static_assert(CHUNK_BYTES >= SLATE_OTA_IMAGE_PREFIX_BYTES,
                "the first read must be able to hold the whole image prefix");
 
-/* Per-operation socket timeout. A manifest is one small GET; an image is a
- * couple of megabytes over WiFi and gets the wall-clock budget below as well,
- * because a server that trickles one byte per timeout window would otherwise
- * hold the worker forever. */
+/*
+ * Per-socket-read timeout, the wall-clock budget for a whole download, and how
+ * much of an image is asked for in one call.
+ *
+ * The third number exists because of what the first two cannot do between
+ * them. esp_http_client_read() keeps reading until it has filled the buffer it
+ * was given, and HTTP_TIMEOUT_MS bounds one socket read inside that loop, not
+ * the call: a peer that goes silent ends a call in one timeout, but a peer that
+ * trickles a byte just inside every window holds it for as many timeouts as the
+ * bytes it was asked for. The budget is checked between calls, so what a single
+ * call can spend is what decides whether checking it means anything.
+ *
+ * READ_BYTES is therefore the granularity of that check rather than a transfer
+ * size — the flash write below still takes whatever came back. It buys a factor
+ * of four over asking for the whole buffer, at four times the calls, each of
+ * which is a memcpy out of a TLS record the client has already read.
+ *
+ * What is left is honest to state: against a peer that trickles at exactly the
+ * wrong rate the budget bounds the loop, not one call inside it. Closing that
+ * would need a deadline the blocking API does not take, and the peer is a
+ * channel this firmware was compiled to trust.
+ */
 #define HTTP_TIMEOUT_MS    15000
 #define DOWNLOAD_BUDGET_US (600 * 1000000LL)
+#define READ_BYTES         1024
 #define MAX_REDIRECTS      3
 
 /*
@@ -372,9 +391,16 @@ static bool parse_manifest(const char *json, size_t len, release_t *out, const c
  * is not optional. Re-checking the scheme after each hop is: a 302 to `http://`
  * would otherwise turn a verified channel into an unverified one without
  * anything in the log saying so.
+ *
+ * @param absent what a 404 or 410 means for the thing being fetched. A channel
+ *               that answers "not here" has answered — precisely, and about
+ *               something a person can act on — and calling that the same
+ *               failure as a host that never replied would describe the one
+ *               thing that did not happen. The two callers mean different
+ *               things by it, so neither name is spelled here.
  */
 static esp_err_t open_with_redirects(esp_http_client_handle_t client, int64_t *length,
-                                      const char **error)
+                                      const char *absent, const char **error)
 {
     for (int hop = 0; hop <= MAX_REDIRECTS; ++hop) {
         esp_err_t err = esp_http_client_open(client, 0);
@@ -389,6 +415,12 @@ static esp_err_t open_with_redirects(esp_http_client_handle_t client, int64_t *l
         if (status == 200) {
             *length = announced;
             return ESP_OK;
+        }
+
+        if (status == 404 || status == 410) {
+            ESP_LOGW(TAG, "the channel answered %d: it does not publish this", status);
+            *error = absent;
+            return ESP_FAIL;
         }
 
         bool redirect = status == 301 || status == 302 || status == 303 || status == 307 ||
@@ -417,6 +449,12 @@ static esp_err_t open_with_redirects(esp_http_client_handle_t client, int64_t *l
     ESP_LOGW(TAG, "more than %d redirections", MAX_REDIRECTS);
     *error = "unreachable";
     return ESP_FAIL;
+}
+
+/** How much to ask for in one read: never past the end, never a whole buffer. */
+static int read_window(size_t remaining)
+{
+    return (int) (remaining < READ_BYTES ? remaining : READ_BYTES);
 }
 
 static esp_http_client_handle_t open_client(const char *url)
@@ -458,7 +496,12 @@ static bool fetch_manifest(release_t *out, const char **error, bool *answered)
 
     bool parsed = false;
     int64_t announced = 0;
-    if (open_with_redirects(client, &announced, error) == ESP_OK) {
+    /* A manifest that is not there is the state every panel is in before the
+     * first tag: the deployment exists, the file does not yet. §11.4's channel
+     * being empty is not the channel being down, and a panel fresh out of the
+     * flasher should not spend its first day claiming the release host is
+     * broken. */
+    if (open_with_redirects(client, &announced, "no_release", error) == ESP_OK) {
         if (announced > MANIFEST_MAX_BYTES) {
             ESP_LOGW(TAG, "manifest announces %" PRId64 " B", announced);
             *error = "manifest_invalid";
@@ -619,7 +662,8 @@ static void progress(size_t received)
  * and is therefore the one failure that costs the other slot. It still costs
  * nothing that is running: esp_ota_set_boot_partition() is below it.
  */
-static void install(void)
+/** @return whether the offer this ran on should be refreshed straight away. */
+static bool install(void)
 {
     release_t target;
     lock();
@@ -630,7 +674,7 @@ static void install(void)
     const esp_partition_t *slot = esp_ota_get_next_update_partition(NULL);
     if (slot == NULL) {
         fail("no_ota_partition");
-        return;
+        return false;
     }
 
     char *buffer = heap_caps_malloc(CHUNK_BYTES, MALLOC_CAP_SPIRAM);
@@ -641,14 +685,25 @@ static void install(void)
     if (client == NULL) {
         free(buffer);
         fail("out_of_memory");
-        return;
+        return false;
     }
 
     ESP_LOGI(TAG, "installing %s into %s", target.version, slot->label);
 
     const char *error = NULL;
     int64_t announced = 0;
-    if (open_with_redirects(client, &announced, &error) != ESP_OK) {
+    /*
+     * An offer is a URL this panel cached at its last check, and Pages carries
+     * one release at a time (.github/workflows/release.yml). So a 404 here is a
+     * specific, ordinary thing: the channel moved on while this offer sat in
+     * RAM — for up to a day after every tag, and indefinitely on a panel whose
+     * checks have been failing, which is exactly when an offer is kept.
+     *
+     * It is worth its own word because the way out is one press of Check now,
+     * and "the update server did not answer" points at neither the cause nor
+     * the cure. The worker also acts on it: see the caller.
+     */
+    if (open_with_redirects(client, &announced, "release_gone", &error) != ESP_OK) {
         goto refuse;
     }
     /* esp_ota_begin() is given a length so it erases what the image needs
@@ -678,8 +733,14 @@ static void install(void)
     const int64_t budget_ends = esp_timer_get_time() + DOWNLOAD_BUDGET_US;
     size_t received = 0;
     while (received < SLATE_OTA_IMAGE_PREFIX_BYTES && received < total) {
+        if (esp_timer_get_time() > budget_ends) {
+            ESP_LOGW(TAG, "download budget expired inside the first %u B",
+                     (unsigned) SLATE_OTA_IMAGE_PREFIX_BYTES);
+            error = "download_failed";
+            goto hashed;
+        }
         int chunk = esp_http_client_read(client, buffer + received,
-                                         (int) (SLATE_OTA_IMAGE_PREFIX_BYTES - received));
+                                         read_window(SLATE_OTA_IMAGE_PREFIX_BYTES - received));
         if (chunk <= 0) {
             error = "download_failed";
             goto hashed;
@@ -722,9 +783,7 @@ static void install(void)
             error = "download_failed";
             break;
         }
-        size_t remaining = total - received;
-        int chunk = esp_http_client_read(client, buffer,
-                                         (int) (remaining < CHUNK_BYTES ? remaining : CHUNK_BYTES));
+        int chunk = esp_http_client_read(client, buffer, read_window(total - received));
         if (chunk <= 0) {
             ESP_LOGW(TAG, "download stopped after %u of %u B", (unsigned) received,
                      (unsigned) total);
@@ -780,7 +839,11 @@ refuse:
 
     if (error != NULL) {
         fail(error);
-        return;
+        /* The offer named something the channel no longer publishes, so it is
+         * not an offer any more. Asking for a fresh one costs a few hundred
+         * bytes of JSON and turns "that release is gone" into the current
+         * release being on screen by the time somebody reads the message. */
+        return strcmp(error, "release_gone") == 0;
     }
 
     lock();
@@ -795,6 +858,7 @@ refuse:
     ESP_LOGI(TAG, "%s installed into %s, rebooting in %d ms", target.version, slot->label,
              REBOOT_DELAY_MS);
     schedule_reboot();
+    return false;
 }
 
 /* --- Worker ------------------------------------------------------------- */
@@ -837,9 +901,13 @@ static void update_task(void *arg)
         xTaskNotifyWait(0, UINT32_MAX, &jobs, wait);
 
         if (jobs & JOB_INSTALL) {
-            install();
-            /* install() either reboots or leaves a panel that should keep
-             * checking; either way the schedule is unchanged. */
+            if (install()) {
+                /* Check now rather than at the scheduled time: the next loop
+                 * pass computes a wait of zero and runs it. */
+                next_check_us = esp_timer_get_time();
+            }
+            /* Otherwise install() either reboots or leaves a panel that should
+             * keep checking on the schedule it already had. */
             continue;
         }
 

@@ -274,7 +274,7 @@ curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application
 ```
 
 Until a version is tagged there is nothing on that channel, and the panel says
-so as an unreachable one.
+exactly that — `no_release`, not an unreachable server.
 
 **Over WiFi from your own build**, which is what development uses. The panel
 accepts an image on an authenticated endpoint, which is what

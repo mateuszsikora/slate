@@ -61,21 +61,29 @@ test('every failure the update component can report has a sentence', () => {
     new URL('../../firmware/components/slate_update/slate_update.c', import.meta.url),
     'utf8',
   )
-  /* Four ways a code leaves that component: the worker's fail(), the string an
-   * internal step assigns to `error`, the arms of ota_error_code(), and the
-   * third argument of slate_api_refuse() — which a route uses to turn a bad
-   * request away. The last one is easy to leave out of a scan like this, and
-   * leaving it out is how a code reaches somebody as its own identifier. */
-  const codes = new Set(
-    [
-      ...source.matchAll(
-        /(?:fail\(|\*?error = |return |slate_api_refuse\(req,\s*"[^"]+",\s*)"([a-z_]+)"/g,
-      ),
-    ].map((match) => match[1]),
-  )
+  /*
+   * A code can leave that component through any of these shapes, and the scan
+   * has already been narrower than the component twice: once missing the route
+   * refusals, once missing the argument that names what a 404 meant. So each
+   * shape has to find something. A pattern that silently matches nothing is the
+   * same failure as a missing sentence, one level up, and it passes quietly.
+   */
+  const shapes: [string, RegExp][] = [
+    ["the worker's fail()", /fail\("([a-z_]+)"\)/g],
+    ['a step assigning to `error`', /\*?error = "([a-z_]+)"/g],
+    ['the arms of ota_error_code()', /return "([a-z_]+)";/g],
+    ['a route refusal', /slate_api_refuse\(req,\s*"[^"]+",\s*"([a-z_]+)"/g],
+    ['what a 404 was called', /open_with_redirects\([^)]*?"([a-z_]+)"/g],
+  ]
+
+  const codes = new Set<string>()
+  for (const [what, pattern] of shapes) {
+    const found = [...source.matchAll(pattern)].map((match) => match[1])
+    assert.ok(found.length > 0, `the scan for ${what} matched nothing`)
+    found.forEach((code) => codes.add(code))
+  }
 
   assert.ok(codes.has('checksum_mismatch'), 'the scan found the component')
-  assert.ok(codes.has('invalid_json'), 'the scan reaches slate_api_refuse() codes')
   for (const code of codes) {
     assert.ok(code in UPDATE_MESSAGES, `no editor message for ${code}`)
   }
