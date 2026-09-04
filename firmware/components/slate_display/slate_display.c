@@ -1612,10 +1612,11 @@ static esp_err_t setup_selftest_on_task(void)
     const char *long_text = join != NULL ? lv_label_get_text(join) : "";
     const int32_t long_y = join != NULL ? lv_obj_get_y(join) : -1;
 
-    /* First, so the two checks under it are known to be about the 408 px
-     * column. Without the QR it would be 680, the ellipsis check would FAIL
-     * anyway, and the failure would read as broken truncation rather than as
-     * an unencodable payload. */
+    /* First, because the ellipsis check below is the one that depends on this
+     * column being 408 px: without the QR it is 680, the SSID fits, and that
+     * check would FAIL reading as broken truncation rather than as a payload
+     * that did not encode. Its neighbours hold at either width — the height is
+     * set outright and both row positions are constants. */
     SETUP_CHECK(overlay != NULL && setup_find(overlay, &lv_qrcode_class, NULL) != NULL,
                 "the SSID fixture encoded its QR, so the column is narrow");
     SETUP_CHECK(join != NULL && lv_label_get_long_mode(join) == LV_LABEL_LONG_DOT &&
@@ -1623,9 +1624,9 @@ static esp_err_t setup_selftest_on_task(void)
                 "a maximum-length SSID leaves the join row one line high");
     SETUP_CHECK(setup_rows_clear(join, security),
                 "the join row stays clear of the security row");
-    /* The height is what makes the dots happen at all, so an SSID that is
-     * merely narrow enough to fit would pass the two checks above without
-     * proving anything about the constraint under test. */
+    /* The height is what makes the dots happen at all, so an SSID merely
+     * narrow enough to fit would satisfy the height and clearance checks above
+     * without proving anything about the constraint under test. */
     SETUP_CHECK(strstr(long_text, "...") != NULL,
                 "an SSID wider than the card truncates with an ellipsis");
     hide_setup_overlay(NULL);
