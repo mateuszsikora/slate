@@ -31,8 +31,15 @@
 # itself reaches the world with the next tag, not on its own.
 #
 # One-time repository setting: Settings → Pages → Source must be "GitHub Actions".
-# Nothing in this file can set it, and until it is set the deploy step fails with a
-# permissions error that does not name the cause.
+# Nothing in this file can set it — on a private repository on the free plan nothing can,
+# the API answers `422 Your current plan does not support GitHub Pages`, so the setting
+# only becomes available at the moment the repository becomes public.
+#
+# What this file can do is refuse to half-release without it. The pages job checks for the
+# setting by name before it builds anything, because `actions/deploy-pages` answers a
+# missing source with a permissions error that mentions neither Pages nor the setting; and
+# publish waits for pages rather than running beside it, so a tag pushed before the setting
+# exists fails having announced nothing.
 
 name: Release
 
@@ -192,7 +199,13 @@ jobs:
   publish:
     name: publish
     runs-on: ubuntu-latest
-    needs: [version, firmware]
+    # After pages, not beside it. The release notes link to the flashing page, and the page
+    # carries its own images and refers to no other origin — so the page stands on its own
+    # and the release does not. Publishing second means the announcement is never older
+    # than the thing it announces, and a deploy that fails takes the release with it rather
+    # than leaving a tag whose notes point at a 404, recoverable only by re-running a
+    # release that has already gone out.
+    needs: [version, firmware, pages]
     permissions:
       contents: write
     steps:
@@ -263,13 +276,42 @@ jobs:
     name: pages
     runs-on: ubuntu-latest
     needs: [version, firmware]
+    # A job that names permissions gets those and nothing else, so contents has to be
+    # here: the workflow-level `contents: read` above applies to the jobs that stay
+    # silent, and the checkout below is the first thing that would fail without it.
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      # Before the checkout, because this costs one API call and answers the one question
+      # the last step of this job cannot answer for itself. Anything other than an absent
+      # site is a warning: this exists to explain a known failure, not to become a new way
+      # for a release to stop.
+      - name: Check Pages has a source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          if ! pages=$(gh api "repos/$REPO/pages" 2>&1); then
+            case "$pages" in
+              *'Not Found'*|*'does not support'*)
+                echo '::error::Settings → Pages → Source is unset. Set it to "GitHub Actions" and re-run this workflow.'
+                exit 1 ;;
+              *)
+                echo "::warning::could not read the Pages configuration: $pages" ;;
+            esac
+          else
+            source=$(printf '%s' "$pages" | jq -r '.build_type // "unset"')
+            if [ "$source" != workflow ]; then
+              echo "::error::Settings → Pages → Source is \"$source\"; it has to be \"GitHub Actions\"."
+              exit 1
+            fi
+          fi
+
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
