@@ -3561,17 +3561,31 @@ static esp_err_t selftest_on_task(void)
         slate_config_free(bar_config);
     }
 
+    slate_config_t *single_bar = bar_test_config(false);
+    UI_CHECK(single_bar != NULL && rebuild_on_task(single_bar) == ESP_OK &&
+                 (bar_pages = find_bar_item("page_indicator")) != NULL &&
+                 bar_pages->label == NULL,
+             "single-page configured bar leaves its counter slot empty");
+    if (single_bar != NULL) {
+        slate_config_free(single_bar);
+    }
+
     /* The other kind that carries a dot, and the one the colour switch would
      * have gone on serving to everybody. A cover reads its own position: part
      * open is the accent, closed is muted, and a cover that reports no
      * position at all is muted rather than warned — it is a healthy resource
      * being quiet about how open it is, which is not the same as one in
-     * trouble. */
+     * trouble.
+     *
+     * After the single-page rebuild rather than before it, so that rebuild
+     * still arrives with the tree standing on a page its configuration does
+     * not have — which is the step that exercises page_index_for()'s fallback,
+     * and it should keep doing so. */
     slate_config_t *cover_bar = cover_bar_test_config();
     bar_item_view_t *bar_cover = NULL;
     UI_CHECK(cover_bar != NULL && rebuild_on_task(cover_bar) == ESP_OK &&
                  (bar_cover = find_bar_item("cover")) != NULL && bar_cover->dot != NULL &&
-                 bar_cover->value != NULL &&
+                 bar_cover->value != NULL && bar_cover->label != NULL &&
                  publish_cover_state("bar-cover", 60, SLATE_COVER_IDLE, true) == ESP_OK &&
                  strcmp(lv_label_get_text(bar_cover->value), "60%") == 0 &&
                  strcmp(lv_label_get_text(bar_cover->label), "Kitchen blind") == 0 &&
@@ -3599,15 +3613,6 @@ static esp_err_t selftest_on_task(void)
              "an unavailable bar cover warns rather than reporting a position");
     if (cover_bar != NULL) {
         slate_config_free(cover_bar);
-    }
-
-    slate_config_t *single_bar = bar_test_config(false);
-    UI_CHECK(single_bar != NULL && rebuild_on_task(single_bar) == ESP_OK &&
-                 (bar_pages = find_bar_item("page_indicator")) != NULL &&
-                 bar_pages->label == NULL,
-             "single-page configured bar leaves its counter slot empty");
-    if (single_bar != NULL) {
-        slate_config_free(single_bar);
     }
 
     slate_config_t *empty_bar = empty_bar_test_config();
