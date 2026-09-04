@@ -361,6 +361,90 @@ static slate_measurement_t measurement(const ha_entity_t *entity)
 }
 
 /*
+ * §5.2's `category` from `device_class` — the same table for both sensor
+ * domains, because the class names are one namespace and a `battery` reads as
+ * a battery whether it arrives as 41 % or as `Low`.
+ *
+ * Several classes share a member. That is deliberate: §5.2's category answers
+ * "what is this about" only as far as the panel draws it differently, and
+ * `door` and `opening` are the same door. Classes with no glyph in
+ * `tools/fonts/icons.txt` are left out rather than aimed at something close —
+ * §7.3 falls back to the question mark, which is honest about not knowing, and
+ * the tile's own `icon` remains the override for anything the adapter cannot
+ * name.
+ */
+typedef struct {
+    const char *device_class;
+    slate_category_t category;
+} ha_category_t;
+
+static const ha_category_t k_categories[] = {
+    {"temperature", SLATE_CATEGORY_TEMPERATURE},
+    {"cold", SLATE_CATEGORY_TEMPERATURE},
+    {"heat", SLATE_CATEGORY_TEMPERATURE},
+    {"humidity", SLATE_CATEGORY_HUMIDITY},
+    {"pressure", SLATE_CATEGORY_PRESSURE},
+    {"atmospheric_pressure", SLATE_CATEGORY_PRESSURE},
+    {"power", SLATE_CATEGORY_POWER},
+    {"current", SLATE_CATEGORY_POWER},
+    {"voltage", SLATE_CATEGORY_POWER},
+    {"energy", SLATE_CATEGORY_POWER},
+    {"power_factor", SLATE_CATEGORY_POWER},
+    {"illuminance", SLATE_CATEGORY_ILLUMINANCE},
+    {"light", SLATE_CATEGORY_ILLUMINANCE},
+    {"aqi", SLATE_CATEGORY_AIR_QUALITY},
+    {"pm1", SLATE_CATEGORY_AIR_QUALITY},
+    {"pm25", SLATE_CATEGORY_AIR_QUALITY},
+    {"pm10", SLATE_CATEGORY_AIR_QUALITY},
+    {"gas", SLATE_CATEGORY_GAS},
+    {"carbon_monoxide", SLATE_CATEGORY_GAS},
+    {"carbon_dioxide", SLATE_CATEGORY_GAS},
+    {"volatile_organic_compounds", SLATE_CATEGORY_GAS},
+    {"nitrogen_dioxide", SLATE_CATEGORY_GAS},
+    {"ozone", SLATE_CATEGORY_GAS},
+    {"sulphur_dioxide", SLATE_CATEGORY_GAS},
+    {"sound", SLATE_CATEGORY_SOUND},
+    {"sound_pressure", SLATE_CATEGORY_SOUND},
+    {"speed", SLATE_CATEGORY_SPEED},
+    {"wind_speed", SLATE_CATEGORY_SPEED},
+    {"battery", SLATE_CATEGORY_BATTERY},
+    {"battery_charging", SLATE_CATEGORY_BATTERY},
+    {"connectivity", SLATE_CATEGORY_CONNECTIVITY},
+    {"signal_strength", SLATE_CATEGORY_CONNECTIVITY},
+    {"door", SLATE_CATEGORY_DOOR},
+    {"opening", SLATE_CATEGORY_DOOR},
+    {"window", SLATE_CATEGORY_WINDOW},
+    {"garage_door", SLATE_CATEGORY_GARAGE},
+    {"motion", SLATE_CATEGORY_MOTION},
+    {"moving", SLATE_CATEGORY_MOTION},
+    {"vibration", SLATE_CATEGORY_MOTION},
+    {"occupancy", SLATE_CATEGORY_OCCUPANCY},
+    {"presence", SLATE_CATEGORY_OCCUPANCY},
+    {"moisture", SLATE_CATEGORY_MOISTURE},
+    {"smoke", SLATE_CATEGORY_SMOKE},
+    {"lock", SLATE_CATEGORY_LOCK},
+    {"plug", SLATE_CATEGORY_PLUG},
+    {"problem", SLATE_CATEGORY_PROBLEM},
+    {"safety", SLATE_CATEGORY_PROBLEM},
+    {"tamper", SLATE_CATEGORY_PROBLEM},
+    {"running", SLATE_CATEGORY_RUNNING},
+    {"update", SLATE_CATEGORY_RUNNING},
+};
+
+static slate_category_t category(const ha_entity_t *entity)
+{
+    if (!entity->has_device_class) {
+        return SLATE_CATEGORY_NONE;
+    }
+    for (size_t i = 0; i < sizeof(k_categories) / sizeof(k_categories[0]); i++) {
+        if (strcmp(entity->device_class, k_categories[i].device_class) == 0) {
+            return k_categories[i].category;
+        }
+    }
+    return SLATE_CATEGORY_NONE;
+}
+
+/*
  * §5.2 keeps `kind` at four values, so a `binary_sensor` normalizes to `sensor`
  * with a textual value rather than earning a fifth. It is not a `light`: the
  * on/off shape would fit, but `light` carries `toggle` and `set_power` in
@@ -569,6 +653,7 @@ static bool normalize_entity(ha_entity_t *entity, ha_entity_t *out,
                 strlcpy(sensor.unit, entity->unit, sizeof(sensor.unit));
             }
             sensor.measurement = measurement(entity);
+            sensor.category = category(entity);
             entity->normalized_sensor = sensor;
             entity->normalized_capabilities = (slate_capabilities_t) {0};
         }
@@ -592,9 +677,11 @@ static bool normalize_entity(ha_entity_t *entity, ha_entity_t *out,
             strlcpy(sensor.text,
                     binary_sensor_text(entity, strcmp(entity->raw_state, "on") == 0),
                     sizeof(sensor.text));
-            /* No unit and no measurement: `device_class` here names what the
-             * contact means, not what it measures, and §7.3 would read a
-             * measurement as a request to format a number. */
+            /* A category but no unit and no measurement: `device_class` here
+             * names what the contact means, not what it measures. §5.2 has one
+             * field for each, so the door reaches §7.3 as a door without
+             * claiming a magnitude the tile would then try to format. */
+            sensor.category = category(entity);
             entity->normalized_sensor = sensor;
             entity->normalized_capabilities = (slate_capabilities_t) {0};
         }
@@ -1067,6 +1154,7 @@ esp_err_t slate_ha_entities_selftest(void)
     CHECK(mapped_sensor && sensor_kind == SLATE_KIND_SENSOR && sensor_available &&
               sensor.normalized_sensor.numeric && sensor.normalized_sensor.value == 21.5 &&
               sensor.normalized_sensor.measurement == SLATE_MEASUREMENT_TEMPERATURE &&
+              sensor.normalized_sensor.category == SLATE_CATEGORY_TEMPERATURE &&
               strcmp(sensor.normalized_sensor.unit, "°C") == 0,
           "map numeric sensor metadata");
     CHECK(mapped_scene && scene_kind == SLATE_KIND_SCENE && scene_available &&
@@ -1087,8 +1175,9 @@ esp_err_t slate_ha_entities_selftest(void)
               strcmp(contact.normalized_sensor.text, "Open") == 0 &&
               contact.normalized_sensor.unit[0] == '\0' &&
               contact.normalized_sensor.measurement == SLATE_MEASUREMENT_NONE &&
+              contact.normalized_sensor.category == SLATE_CATEGORY_DOOR &&
               contact.normalized_capabilities.actions == 0,
-          "map a binary_sensor onto a read-only textual sensor");
+          "map a binary_sensor onto a read-only textual sensor with a category");
 
     cJSON *door_closed = cJSON_Parse(
         "{\"c\":{\"binary_sensor.front_door\":{\"+\":{\"s\":\"off\"}}}}"
@@ -1215,6 +1304,81 @@ esp_err_t slate_ha_entities_selftest(void)
         }
     }
     CHECK(phrasings_ok, "every binary_sensor device_class reads its words");
+
+    /* §7.3 picks the icon from `category`, so a member no `device_class` names
+     * is a glyph no Home Assistant entity can ever reach — and the tile falls
+     * back to the question mark this exists to remove. Checked both ways: every
+     * member is reachable, and every row of the table names a real member. */
+    bool categories_reachable = true;
+    for (int member = SLATE_CATEGORY_NONE + 1; member < SLATE_CATEGORY_COUNT; member++) {
+        bool named = false;
+        for (size_t i = 0; i < sizeof(k_categories) / sizeof(k_categories[0]); i++) {
+            named = named || k_categories[i].category == member;
+        }
+        if (!named) {
+            ESP_LOGE(TAG, "no device_class maps onto category %s",
+                     slate_category_str((slate_category_t) member));
+            categories_reachable = false;
+        }
+    }
+    for (size_t i = 0; i < sizeof(k_categories) / sizeof(k_categories[0]); i++) {
+        if (k_categories[i].category == SLATE_CATEGORY_NONE ||
+            k_categories[i].category >= SLATE_CATEGORY_COUNT) {
+            ESP_LOGE(TAG, "device_class %s maps onto no category",
+                     k_categories[i].device_class);
+            categories_reachable = false;
+        }
+    }
+    CHECK(categories_reachable, "every category is named by a device_class and back");
+
+    /* The two domains through one table: a contact with no magnitude, and a
+     * numeric reading whose class is outside §5.2's four measurements. Both
+     * used to arrive with nothing an icon could be chosen from. */
+    static const struct {
+        const char *entity;
+        const char *state;
+        const char *device_class;
+        slate_category_t category;
+        slate_measurement_t measurement;
+    } categorised[] = {
+        {"binary_sensor.probe", "on", "window", SLATE_CATEGORY_WINDOW,
+         SLATE_MEASUREMENT_NONE},
+        {"binary_sensor.probe", "off", "motion", SLATE_CATEGORY_MOTION,
+         SLATE_MEASUREMENT_NONE},
+        {"binary_sensor.probe", "on", "carbon_monoxide", SLATE_CATEGORY_GAS,
+         SLATE_MEASUREMENT_NONE},
+        {"sensor.probe", "412", "illuminance", SLATE_CATEGORY_ILLUMINANCE,
+         SLATE_MEASUREMENT_NONE},
+        {"sensor.probe", "41", "battery", SLATE_CATEGORY_BATTERY, SLATE_MEASUREMENT_NONE},
+        {"sensor.probe", "21.5", "temperature", SLATE_CATEGORY_TEMPERATURE,
+         SLATE_MEASUREMENT_TEMPERATURE},
+        {"sensor.probe", "8", "irradiance", SLATE_CATEGORY_NONE, SLATE_MEASUREMENT_NONE},
+    };
+    bool categorised_ok = true;
+    for (size_t i = 0; i < sizeof(categorised) / sizeof(categorised[0]); i++) {
+        char full[256];
+        snprintf(full, sizeof(full),
+                 "{\"entity_id\":\"%s\",\"state\":\"%s\","
+                 "\"attributes\":{\"friendly_name\":\"Probe\",\"device_class\":\"%s\"}}",
+                 categorised[i].entity, categorised[i].state, categorised[i].device_class);
+        cJSON *parsed = cJSON_Parse(full);
+        slate_resource_t probe;
+        bool ok = parsed != NULL &&
+                  slate_ha_entities_normalize_full_state(parsed, &probe) == ESP_OK &&
+                  probe.kind == SLATE_KIND_SENSOR &&
+                  probe.state.sensor.category == categorised[i].category &&
+                  probe.state.sensor.measurement == categorised[i].measurement;
+        cJSON_Delete(parsed);
+        if (!ok) {
+            ESP_LOGE(TAG, "%s/%s did not normalize to category %s",
+                     categorised[i].entity, categorised[i].device_class,
+                     slate_category_str(categorised[i].category) != NULL
+                         ? slate_category_str(categorised[i].category)
+                         : "(none)");
+            categorised_ok = false;
+        }
+    }
+    CHECK(categorised_ok, "a device_class becomes a category in both sensor domains");
 
     cJSON *change = cJSON_Parse(
         "{\"c\":{\"light.kitchen\":{\"+\":{\"s\":\"off\","

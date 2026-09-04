@@ -2215,7 +2215,11 @@ static slate_config_t *sensor_test_config(void)
         "{\"id\":\"wrong\",\"type\":\"sensor\",\"pos\":[0,2],\"size\":[1,1],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"wrong-sensor\"}},"
         "{\"id\":\"future\",\"type\":\"sensor\",\"pos\":[1,2],\"size\":[1,1],"
-        "\"binding\":{\"provider\":\"future\",\"resource\":\"outside\"}}]}]}";
+        "\"binding\":{\"provider\":\"future\",\"resource\":\"outside\"}},"
+        /* #133's shape: a contact on a 2x1 tile with no `icon` of its own. Its
+         * icon has to come from the normalized category or from nothing. */
+        "{\"id\":\"contact\",\"type\":\"sensor\",\"pos\":[2,2],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"contact\"}}]}]}";
 
     slate_config_t *config = NULL;
     slate_config_report_t report;
@@ -2336,7 +2340,9 @@ static slate_config_t *sensor_icon_test_config(void)
         "{\"id\":\"power\",\"type\":\"sensor\",\"pos\":[2,1],\"size\":[2,1],"
         "\"binding\":{\"provider\":\"direct\",\"resource\":\"power\"}},"
         "{\"id\":\"status\",\"type\":\"sensor\",\"pos\":[0,2],\"size\":[2,1],"
-        "\"binding\":{\"provider\":\"direct\",\"resource\":\"status\"}}]}]}";
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"status\"}},"
+        "{\"id\":\"contact\",\"type\":\"sensor\",\"pos\":[2,2],\"size\":[2,1],"
+        "\"binding\":{\"provider\":\"direct\",\"resource\":\"contact\"}}]}]}";
 
     slate_config_t *config = NULL;
     slate_config_report_t report;
@@ -2859,6 +2865,17 @@ static esp_err_t publish_sensor_test_states(void)
             .available = true,
             .state.sensor = {.numeric = false, .text = "Air quality needs attention",
                              .measurement = SLATE_MEASUREMENT_NONE},
+        },
+        {
+            /* §5.6's `binary_sensor` as the store sees it: a word, no unit, no
+             * magnitude, and a category that is the tile's only way to know
+             * what it is looking at. */
+            .resource = "contact",
+            .kind = SLATE_KIND_SENSOR,
+            .name = "Front door",
+            .available = true,
+            .state.sensor = {.numeric = false, .text = "Open",
+                             .category = SLATE_CATEGORY_DOOR},
         },
     };
 
@@ -3934,7 +3951,12 @@ static esp_err_t selftest_on_task(void)
                  strcmp(lv_label_get_text(pressure->sensor.icon), SLATE_ICON_GAUGE) == 0 &&
                  power != NULL && power->sensor.icon != NULL &&
                  strcmp(lv_label_get_text(power->sensor.icon), SLATE_ICON_LIGHTNING_BOLT) == 0,
-             "2x1 sensors select icons from normalized measurement");
+             "2x1 sensors select icons from the category a measurement implies");
+    binding_view_t *contact = find_view("direct", "contact");
+    UI_CHECK(contact != NULL && contact->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(contact->sensor.icon), SLATE_ICON_DOOR_CLOSED) == 0 &&
+                 sensor_view_text("contact", "Open", ""),
+             "a contact with no tile icon shows a door beside its word");
     UI_CHECK(power != NULL && strcmp(lv_label_get_text(power->name), "Solar output") == 0,
              "a configured label is restored when its resource becomes available");
     UI_CHECK(status != NULL && status->sensor.icon != NULL &&
@@ -4008,16 +4030,18 @@ static esp_err_t selftest_on_task(void)
 
     slate_config_t *icons = sensor_icon_test_config();
     UI_CHECK(icons != NULL && rebuild_on_task(icons) == ESP_OK,
-             "measurement icon test dashboard activated");
+             "sensor icon test dashboard activated");
     if (icons != NULL) {
         slate_config_free(icons);
     }
     UI_CHECK(publish_sensor_test_states() == ESP_OK,
-             "sensor measurements republished for icon verification");
+             "sensor categories republished for icon verification");
     temperature = find_view("direct", "temperature");
     humidity = find_view("direct", "humidity");
     pressure = find_view("direct", "pressure");
     power = find_view("direct", "power");
+    status = find_view("direct", "status");
+    contact = find_view("direct", "contact");
     UI_CHECK(temperature != NULL && temperature->sensor.icon != NULL &&
                  strcmp(lv_label_get_text(temperature->sensor.icon),
                         SLATE_ICON_THERMOMETER) == 0 &&
@@ -4029,7 +4053,16 @@ static esp_err_t selftest_on_task(void)
                  power != NULL && power->sensor.icon != NULL &&
                  strcmp(lv_label_get_text(power->sensor.icon),
                         SLATE_ICON_LIGHTNING_BOLT) == 0,
-             "all normalized measurements select their semantic icon");
+             "a measurement still selects its semantic icon through the category");
+    UI_CHECK(contact != NULL && contact->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(contact->sensor.icon), SLATE_ICON_DOOR_CLOSED) == 0,
+             "a stated category selects an icon no measurement could reach");
+    /* The question mark is still the honest answer for a reading that says
+     * nothing about itself — it is no longer the answer for a whole domain. */
+    UI_CHECK(status != NULL && status->sensor.icon != NULL &&
+                 strcmp(lv_label_get_text(status->sensor.icon),
+                        SLATE_ICON_HELP_CIRCLE_OUTLINE) == 0,
+             "a sensor with neither measurement nor category still falls back");
 
     slate_config_t *lights = light_test_config();
     UI_CHECK(lights != NULL && rebuild_on_task(lights) == ESP_OK,

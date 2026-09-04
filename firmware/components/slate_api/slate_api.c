@@ -814,6 +814,13 @@ esp_err_t slate_api_resource_append(cJSON *array, const slate_resource_t *resour
         if (ok && measurement != NULL) {
             ok = cJSON_AddStringToObject(state, "measurement", measurement) != NULL;
         }
+        /* Reported even when the store derived it from `measurement`, because
+         * §5.2 promises a complete current value and a picker that had to redo
+         * that derivation would be the second copy of it. */
+        const char *category = slate_category_str(resource->state.sensor.category);
+        if (ok && category != NULL) {
+            ok = cJSON_AddStringToObject(state, "category", category) != NULL;
+        }
     }
 
     if (ok && resource->capabilities.actions != 0) {
