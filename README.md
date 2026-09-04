@@ -444,6 +444,6 @@ Anything that gets fitted here joins the list.
 - [`docs/agent-workflow.md`](docs/agent-workflow.md) — how work on this
   repository is picked up and verified.
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — licenses and attribution
-  for the font software embedded in firmware images.
+  for everything a firmware image carries that is not Slate's own code.
 
 Slate itself is MIT-licensed; see [`LICENSE`](LICENSE).

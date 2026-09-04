@@ -51,3 +51,17 @@ returns to the previous version on its own if the new one does not come back.
 this image symbolicates against, and `sdkconfig-{{VERSION}}.txt` is the exact
 configuration it was built from. Neither is needed to run the firmware; both are
 needed to read a crash report about it.
+
+## Third-party software
+
+`slate-{{VERSION}}.bin` is not all Slate's code: LVGL draws it, littlefs stores
+its configuration, ESP-IDF and the libraries it vendors run it, the editor
+inside it is built with React, and two font subsets are compiled into it. Each
+arrives under its own license, and
+[`THIRD_PARTY_NOTICES.md`](https://github.com/{{REPO}}/blob/v{{VERSION}}/THIRD_PARTY_NOTICES.md)
+names every one of them, with the complete texts in
+[`LICENSES/`](https://github.com/{{REPO}}/tree/v{{VERSION}}/LICENSES). Links
+rather than files, but links to the tag this image was built from: somebody who
+downloaded a binary has no clone to read those notices out of.
+
+Slate itself is MIT-licensed.
