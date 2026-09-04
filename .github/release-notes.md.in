@@ -56,10 +56,10 @@ needed to read a crash report about it.
 
 `slate-{{VERSION}}.bin` is not all Slate's code: LVGL draws it, littlefs stores
 its configuration, ESP-IDF and the toolchain run it, the editor inside it is
-built with React, and three font faces are compiled in. Nor is any of those all
-its own author's code — LVGL, ESP-IDF and the toolchain each vendor libraries
-they did not write, and those travel in the image too. Each arrives under its
-own license, and
+built with React, three font faces are compiled in, and the certificate
+authorities it trusts are Mozilla's. Nor is any of those all its own author's
+code — LVGL, ESP-IDF and the toolchain each vendor libraries they did not write,
+and those travel in the image too. Each arrives under its own license, and
 [`THIRD_PARTY_NOTICES.md`](https://github.com/{{REPO}}/blob/v{{VERSION}}/THIRD_PARTY_NOTICES.md)
 names them all, with the complete texts in
 [`LICENSES/`](https://github.com/{{REPO}}/tree/v{{VERSION}}/LICENSES). Links

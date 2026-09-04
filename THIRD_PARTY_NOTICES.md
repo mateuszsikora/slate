@@ -8,14 +8,20 @@ while the BSD licenses ask for it "in the documentation and/or other materials
 provided with the distribution". This file is that documentation.
 
 It covers one firmware image: the libraries linked into it (§6.1), the editor
-bundle it seeds onto the filesystem (§10), and the font subsets it draws with
-(ADR-6). The last section is the exception — one component the browser flashing
-page bundles, which is in no image and reaches nobody who does not open that
-page.
+bundle it seeds onto the filesystem (§10), the root certificates it trusts
+(§11.4), and the font subsets it draws with (ADR-6). A release publishes two
+further images beside it — `bootloader-<version>.bin` and
+`partition-table-<version>.bin` — and both are covered by the ESP-IDF entry
+below and by nothing else: the bootloader links Espressif's code only, and the
+partition table is generated from `firmware/partitions.csv`.
+
+The last section is the exception. It is about the browser flashing page, which
+is in no image and reaches nobody who does not open it.
 
 Versions are the ones pinned in
-[`firmware/dependencies.lock`](firmware/dependencies.lock) and
-[`editor/package-lock.json`](editor/package-lock.json). What is listed as linked
+[`firmware/dependencies.lock`](firmware/dependencies.lock),
+[`editor/package-lock.json`](editor/package-lock.json) and
+[`flasher/package-lock.json`](flasher/package-lock.json). What is listed as linked
 was read out of the link map of a built image rather than off the dependency
 files, because those name what the build may use and the map names what the
 image actually contains.
@@ -164,6 +170,30 @@ runs to 130 KB, which is not somewhere a notice can be found. This file is.
 
 Upstream: <https://github.com/facebook/react>
 
+## The root certificate store
+
+`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` compiles a set of certificate authority
+roots into the image — 17 928 bytes of it, more than any font subset — and
+§11.4's update check is what it exists for. It is not Mbed TLS's code and the
+Apache-2.0 entry above does not reach it; it only travels in the same archive.
+
+The data is Mozilla's. ESP-IDF's `cacrt_all.pem` says where it came from in its
+own header — "Certificate data from Mozilla as of: Tue Feb 25 04:12:03 2025
+GMT", extracted from NSS's `certdata.txt` with curl's `mk-ca-bundle.pl` — and
+`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y` narrows it to the common
+authorities before the build embeds them.
+
+`certdata.txt` carries a Mozilla Public License 2.0 header, and both curl and
+Debian's `ca-certificates` pass MPL-2.0 on to what they generate from it. ESP-IDF
+passes nothing on: the string "Mozilla Public License" appears nowhere in its
+`mbedtls` component. Whether the MPL reaches the certificates themselves is
+arguable — they are public documents issued by their own authorities, and the
+license sits on the collection — so the honest thing is to name the provenance,
+put the text in [`LICENSES/MPL-2.0.txt`](LICENSES/MPL-2.0.txt), and let a reader
+decide rather than have this file decide by staying quiet.
+
+Upstream: <https://curl.se/docs/caextract.html>
+
 ## Fonts embedded in firmware images
 
 The generated C sources are build artifacts (ADR-6); these notices apply to the
@@ -220,3 +250,31 @@ version pinned in `flasher/package.json`. It is what talks to the board over Web
 Serial; §9.1's flashing step is entirely its work.
 
 Upstream: <https://github.com/esphome/esp-web-tools>
+
+#### What the deployed bundle contains
+
+What `build.sh` deploys is `dist/web`, ESP Web Tools' published build rather
+than its source tree, and that build has its dependencies inlined — no bare
+import is left in it, and no `@license` or `Copyright` survives the minifier
+either. The `LICENSE` copied beside it is plain Apache-2.0 with no third-party
+section, so this list is the only place these appear:
+
+- **lit**, with `lit-html`, `lit-element` and `@lit/reactive-element` —
+  Copyright © 2017 Google LLC, 3-clause BSD:
+  [`LICENSES/lit-BSD-3-Clause.txt`](LICENSES/lit-BSD-3-Clause.txt). Upstream:
+  <https://github.com/lit/lit>
+- **`@material/web`** 2.5.0, **`esptool-js`** 0.6.1 and
+  **`improv-wifi-serial-sdk`** 2.8.0 — Apache-2.0, the same text as above:
+  [`LICENSES/Apache-2.0.txt`](LICENSES/Apache-2.0.txt). The per-chip flasher
+  stubs the page loads on demand are esptool-js's.
+- **pako** 2.2.0 — Copyright © 2014-2017 Vitaly Puzrin and Andrei Tuputcyn under
+  MIT, with its zlib ports Copyright © 1995-2013 Jean-loup Gailly and Mark Adler
+  under the zlib license; both notices are in
+  [`LICENSES/pako-MIT-AND-Zlib.txt`](LICENSES/pako-MIT-AND-Zlib.txt).
+- **atob-lite** 2.0.0 — MIT:
+  [`LICENSES/atob-lite-MIT.txt`](LICENSES/atob-lite-MIT.txt).
+- **tslib** 2.8.1 — Copyright © Microsoft Corporation, 0BSD:
+  [`LICENSES/tslib-0BSD.txt`](LICENSES/tslib-0BSD.txt). It is the only one here
+  that asks for nothing at all.
+
+Versions are from [`flasher/package-lock.json`](flasher/package-lock.json).
