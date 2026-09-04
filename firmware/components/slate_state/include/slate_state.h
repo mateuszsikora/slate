@@ -494,7 +494,9 @@ typedef struct {
  * subscriptions" half of §6.4.
  *
  * `bindings` may be NULL when `count` is 0, which releases the table entirely.
- * ESP_ERR_INVALID_SIZE beyond SLATE_STATE_MAX_RESOURCES, ESP_ERR_INVALID_ARG for
+ * ESP_ERR_INVALID_SIZE beyond SLATE_STATE_MAX_RESOURCES *distinct* pairs — the
+ * cap is on what the table holds, so a list longer than that is fine as long as
+ * the duplicates in it collapse under the bound — ESP_ERR_INVALID_ARG for
  * an empty or over-long id — identity is refused, never truncated — and
  * ESP_ERR_NO_MEM if the table cannot be allocated. ESP_ERR_INVALID_STATE is the
  * one contradiction the store cannot hold: two bindings naming the same pair

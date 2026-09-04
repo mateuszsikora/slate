@@ -273,7 +273,14 @@ static binding_result_t remember_binding(validation_t *validation,
 
     /* The validated model must remain activatable by slate_state. Reject the
      * first resource that cannot fit instead of accepting a document which a
-     * later apply operation is guaranteed to refuse. */
+     * later apply operation is guaranteed to refuse.
+     *
+     * This counts what the loop above deduplicates — distinct pairs — and that
+     * is half of an agreement: slate_state_bind() compares the same quantity
+     * against the same constant, after its own collapse. Either side counting
+     * raw bindings instead reopens #138, where validate answered 204 for a
+     * document the write then refused. The self-test that pins the other half
+     * of the agreement is in slate_state, where the fix was. */
     if (validation->binding_count >= SLATE_STATE_MAX_RESOURCES) {
         return BINDING_CAPACITY_EXCEEDED;
     }
