@@ -173,8 +173,9 @@ Upstream: <https://github.com/facebook/react>
 ## The root certificate store
 
 `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` compiles a set of certificate authority
-roots into the image — 17 928 bytes of it, more than any font subset — and
-§11.4's update check is what it exists for. It is not Mbed TLS's code and the
+roots into the image — 17 928 bytes of it, more than the face LVGL brings and a
+quarter of what the hero subset costs — and §11.4's update check is what it
+exists for. It is not Mbed TLS's code and the
 Apache-2.0 entry above does not reach it; it only travels in the same archive.
 
 The data is Mozilla's. ESP-IDF's `cacrt_all.pem` says where it came from in its
