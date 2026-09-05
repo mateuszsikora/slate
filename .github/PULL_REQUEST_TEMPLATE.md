@@ -1,7 +1,8 @@
 <!--
-The sections below are what docs/agent-workflow.md §8 asks a pull request to
-carry. Delete the comments as you fill them in; delete a heading only if it
-genuinely does not apply, and say why rather than leaving it blank.
+The sections below are what CONTRIBUTING.md asks a pull request to carry —
+docs/agent-workflow.md §8 is the same list for an agent working the backlog.
+Delete the comments as you fill them in; delete a heading only if it genuinely
+does not apply, and say why rather than leaving it blank.
 -->
 
 Closes #

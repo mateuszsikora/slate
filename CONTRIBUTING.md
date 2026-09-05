@@ -10,9 +10,13 @@ panel to prove it may wait until there is one in front of the maintainer.
 Everything below assumes you have one fix or one small feature. If you are a
 coding agent working the milestone backlog, the document you want is
 [`docs/agent-workflow.md`](docs/agent-workflow.md) — issue claiming, the
-`in-progress` label, milestone order. It is an appendix to this file, not a
-replacement for it: §§5–8 there and everything here say the same things about
-scope, verification and commit shape.
+`in-progress` label, milestone order. It is an appendix to this file rather than
+a replacement for it, and it is stricter in two places: it requires signed
+commits and it refuses to open a pull request on unverified work. Both describe
+an agent working this backlog on a machine with the signing key configured and a
+panel on the desk. For a contributed pull request, this file is the one that
+governs — see the two paragraphs below on hardware you do not have and on
+signing.
 
 ## Before you write code
 
@@ -70,7 +74,11 @@ version control, and ESP-IDF reads the defaults only when no `sdkconfig` exists.
 Working on the editor needs no ESP-IDF. It does need a panel to talk to, because
 ADR-5 leaves nothing else to develop against: `SLATE_DEVICE=192.168.1.42 npm run
 dev` in `editor/` serves the editor from your machine and proxies `/api` to that
-address. `npm test` and `npm run check` are what CI runs, and they need neither.
+address. What CI runs is `tools/editor/build.sh` and then `npm test` in
+`editor/`, and neither needs a panel — `npm run check` is only the type-checking
+half of the build, so a change that type-checks but breaks the bundle or pushes
+it past the 400 KB gzipped budget the design document sets for it (§10) passes
+locally and fails there.
 
 ## Verifying, and what to do when you cannot
 
@@ -84,14 +92,15 @@ So the bar depends on what you touched:
 
 - **Documentation and the host-side tools in `tools/`** — no panel involved. Run
   it, say what you ran.
-- **The editor** — verified in a browser. `npm test` and `npm run check` run
-  anywhere, and for a change that is only shape or logic they are the whole
+- **The editor** — verified in a browser. `tools/editor/build.sh` and `npm test`
+  run anywhere, and for a change that is only shape or logic they are the whole
   story; anything that renders device data wants the dev proxy pointed at a
   panel, which puts that half under the paragraph below.
 - **Firmware** — verified by flashing a panel and watching it. The first flash
-  is over a cable; after that, `tools/ota/upload.sh <address>` posts your build
-  over WiFi and waits for the panel to come back, so the edit-to-screen loop is
-  seconds and does not involve the cable. Say what appeared on the screen.
+  is over a cable; after that, `SLATE_TOKEN=<session credential>
+  tools/ota/upload.sh <address>` posts your build over WiFi and waits for the
+  panel to come back, so the edit-to-screen loop is seconds and does not
+  involve the cable. Say what appeared on the screen.
 
 **If you have no panel, say so in the pull request, in plain words.** This is
 the common case and it is not a reason to withhold a change. An unverified
