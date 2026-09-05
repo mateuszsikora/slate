@@ -11,12 +11,10 @@ Everything below assumes you have one fix or one small feature. If you are a
 coding agent working the milestone backlog, the document you want is
 [`docs/agent-workflow.md`](docs/agent-workflow.md) — issue claiming, the
 `in-progress` label, milestone order. It is an appendix to this file rather than
-a replacement for it, and it is stricter in two places: it requires signed
-commits and it refuses to open a pull request on unverified work. Both describe
-an agent working this backlog on a machine with the signing key configured and a
-panel on the desk. For a contributed pull request, this file is the one that
-governs — see the two paragraphs below on hardware you do not have and on
-signing.
+a replacement for it. On verification the two agree, including about hardware
+you cannot reach; they diverge on one rule, which is that §7 there requires
+signed commits — see the paragraph on that below, which is what governs a
+contributed pull request.
 
 ## Before you write code
 
@@ -66,8 +64,10 @@ cd firmware && idf.py build      # → firmware/build/slate.bin
 ```
 
 You need **ESP-IDF v5.5.5** — the version CI pins and every flash-size number
-in the design document was measured on — and **Node.js 24**. If a configuration
-change appears to have no effect, delete `firmware/sdkconfig` and build again:
+in the design document was measured on — and **Node.js 24**. Also **Python 3**,
+which ESP-IDF installs for you but the scripts in `tools/` use on their own
+account, the font generator on the first line above among them. If a
+configuration change has no effect, delete `firmware/sdkconfig` and build again:
 it is generated and gitignored, `firmware/sdkconfig.defaults` is the file under
 version control, and ESP-IDF reads the defaults only when no `sdkconfig` exists.
 
@@ -97,10 +97,11 @@ So the bar depends on what you touched:
   story; anything that renders device data wants the dev proxy pointed at a
   panel, which puts that half under the paragraph below.
 - **Firmware** — verified by flashing a panel and watching it. The first flash
-  is over a cable; after that, `SLATE_TOKEN=<session credential>
-  tools/ota/upload.sh <address>` posts your build over WiFi and waits for the
-  panel to come back, so the edit-to-screen loop is seconds and does not
-  involve the cable. Say what appeared on the screen.
+  is over a cable; after that, `SLATE_TOKEN=<credential> tools/ota/upload.sh
+  <address>` posts your build over WiFi and waits for the panel to come back, so
+  the edit-to-screen loop is seconds and does not involve the cable. The
+  credential is what [`POST /api/v1/session`](README.md#administrator-access)
+  returns for your panel's PIN. Say what appeared on the screen.
 
 **If you have no panel, say so in the pull request, in plain words.** This is
 the common case and it is not a reason to withhold a change. An unverified
