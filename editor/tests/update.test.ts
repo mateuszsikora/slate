@@ -8,12 +8,14 @@ import {
   checkedAgo,
   updateError,
   updateHeadline,
+  updateNote,
   updatePercent,
 } from '../src/lib/update.ts'
 
 const IDLE: UpdateStatus = {
   current: '1.0.0',
   manifest_url: 'https://example.invalid/ota/manifest.json',
+  scheduled: true,
   state: 'idle',
   checked_s_ago: 60,
   available: null,
@@ -44,6 +46,32 @@ test('how long ago the panel looked is coarse', () => {
   assert.equal(checkedAgo(600), '10 min ago')
   assert.equal(checkedAgo(7200), '2 h ago')
   assert.equal(checkedAgo(86400 * 3), '3 days ago')
+})
+
+/*
+ * #155: the note under the buttons is the only place the editor says what the
+ * panel does when nobody is watching it, so it is the one sentence that has to
+ * follow the setting rather than §11.4's default.
+ */
+test('the note follows the schedule rather than assuming it', () => {
+  assert.match(updateNote(IDLE), /Checked just now\. The panel looks once a day/)
+  assert.match(updateNote({ ...IDLE, scheduled: false }), /The daily check is off/)
+  assert.doesNotMatch(updateNote({ ...IDLE, scheduled: false }), /once a day/)
+})
+
+test('a panel that has never checked says so, on or off', () => {
+  assert.match(updateNote({ ...IDLE, checked_s_ago: null }), /^The panel has not checked yet\./)
+  assert.match(
+    updateNote({ ...IDLE, checked_s_ago: null, scheduled: false }),
+    /^The panel has not checked yet\. The daily check is off/,
+  )
+})
+
+/* Whoever asked for the check, the install is still a person's. Turning the
+ * schedule off must not read as turning §11.4's promise off with it. */
+test('both notes keep the promise that nothing installs itself', () => {
+  assert.match(updateNote(IDLE), /installs nothing on its own/)
+  assert.match(updateNote({ ...IDLE, scheduled: false }), /installs nothing on its own/)
 })
 
 test('an unrecognised code is shown rather than swallowed', () => {

@@ -348,8 +348,10 @@ export function App() {
     await client(token).identify()
   }, [client, token])
 
-  /* §11.4. The panel owns the schedule and the decision to install; these three
-   * only read it and carry one accept. */
+  /* §11.4. The panel owns the decision to install; these read what it offers and
+   * carry one accept. The fourth is the schedule itself (#155) — the one thing
+   * here the editor sets rather than reports, because on a browser-flashed panel
+   * this page is the only place it can be set from. */
   const fetchUpdate = useCallback(() => {
     if (token === null) {
       return Promise.reject(new Error('no session'))
@@ -370,6 +372,16 @@ export function App() {
         throw new Error('no session')
       }
       await client(token).installUpdate(version)
+    },
+    [client, token],
+  )
+
+  const setUpdateSchedule = useCallback(
+    async (scheduled: boolean) => {
+      if (token === null) {
+        throw new Error('no session')
+      }
+      await client(token).setUpdateSchedule(scheduled)
     },
     [client, token],
   )
@@ -663,6 +675,7 @@ export function App() {
             onFetch={fetchUpdate}
             onCheck={checkForUpdate}
             onInstall={installUpdate}
+            onSchedule={setUpdateSchedule}
           />
           <LogPanel lines={logs} connection={connection} />
         </aside>

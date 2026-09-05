@@ -264,13 +264,23 @@ The dashboard, authentication state, External API keys, Home Assistant
 credentials and WiFi settings live outside the application partitions and are
 kept across an update.
 
-The same three things are available to a script:
+**That daily check is the only thing the panel sends outside your LAN, and you
+can turn it off.** The same **Firmware updates** panel has a checkbox for it; a
+panel with the check off still updates, it just waits to be asked — *Check now*
+and *Install* both keep working. The setting is kept on the device, survives a
+reboot, and returns to on after a factory reset. Leaving it on is the default
+because a panel that never hears that a fix exists is its own kind of problem,
+and nothing installs itself either way.
+
+The same four things are available to a script:
 
 ```bash
 curl -sS -H "Authorization: Bearer $TOKEN" http://192.168.1.42/api/v1/update
 curl -sS -X POST -H "Authorization: Bearer $TOKEN" http://192.168.1.42/api/v1/update/check
 curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"version":"1.2.0"}' http://192.168.1.42/api/v1/update/install
+curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"scheduled":false}' http://192.168.1.42/api/v1/update/settings
 ```
 
 Until a version is tagged there is nothing on that channel, and the panel says

@@ -1155,6 +1155,22 @@ summary:focus-visible,
   color: var(--text-lo);
 }
 
+/* The one control in this section that is a standing decision rather than an
+   action, so it sits with the note under the buttons rather than beside them. */
+.update__schedule {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  font-size: 0.82rem;
+  color: var(--text-lo);
+  cursor: pointer;
+}
+
+.update__schedule input:disabled {
+  cursor: default;
+}
+
 .update__progress {
   margin-top: 10px;
   height: 6px;

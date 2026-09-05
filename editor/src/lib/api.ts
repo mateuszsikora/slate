@@ -125,6 +125,12 @@ export interface DeviceStatus {
 export interface UpdateStatus {
   current: string
   manifest_url: string | null
+  /**
+   * Whether the panel looks on its own. False on a build with no channel, and
+   * false on a panel that has one and was told to stop — `manifest_url` is what
+   * separates those two, and only the second can be changed from here.
+   */
+  scheduled: boolean
   state: 'idle' | 'checking' | 'downloading' | 'installed'
   checked_s_ago: number | null
   available: { version: string; url: string; sha256: string } | null
@@ -322,6 +328,18 @@ export class DeviceClient {
    */
   installUpdate(version: string): Promise<void> {
     return this.request<void>('POST', '/update/install', { body: JSON.stringify({ version }) })
+  }
+
+  /**
+   * Turn the daily check on or off. This is the only one of the four that
+   * changes what the panel does when nobody is looking at it — and the only
+   * way to stop the one request it makes outside the LAN without rebuilding
+   * the firmware.
+   */
+  setUpdateSchedule(scheduled: boolean): Promise<void> {
+    return this.request<void>('POST', '/update/settings', {
+      body: JSON.stringify({ scheduled }),
+    })
   }
 
   resources(provider: string): Promise<Resource[]> {

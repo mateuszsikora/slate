@@ -9,12 +9,15 @@
 # `slate_wifi` answers "is the station up" so a check made while the router is
 # absent reports being offline rather than a mysterious TLS failure, and
 # `slate_config` carries SLATE_CONFIG_SCHEMA_MAX, which is what a manifest's
-# `min_schema` is compared against.
+# `min_schema` is compared against. `slate_store` holds one NVS key: whether
+# this panel makes the daily check at all (#155). That is a setting and not a
+# second build knob below, because the panels the browser flasher installs are
+# exactly the ones nobody can rebuild.
 #
 idf_component_register(
     SRCS "slate_update.c"
     INCLUDE_DIRS "include"
-    REQUIRES slate_api slate_config slate_ota slate_wifi
+    REQUIRES slate_api slate_config slate_ota slate_store slate_wifi
              app_update esp_app_format esp_http_client esp_partition esp_system esp_timer
              esp-tls freertos json mbedtls
 )

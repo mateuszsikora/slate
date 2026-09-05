@@ -98,6 +98,7 @@ any endpoint that takes a body are `empty_body`, `invalid_json`, `too_large`
 | GET | `/update` | the release channel: what is running, what is offered |
 | POST | `/update/check` | look at the manifest now |
 | POST | `/update/install` | install the offered release and restart |
+| POST | `/update/settings` | make the daily check, or stop making it |
 | GET | `/coredump` | the last crash dump |
 | POST | `/factory_reset` | erase everything and reboot |
 
@@ -376,6 +377,7 @@ release channel below is the other one.
 {
   "current": "1.0.0",
   "manifest_url": "https://mateuszsikora.github.io/slate/ota/manifest.json",
+  "scheduled": true,
   "state": "idle",
   "checked_s_ago": 3600,
   "available": {"version": "1.1.0", "url": "https://…/firmware/1.1.0/slate.bin",
@@ -392,8 +394,15 @@ release channel below is the other one.
 manifest and compared them with itself. `error` is the last failure in the
 vocabulary below, and survives beside an offer that is still valid — a check
 that could not reach the server did not make the release stop existing.
-`manifest_url` is `null` on a build with no channel, which is what
-`-DSLATE_UPDATE_MANIFEST_URL='""'` produces.
+
+Two fields say whether the panel looks on its own, and they are not the same
+question. `manifest_url` is `null` on a build with no channel, which is what
+`-DSLATE_UPDATE_MANIFEST_URL='""'` produces; that panel has nowhere to look and
+no setting can give it one. `scheduled` is `false` on a panel that has a channel
+and was told to stop using it, through `POST /update/settings` below — the daily
+request is gone, everything else about the channel is still there. A build with
+no channel reports `scheduled` as `false` too, because it is the answer to "does
+this panel check on its own", and `manifest_url` is what tells the two apart.
 
 The manifest is [`DESIGN.md`](DESIGN.md) §11.4's five fields, published by the
 release workflow beside the browser installer:
@@ -428,9 +437,25 @@ the *other* firmware slot and never the running one, exactly as
 `POST /ota/upload` does. The new image then gets one boot to answer `GET /info`
 before the bootloader takes it back.
 
-Refusals from the two `POST`s: `409` (`busy`, `no_update`, `version_mismatch`),
-`503 no_channel`, and the usual body errors (`unexpected_body`, `invalid_json`,
-`invalid_version`, `too_large`, `truncated`). Failures reported in `error`:
+`POST /update/settings` takes `{"scheduled": false}` and answers `204`. It is a
+device setting in NVS, not part of the configuration document — §10 makes that
+file something people export, import and share between panels, and whether *this*
+wall talks to the internet is not a property that should travel with a dashboard.
+It survives a reboot and does not survive a factory reset, which erases NVS along
+with the credentials and the PIN; the default is on.
+
+What it switches off is the schedule and only the schedule. `POST /update/check`
+works exactly as before while it is off — an explicit check is a request, not a
+schedule — and so does `POST /update/install`, on an offer the panel is still
+holding. Turning it back on resumes the daily check without a reboot, and checks
+straight away if a day has passed meanwhile. A build with no channel refuses this
+route `503 no_channel`, like the other two `POST`s: there is no schedule to have
+an opinion about.
+
+Refusals from the three `POST`s: `409` (`busy`, `no_update`, `version_mismatch`),
+`503 no_channel`, `500 store_failed`, and the usual body errors
+(`unexpected_body`, `invalid_json`, `invalid_version`, `invalid_scheduled`,
+`too_large`, `truncated`). Failures reported in `error`:
 `offline`, `unreachable`, `no_release`, `release_gone`, `manifest_invalid`,
 `board_mismatch`, `schema_too_new`, `insecure_url`, `download_failed`,
 `checksum_mismatch`, `not_an_image`, `version_mismatch`, `invalid_image`,
@@ -446,9 +471,10 @@ time, so an offer this panel read before the newest tag names a file that is no
 longer published. The panel treats that as its own cue to look again, so the
 current release is normally on screen by the time somebody reads the message.
 
-Nothing on this path is automatic except the daily check, and the check
-downloads nothing. Installation is always a request, and always ends in a
-restart the person who asked for it chose the moment of.
+Nothing on this path is automatic except the daily check, the check downloads
+nothing, and the daily check is the one thing here that can be switched off.
+Installation is always a request, and always ends in a restart the person who
+asked for it chose the moment of.
 
 ### `GET /coredump`
 
