@@ -21,6 +21,16 @@
 # fifth artifact carrying a fifth copy of those offsets — one more thing that can be
 # regenerated wrong. `idf.py flash` and the flasher both work from the same four.
 #
+# It does not keep a CHANGELOG.md. What changed in a release is generated from the merged
+# pull request titles between the previous release's tag and this one, because those titles
+# are already written as sentences — `feat: bind system bar items to a resource` is the
+# changelog line. A hand-kept file would have to be appended to by every pull request, which
+# is the same line in the same place in every branch open at once, and renamed from
+# "Unreleased" to the version before the tag is pushed — a thing to remember, immediately
+# before the one moment this workflow exists to make unforgettable. The trade is that the
+# notes can say only what a title says. The day a release needs prose a title cannot carry
+# is the day a file starts earning its cost, and it interpolates into the same slot.
+#
 # It does not build the development variant. What ships is the -Os image; the -Og one is
 # a development tool that travels over the wire between a desk and a wall (§11.1), and
 # publishing both would only invite the question of which one to install.
@@ -324,9 +334,42 @@ jobs:
           mv SHA256SUMS release/
           cat release/SHA256SUMS
 
+      # The half of the notes that is different every time. The previous release's tag is
+      # read here and passed explicitly rather than left to the API's own idea of where the
+      # range starts, so what was asked for is in this log next to what came back.
+      #
+      # The first release has no such range, and asking for one anyway answers with every
+      # pull request the project has ever merged — which above the install instructions is a
+      # wall rather than an answer to "should I install this". So it keeps the notes it would
+      # have had, an empty CHANGES.md takes the slot and its blank line out of the template
+      # with it, and the section begins existing at the second release.
+      - name: Ask GitHub what changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          : > CHANGES.md
+          # Reverse-chronological by creation, so the first entry is the release before this
+          # one — including a prerelease, which the tag pattern in version allows and which
+          # is a starting point like any other.
+          previous=$(gh api "repos/$REPO/releases?per_page=1" --jq '.[0].tag_name // empty')
+          if [ -z "$previous" ]; then
+            echo "no earlier release: these notes carry no list of changes"
+          else
+            echo "changes from $previous to $TAG:"
+            # Through a variable rather than a redirection, so that a refusal — which gh
+            # prints on stdout as the JSON it arrived as — fails this step over an empty
+            # file rather than over release notes made of an error message.
+            notes=$(gh api --method POST "repos/$REPO/releases/generate-notes" \
+                      -f tag_name="$TAG" -f previous_tag_name="$previous" --jq .body)
+            printf '%s\n' "$notes" > CHANGES.md
+            cat CHANGES.md
+          fi
+
       # The prose lives in .github/release-notes.md.in, where it can be read and edited as
-      # prose. NOTES.md is written outside release/ deliberately: everything in that
-      # directory is uploaded as an asset and covered by the checksums above, and the
+      # prose. NOTES.md and CHANGES.md are written outside release/ deliberately: everything
+      # in that directory is uploaded as an asset and covered by the checksums above, and the
       # notes are neither.
       - name: Write the release notes
         env:
@@ -337,11 +380,17 @@ jobs:
           PAGE="https://${OWNER}.github.io/${REPO#*/}/" python3 - <<'PY' > NOTES.md
           import os, pathlib
           template = pathlib.Path('.github/release-notes.md.in').read_text()
+          # Last, so that nothing substituted here is scanned for a placeholder: the block
+          # is somebody else's text, and a pull request titled after one of these names is
+          # a joke this file does not have to be in on. An empty block takes the slot's
+          # blank line with it, leaving the paragraph above sitting straight on ## Install.
+          changes = pathlib.Path('CHANGES.md').read_text().strip()
           print(template
                 .replace('{{VERSION}}', os.environ['VERSION'])
                 .replace('{{REPO}}', os.environ['REPO'])
                 .replace('{{PAGE}}', os.environ['PAGE'])
-                .replace('{{CHECKSUMS}}', pathlib.Path('release/SHA256SUMS').read_text().strip()),
+                .replace('{{CHECKSUMS}}', pathlib.Path('release/SHA256SUMS').read_text().strip())
+                .replace('{{CHANGES}}\n\n', f'{changes}\n\n' if changes else ''),
                 end='')
           PY
           cat NOTES.md

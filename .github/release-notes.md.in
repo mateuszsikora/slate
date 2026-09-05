@@ -4,6 +4,8 @@ table does not fit an 8 MB module, and vendor documentation for this board
 describes one that at least some units are not, so trust the marking printed on
 the module.
 
+{{CHANGES}}
+
 ## Install
 
 On a panel that has never run Slate, from a Chromium-based desktop browser with
