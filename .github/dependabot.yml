@@ -42,8 +42,9 @@ version: 2
 
 updates:
   # Shipped inside slate.bin, per the header above. Minor and patch arrive as one
-  # pull request a week rather than six; a major — React 20, Vite 8 — comes on its
-  # own, which is the review it deserves anyway.
+  # pull request a week rather than six; a major — Vite 8, TypeScript 6 — comes on
+  # its own, which is the review it deserves anyway. React is the exception, and
+  # the paragraph below is why.
   #
   # react and react-dom are grouped apart from the rest, because
   # THIRD_PARTY_NOTICES.md:157 names their versions in its heading: a bump to
