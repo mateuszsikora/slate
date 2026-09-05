@@ -112,6 +112,12 @@ static const int SLATE_DATA_GPIOS[16] = {
 /* GPIO4, from slate_touch.c, which owns it. Named here because a backlight wire
  * soldered onto it would silence touch instead of dimming anything. */
 #define SLATE_PIN_TOUCH_INT 4
+
+/* §6.3's ESP32-S3-WROOM-1-N16R8: SPI flash on GPIO26–32, octal PSRAM on
+ * GPIO33–37. Neither leaves the module, so neither is solderable by accident —
+ * but both are typeable into a Kconfig field. */
+#define SLATE_PIN_FLASH_PSRAM_FIRST 26
+#define SLATE_PIN_FLASH_PSRAM_LAST  37
 #endif
 
 typedef struct {
@@ -252,7 +258,18 @@ void *slate_display_lvgl_pool_alloc(size_t size)
 /* The pins this board has already spent. A backlight wire on one of them is a
  * wiring mistake with a confusing symptom — an RGB line driven at 1 kHz is a
  * corrupted picture rather than a dark one — so it is refused by name at
- * bring-up instead of being taken and fought over. */
+ * bring-up instead of being taken and fought over.
+ *
+ * This check is the only thing standing between a mistyped pin and the damage,
+ * because nothing below it objects: ESP-IDF's valid-output mask rejects only the
+ * four pins an ESP32-S3 does not have, and ledc_channel_config() logs "GPIO %d
+ * is not usable" over an already-reserved pin and then connects it and returns
+ * ESP_OK anyway.
+ *
+ * Hence the flash and PSRAM band, which is not a panel pin and is the worst
+ * answer of all: §6.3's N16R8 module reaches its flash over GPIO26–32 and its
+ * octal PSRAM over GPIO33–37, and that PSRAM is where both framebuffers live.
+ * Handing one of those to LEDC is a boot loop that reports success first. */
 static bool backlight_pwm_pin_is_taken(int pin)
 {
     for (size_t i = 0; i < sizeof(SLATE_DATA_GPIOS) / sizeof(SLATE_DATA_GPIOS[0]); i++) {
@@ -260,9 +277,27 @@ static bool backlight_pwm_pin_is_taken(int pin)
             return true;
         }
     }
+    if (pin >= SLATE_PIN_FLASH_PSRAM_FIRST && pin <= SLATE_PIN_FLASH_PSRAM_LAST) {
+        return true;
+    }
     return pin == SLATE_PIN_HSYNC || pin == SLATE_PIN_VSYNC || pin == SLATE_PIN_DE ||
            pin == SLATE_PIN_PCLK || pin == SLATE_I2C_SDA_GPIO || pin == SLATE_I2C_SCL_GPIO ||
            pin == SLATE_PIN_TOUCH_INT;
+}
+
+/* Usable, and worth a word before the panel is on a wall: these carry the two
+ * consoles a flashed panel is reached over. Taking one costs the boot log this
+ * component's own "backlight dimming on GPIO…" line appears in, which is a poor
+ * trade for a pin — but it is the installer's trade to make, not a fault. */
+static const char *backlight_pwm_pin_caution(int pin)
+{
+    if (pin == 19 || pin == 20) {
+        return "the USB Serial/JTAG port";
+    }
+    if (pin == 43 || pin == 44) {
+        return "the UART0 console";
+    }
+    return NULL;
 }
 
 /*
@@ -283,9 +318,14 @@ static void backlight_pwm_init(void)
         return;
     }
     if (backlight_pwm_pin_is_taken(pin)) {
-        ESP_LOGE(TAG, "backlight PWM GPIO%d is already the panel's or the touch "
-                      "controller's; staying on/off", pin);
+        ESP_LOGE(TAG, "backlight PWM GPIO%d is already spent by the panel, the touch "
+                      "controller or the module's flash and PSRAM; staying on/off", pin);
         return;
+    }
+    const char *caution = backlight_pwm_pin_caution(pin);
+    if (caution != NULL) {
+        ESP_LOGW(TAG, "backlight PWM GPIO%d is %s; dimming it takes that port with it",
+                 pin, caution);
     }
 
     const ledc_timer_config_t timer = {
@@ -326,9 +366,10 @@ static void backlight_pwm_init(void)
 
 /*
  * Zero is zero — an unlit panel is what §3.3's `screen_off_after` and a night
- * brightness of 0 mean, and no floor may lift it. Every other level is mapped
- * into the band above the floor, so brightness 1 is the dimmest light this
- * backlight actually produces rather than a screen that looks broken.
+ * brightness of 0 mean, and no floor may lift it. The remaining 1..100 are
+ * spread across the band from the floor to full duty, endpoints included, so
+ * brightness 1 is exactly the dimmest light this backlight produces rather than
+ * one step above it.
  */
 static uint32_t backlight_pwm_duty(uint8_t percent)
 {
@@ -341,7 +382,7 @@ static uint32_t backlight_pwm_duty(uint8_t percent)
 
     const uint32_t floor_duty =
         (uint32_t) CONFIG_SLATE_BACKLIGHT_PWM_MIN_PERCENT * SLATE_BACKLIGHT_LEDC_FULL_DUTY / 100u;
-    return floor_duty + (SLATE_BACKLIGHT_LEDC_FULL_DUTY - floor_duty) * percent / 100u;
+    return floor_duty + (SLATE_BACKLIGHT_LEDC_FULL_DUTY - floor_duty) * (percent - 1u) / 99u;
 }
 #endif /* CONFIG_SLATE_BACKLIGHT_PWM */
 
@@ -353,6 +394,13 @@ static uint32_t backlight_pwm_duty(uint8_t percent)
  * Order matters at the ends of the range and nowhere else: the enable is
  * asserted before a duty that expects it, and released after a duty of zero, so
  * neither transition can show a frame at the wrong brightness on the way.
+ *
+ * A failed duty write at zero does not skip that release. §3.3's screen-off and
+ * a night brightness of 0 are both requests for a dark panel, and the enable can
+ * deliver one on its own; returning early with it still asserted would answer a
+ * transient I2C or LEDC failure with a lit screen at three in the morning. The
+ * error is still what the caller gets, so the level is not recorded and the
+ * schedule tries again on its next pass.
  */
 static esp_err_t backlight_apply(uint8_t percent)
 {
@@ -368,11 +416,13 @@ static esp_err_t backlight_apply(uint8_t percent)
         if (err == ESP_OK) {
             err = ledc_update_duty(SLATE_BACKLIGHT_LEDC_MODE, SLATE_BACKLIGHT_LEDC_CHANNEL);
         }
-        ESP_RETURN_ON_ERROR(err, TAG, "backlight duty");
 
         if (percent == 0) {
-            return slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, false);
+            esp_err_t enable_err =
+                slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, false);
+            return err != ESP_OK ? err : enable_err;
         }
+        ESP_RETURN_ON_ERROR(err, TAG, "backlight duty");
         return ESP_OK;
     }
 #endif

@@ -49,11 +49,17 @@ to a free GPIO gives the SoC something to modulate:
 3. **Isolate the wire.** The one warning everyone who has done this repeats.
    Electrical tape over the joint, and a route that cannot rub.
 
-Do not use one of the pins the panel already drives — the sixteen RGB data
-lines, HSYNC, VSYNC, DE, PCLK, the I²C pair (GPIO8/GPIO9) or the touch
-interrupt (GPIO4). Firmware refuses those by name at bring-up rather than
-letting a backlight wire corrupt the picture or silence the touch controller,
-but it cannot unsolder them for you.
+Do not use a pin this board has already spent — the sixteen RGB data lines,
+HSYNC, VSYNC, DE, PCLK, the I²C pair (GPIO8/GPIO9), the touch interrupt
+(GPIO4), or GPIO26–37, where the module reaches its own flash and the PSRAM
+that holds both framebuffers. Firmware refuses all of those by name at
+bring-up and falls back to on/off rather than letting a backlight wire corrupt
+the picture, silence the touch controller or take the framebuffers out from
+under the panel — but it cannot unsolder them for you.
+
+GPIO19/20 (USB) and GPIO43/44 (UART0) are accepted with a warning rather than
+refused. They work; they are also the two consoles the log line below appears
+on, so dimming through one of them means giving that up.
 
 The CH422G output stays exactly where it was. It is still the enable, and the
 backlight will not light without it — the dimming input does nothing while the
@@ -85,16 +91,20 @@ idf.py build
 | `SLATE_BACKLIGHT_PWM` | off | the whole feature. Off is a board as it ships |
 | `SLATE_BACKLIGHT_PWM_GPIO` | 16 | the pin the testpad is bridged to |
 | `SLATE_BACKLIGHT_PWM_FREQ_HZ` | 1000 | PWM frequency. 1 kHz is what the ESPHome package for this board uses, which makes it the only value known to have driven this backlight. Raise it if yours whines audibly |
-| `SLATE_BACKLIGHT_PWM_MIN_PERCENT` | 7 | the duty floor under a non-zero brightness, described below |
+| `SLATE_BACKLIGHT_PWM_MIN_PERCENT` | 7 | the duty floor under a non-zero brightness, described below. The thread the ESPHome package cites recommends 0.3 rather than its 0.07, so expect to re-measure this |
 
 Setting them in `menuconfig` writes `firmware/sdkconfig`, which is generated and
 gitignored; putting the same lines in `firmware/sdkconfig.defaults` is what
 survives deleting it.
 
 A release image from the update channel is built without this option, so
-installing one returns the panel to on/off until you flash your own build again.
-Nothing breaks when that happens — the schedule keeps working, the levels stop
-being levels.
+installing one returns a modified panel to on/off until you flash your own build
+again. Firmware-side that is a clean fall back — the schedule keeps working and
+the levels stop being levels — but nobody has yet watched a modified board take
+an OTA, and what the dimming input does with a pin left floating by firmware
+that no longer drives it is untested. If yours comes back dark rather than
+bright after a release update, that is the answer, and this document wants to
+hear about it.
 
 ## What the firmware does with it
 
@@ -114,11 +124,15 @@ Three details are worth knowing:
   brightness of `0` mean a dark panel, so the floor never lifts them.
 - **Every other level is mapped above the floor.** The bottom of this
   backlight's range is dark rather than dim; the ESPHome package carries
-  `min_power: 0.07` for the same reason. Brightness `1` is therefore the
-  dimmest light the panel actually produces rather than a screen that looks
-  broken. The schedule's log line reports the level that was asked for, not the
-  duty it became — the floor is a property of this backlight's bottom end, not a
-  refusal of the level.
+  `min_power: 0.07` for the same reason, and the thread behind it argues for
+  0.3. Brightness `1` is the floor exactly, and `100` is full duty. The
+  schedule's log line reports the level that was asked for, not the duty it
+  became — the floor is a property of this backlight's bottom end, not a refusal
+  of the level.
+- **More duty means brighter**, which is an assumption rather than a
+  measurement: it is how the ESPHome package drives this pin, and nobody here
+  has a modified board to confirm it on. A panel that gets darker as the number
+  goes up has found the one thing this page cannot check.
 
 ## Checking that it worked
 

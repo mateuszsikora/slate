@@ -1,0 +1,14 @@
+# Overlay that compiles §16's backlight modification, applied on top of
+# firmware/sdkconfig.defaults.
+#
+# It is here for the reason the self-test flags beside it are: the option is off
+# by default and the shipped images do not carry it, so without this file the
+# LEDC path is absent from every CI build and a refactor could stop it compiling
+# while both matrix legs stayed green. The first person to notice would be the
+# one who had just soldered a wire onto their panel.
+#
+# This says what CI compiles, not what Slate ships. Turning the modification on
+# for real is a decision made per board, in firmware/sdkconfig — see
+# docs/backlight-dimming.md.
+
+CONFIG_SLATE_BACKLIGHT_PWM=y

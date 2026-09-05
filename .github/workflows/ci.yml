@@ -213,6 +213,10 @@ jobs:
       # keeps the development artifact unchanged and ccache makes the duplicate
       # ESP-IDF component compilation cheap.
       #
+      # §16's backlight modification rides along for exactly that reason. It is
+      # off by default and neither shipped image contains it, so this is the only
+      # leg that compiles it at all — see .github/sdkconfig.ci-pwm.
+      #
       # #14's forced panic is here for the same reason and nothing more: this
       # compiles it, it does not run it. Its guards are what keep an image that
       # deliberately aborts from stranding a panel, and a guard that stops
@@ -226,7 +230,7 @@ jobs:
           . "$IDF_PATH/export.sh" >/dev/null
           idf.py -B build-selftest \
                  -DSDKCONFIG=build-selftest/sdkconfig \
-                 -DSDKCONFIG_DEFAULTS=sdkconfig.defaults \
+                 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;../.github/sdkconfig.ci-pwm" \
                  -DSLATE_API_SELFTEST=1 \
                  -DSLATE_WS_SELFTEST=1 \
                  -DSLATE_SETUP_SELFTEST=1 \

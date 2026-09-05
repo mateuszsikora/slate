@@ -24,10 +24,15 @@ config SLATE_BACKLIGHT_PWM_GPIO
         everyone; 16 is the one the recipe in docs/backlight-dimming.md reaches
         through the RS485 jack.
 
-        The pins this board has already spent — the sixteen RGB data lines,
-        HSYNC, VSYNC, DE, PCLK, the I2C pair and the touch interrupt — are
-        refused at bring-up with a log line, and the firmware falls back to
-        on/off rather than fighting the RGB bus.
+        The pins this board has already spent are refused at bring-up with a log
+        line, and the firmware falls back to on/off rather than fighting them:
+        the sixteen RGB data lines, HSYNC, VSYNC, DE, PCLK, the I2C pair, the
+        touch interrupt, and GPIO26-37, which is where the module reaches its
+        own flash and the PSRAM both framebuffers live in.
+
+        GPIO19/20 and GPIO43/44 are accepted with a warning instead. They work,
+        and they are the USB and UART consoles — a panel that dims through one
+        of them has no boot log left to say so.
 
 config SLATE_BACKLIGHT_PWM_FREQ_HZ
     int "Backlight PWM frequency (Hz)"
@@ -49,8 +54,12 @@ config SLATE_BACKLIGHT_PWM_MIN_PERCENT
         The bottom of the range is dark rather than dim on this panel. A
         non-zero brightness is mapped into the band between this floor and full
         duty, so brightness 1 is the dimmest light the panel actually produces
-        instead of an unlit screen. 7 is the ESPHome package's min_power of
-        0.07; it was chosen on one board and is worth re-measuring on yours.
+        instead of an unlit screen.
+
+        7 is the ESPHome package's min_power of 0.07. The thread that package
+        cites recommends 0.3 for the same board, which is a wide enough
+        disagreement to say that neither number has been measured here: expect
+        to re-measure it on yours.
 
         Zero brightness is still zero duty, and the enable output goes with it.
 
