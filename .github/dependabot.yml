@@ -1,0 +1,142 @@
+# Dependabot for the two npm trees and the workflows.
+#
+# For `editor/` this is not hygiene in the general sense. ADR-6 compiles assets
+# into the image and firmware/components/slate_editor/CMakeLists.txt compresses
+# editor/dist/index.html into slate.bin, so an editor dependency is shipped
+# firmware: it reaches a panel belonging to somebody who never cloned this
+# repository and cannot npm-update anything. For `flasher/` it is the one
+# dependency where a pin makes a bump invisible — esp-web-tools is pinned to an
+# exact version because tools/flasher/build.sh copies its dist/ into the flashing
+# page, so nothing drifts on its own and a version bump only ever happens because
+# somebody decided to make one. This is what makes somebody decide.
+#
+# Two things stay out of reach, and both are meant to. ESP-IDF components first:
+# Dependabot has no idea what firmware/idf_component.yml is, and the equivalent
+# guard is already in place — the "Check the dependency lock is current" step in
+# .github/workflows/ci.yml fails a build that re-solves
+# firmware/dependencies.lock without committing the result. Then the toolchain
+# container, espressif/idf:v5.5.5 (ci.yml:139, release.yml:214): the
+# github-actions ecosystem reads `uses:` and not a job's `container:` key, so
+# nothing below sees it. That one wants to stay unwatched. Its version is what
+# CONTRIBUTING tells a contributor to install and what every flash-size figure in
+# docs/spikes/s3.md was measured on, so it moves when somebody decides to
+# re-measure, not on a Monday morning.
+#
+# The actions are pinned by tag rather than by commit SHA, and the release
+# workflow holds `contents: write` and `id-token: write`, so a SHA pin is the
+# stricter answer. It is also the one that goes stale silently: a SHA nobody
+# updates is worse than a tag, and this is a repository with one maintainer. Tags
+# plus a weekly sweep is where it stops.
+#
+# **Nothing here will open a pull request while the repository is private** unless
+# the dependency graph is switched on in the code security settings — version
+# updates read from it, and it is off by default on a private repository. Going
+# public turns it on. The file is correct either way; it simply idles until then.
+#
+# One thing Dependabot cannot do for us: THIRD_PARTY_NOTICES.md names versions in
+# its headings (React and ESP Web Tools both), and CONTRIBUTING §Dependencies and
+# licensing asks for the notices in the same pull request as the dependency. A
+# bump to either of those needs that heading edited by hand before it merges.
+
+version: 2
+
+updates:
+  # Shipped inside slate.bin, per the header above. Minor and patch arrive as one
+  # pull request a week rather than six; a major — Vite 8, TypeScript 6 — comes on
+  # its own, which is the review it deserves anyway. React is the exception, and
+  # the paragraph below is why.
+  #
+  # react and react-dom are grouped apart from the rest, because
+  # THIRD_PARTY_NOTICES.md:157 names their versions in its heading: a bump to
+  # either is an edit to that file as well, nothing in CI catches a missed one,
+  # and "bump the editor group with 5 updates" is not a title that tells anybody
+  # to look. "bump the react group" is. Their own group carries no update-types
+  # on purpose — react-dom declares `peerDependencies: {react: ^19.2.8}`, so a
+  # React major has to move both in one commit or move neither, and the group is
+  # a pull request about React either way.
+  #
+  # Everything else in the tree is a build tool or a type definition and appears
+  # in no notice. Except scheduler, which is in that same heading — it is
+  # transitive under react-dom and never moves without it, so the react group
+  # carries it without naming it.
+  #
+  # Five open pull requests rather than three, and the arithmetic is the reason. A
+  # quiet week already spends two slots: the editor group, and the react group,
+  # because those two packages are published in lockstep and sit at the same
+  # version here. A limit of three would leave one slot for every major in the
+  # tree, and a slot still held by last week's unmerged pull request is a major
+  # that never gets proposed at all — dropped with nothing to say so but the run
+  # log under Insights. That is exactly the review the paragraph above is asking
+  # for, lost quietly.
+  - package-ecosystem: npm
+    directory: /editor
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+    # Order matters: a dependency joins the first group it matches, and the
+    # editor group's `*` would otherwise swallow react before the react group
+    # below is reached. The exclusions are what keep the two apart.
+    groups:
+      editor:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - react
+          - react-dom
+        update-types:
+          - minor
+          - patch
+      react:
+        patterns:
+          - react
+          - react-dom
+
+  # One dependency, so nothing to group. Note that a bump here changes what the
+  # flashing page serves to a browser talking to a board over Web Serial, and that
+  # page is built from node_modules rather than from a CDN — read the release notes
+  # rather than the version number.
+  - package-ecosystem: npm
+    directory: /flasher
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore
+
+  # ci.yml and release.yml, both under .github/workflows/, which is what `/` means
+  # for this ecosystem. Grouped including majors: everything here is pinned by
+  # major tag, so nearly every update *is* a major tag move and a minor/patch group
+  # would group nothing.
+  #
+  # Most of the group tests itself. checkout, setup-node, cache, upload-artifact
+  # and download-artifact all appear in ci.yml, which runs on every pull request —
+  # including the one proposing the new version, which therefore arrives already
+  # exercised.
+  #
+  # The two Pages actions are excluded because that is not true of them. They
+  # appear only in release.yml, and release.yml triggers on `v*` and nothing else,
+  # so a bump to either is first executed by a tag push — the one run here with no
+  # check in front of it, in the workflow whose own header records two settings it
+  # cannot verify. Ungrouped, at least it arrives as a pull request that names what
+  # it is moving instead of hiding in a bump of five.
+  #
+  # `chore` and not `ci`: CONTRIBUTING lists the commit types, and `ci` is not one.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore
+    groups:
+      actions:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - actions/upload-pages-artifact
+          - actions/deploy-pages
