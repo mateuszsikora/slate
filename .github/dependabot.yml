@@ -45,20 +45,39 @@ updates:
   # pull request a week rather than six; a major — React 20, Vite 8 — comes on its
   # own, which is the review it deserves anyway.
   #
-  # react and react-dom stay outside the group for the same reason a major does.
-  # THIRD_PARTY_NOTICES.md:157 names their versions in a heading, so a bump to
-  # either is also an edit to that file — and "bump the editor group with 5
-  # updates" is not a title that tells anybody so, with nothing in CI to catch it
-  # afterwards. The rest of the tree appears in no notice: it is either a build
-  # tool or a type definition, and neither reaches an image.
+  # react and react-dom are grouped apart from the rest, because
+  # THIRD_PARTY_NOTICES.md:157 names their versions in its heading: a bump to
+  # either is an edit to that file as well, nothing in CI catches a missed one,
+  # and "bump the editor group with 5 updates" is not a title that tells anybody
+  # to look. "bump the react group" is. Their own group carries no update-types
+  # on purpose — react-dom declares `peerDependencies: {react: ^19.2.8}`, so a
+  # React major has to move both in one commit or move neither, and the group is
+  # a pull request about React either way.
+  #
+  # Everything else in the tree is a build tool or a type definition and appears
+  # in no notice. Except scheduler, which is in that same heading — it is
+  # transitive under react-dom and never moves without it, so the react group
+  # carries it without naming it.
+  #
+  # Five open pull requests rather than three, and the arithmetic is the reason. A
+  # quiet week already spends two slots: the editor group, and the react group,
+  # because those two packages are published in lockstep and sit at the same
+  # version here. A limit of three would leave one slot for every major in the
+  # tree, and a slot still held by last week's unmerged pull request is a major
+  # that never gets proposed at all — dropped with nothing to say so but the run
+  # log under Insights. That is exactly the review the paragraph above is asking
+  # for, lost quietly.
   - package-ecosystem: npm
     directory: /editor
     schedule:
       interval: weekly
       day: monday
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 5
     commit-message:
       prefix: chore
+    # Order matters: a dependency joins the first group it matches, and the
+    # editor group's `*` would otherwise swallow react before the react group
+    # below is reached. The exclusions are what keep the two apart.
     groups:
       editor:
         patterns:
@@ -69,6 +88,10 @@ updates:
         update-types:
           - minor
           - patch
+      react:
+        patterns:
+          - react
+          - react-dom
 
   # One dependency, so nothing to group. Note that a bump here changes what the
   # flashing page serves to a browser talking to a board over Web Serial, and that
