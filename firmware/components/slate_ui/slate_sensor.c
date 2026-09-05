@@ -27,18 +27,66 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t 
     return label;
 }
 
-static const char *measurement_icon(slate_measurement_t measurement)
+/*
+ * §7.3: the normalized `category` selects the icon.
+ *
+ * One table, not two. The store fills a category in from `measurement` where a
+ * provider set only that (§5.2), so a thermometer arrives here the same way a
+ * door does and this component never has to ask which of the two fields spoke.
+ * The glyph is fixed per category and does not follow the value: a door reads
+ * `door-closed` whether the word beside it is `Open` or `Closed`, because the
+ * normalized sensor state carries a word rather than a boolean and inventing
+ * one from the text would be reading English back out of §5.6's phrasings.
+ */
+static const char *category_icon(slate_category_t category)
 {
-    switch (measurement) {
-    case SLATE_MEASUREMENT_TEMPERATURE:
+    switch (category) {
+    case SLATE_CATEGORY_TEMPERATURE:
         return SLATE_ICON_THERMOMETER;
-    case SLATE_MEASUREMENT_HUMIDITY:
+    case SLATE_CATEGORY_HUMIDITY:
         return SLATE_ICON_WATER_PERCENT;
-    case SLATE_MEASUREMENT_PRESSURE:
+    case SLATE_CATEGORY_PRESSURE:
         return SLATE_ICON_GAUGE;
-    case SLATE_MEASUREMENT_POWER:
+    case SLATE_CATEGORY_POWER:
         return SLATE_ICON_LIGHTNING_BOLT;
-    case SLATE_MEASUREMENT_NONE:
+    case SLATE_CATEGORY_ILLUMINANCE:
+        return SLATE_ICON_WEATHER_SUNNY;
+    case SLATE_CATEGORY_AIR_QUALITY:
+        return SLATE_ICON_AIR_FILTER;
+    case SLATE_CATEGORY_GAS:
+        return SLATE_ICON_MOLECULE_CO2;
+    case SLATE_CATEGORY_SOUND:
+        return SLATE_ICON_VOLUME_HIGH;
+    case SLATE_CATEGORY_SPEED:
+        return SLATE_ICON_SPEEDOMETER;
+    case SLATE_CATEGORY_BATTERY:
+        return SLATE_ICON_BATTERY;
+    case SLATE_CATEGORY_CONNECTIVITY:
+        return SLATE_ICON_WIFI;
+    case SLATE_CATEGORY_DOOR:
+        return SLATE_ICON_DOOR_CLOSED;
+    case SLATE_CATEGORY_WINDOW:
+        return SLATE_ICON_WINDOW_CLOSED_VARIANT;
+    case SLATE_CATEGORY_GARAGE:
+        return SLATE_ICON_GARAGE;
+    case SLATE_CATEGORY_MOTION:
+        return SLATE_ICON_MOTION_SENSOR;
+    case SLATE_CATEGORY_OCCUPANCY:
+        return SLATE_ICON_HOME_OUTLINE;
+    case SLATE_CATEGORY_MOISTURE:
+        return SLATE_ICON_WATER;
+    case SLATE_CATEGORY_SMOKE:
+        return SLATE_ICON_FIRE;
+    case SLATE_CATEGORY_LOCK:
+        return SLATE_ICON_LOCK;
+    case SLATE_CATEGORY_PLUG:
+        return SLATE_ICON_POWER_PLUG;
+    case SLATE_CATEGORY_PROBLEM:
+        return SLATE_ICON_ALERT_CIRCLE_OUTLINE;
+    case SLATE_CATEGORY_RUNNING:
+        return SLATE_ICON_REFRESH;
+    case SLATE_CATEGORY_NONE:
+    case SLATE_CATEGORY_COUNT:
         return SLATE_ICON_HELP_CIRCLE_OUTLINE;
     }
     return SLATE_ICON_HELP_CIRCLE_OUTLINE;
@@ -227,11 +275,10 @@ void slate_sensor_update(const slate_sensor_view_t *view, const slate_resource_t
     slate_component_label_one_line(view->value);
     lv_label_set_text(view->unit, state_present ? sensor->unit : "");
     if (view->icon != NULL) {
-        lv_label_set_text(
-            view->icon,
-            view->icon_override != NULL
-                ? view->icon_override
-                : measurement_icon(state_present ? sensor->measurement
-                                                  : SLATE_MEASUREMENT_NONE));
+        lv_label_set_text(view->icon,
+                          view->icon_override != NULL
+                              ? view->icon_override
+                              : category_icon(state_present ? sensor->category
+                                                            : SLATE_CATEGORY_NONE));
     }
 }

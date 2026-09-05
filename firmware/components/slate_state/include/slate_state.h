@@ -232,12 +232,18 @@ typedef struct {
 } slate_cover_state_t;
 
 /**
- * @brief What a sensor is measuring (§5.2), which selects icon and formatting.
+ * @brief What magnitude a sensor's number is (§5.2), which selects formatting.
  *
- * §7.3: "The normalized `measurement` selects the icon and value formatting; HA
- * `device_class` is one input the HA provider maps onto it." One input, not the
- * definition — a direct-provider script has no device classes and must be able
- * to say `temperature` just as plainly.
+ * §7.3: "the normalized `measurement` selects value formatting". It answers one
+ * question — how many decimals a reading of this quantity is worth — and a
+ * direct-provider script has no device classes, so it must be able to say
+ * `temperature` just as plainly as the HA adapter maps one onto it.
+ *
+ * It deliberately does not answer what the reading is *about*. That is
+ * slate_category_t below, and the split is why `door` is not a member here: a
+ * contact has no magnitude to format, and a member that formats nothing would
+ * make `{"value": 21.4, "measurement": "door"}` a snapshot the store had no
+ * grounds to refuse.
  */
 typedef enum {
     SLATE_MEASUREMENT_NONE = 0,
@@ -254,6 +260,63 @@ const char *slate_measurement_str(slate_measurement_t measurement);
 bool slate_measurement_from_str(const char *name, slate_measurement_t *out);
 
 /**
+ * @brief What a sensor's reading is about (§5.2), which selects the icon.
+ *
+ * The second axis §7.3 needs, and the reason it exists is a whole domain rather
+ * than an edge case: a Home Assistant `binary_sensor` reports a word, has no
+ * magnitude at all, and would otherwise put a question mark beside `Open` on
+ * every door in the house. Its `device_class` names what the contact *means*,
+ * not what it measures, so it has nowhere to go in slate_measurement_t.
+ *
+ * A category is not a copy of HA's class list. Several classes collapse onto
+ * one member wherever the panel draws them the same way — `door` and `opening`
+ * are both a door — because the question this answers is "which glyph", and a
+ * member the icon font cannot draw would be a distinction with no consequence.
+ * That also keeps it provider-neutral: a `direct` script says `moisture` for
+ * the same reason and gets the same drop of water.
+ *
+ * A measurement implies the matching category, so `temperature` appears in both
+ * enums and a provider that sets only the measurement still gets a thermometer
+ * — slate_state_publish() fills the category in rather than leaving the tile,
+ * `GET /resources` and the next reader to each derive it separately.
+ */
+typedef enum {
+    SLATE_CATEGORY_NONE = 0,
+    SLATE_CATEGORY_TEMPERATURE,
+    SLATE_CATEGORY_HUMIDITY,
+    SLATE_CATEGORY_PRESSURE,
+    SLATE_CATEGORY_POWER,
+    SLATE_CATEGORY_ILLUMINANCE,
+    SLATE_CATEGORY_AIR_QUALITY,
+    SLATE_CATEGORY_GAS,
+    SLATE_CATEGORY_SOUND,
+    SLATE_CATEGORY_SPEED,
+    SLATE_CATEGORY_BATTERY,
+    SLATE_CATEGORY_CONNECTIVITY,
+    SLATE_CATEGORY_DOOR,
+    SLATE_CATEGORY_WINDOW,
+    SLATE_CATEGORY_GARAGE,
+    SLATE_CATEGORY_MOTION,
+    SLATE_CATEGORY_OCCUPANCY,
+    SLATE_CATEGORY_MOISTURE,
+    SLATE_CATEGORY_SMOKE,
+    SLATE_CATEGORY_LOCK,
+    SLATE_CATEGORY_PLUG,
+    SLATE_CATEGORY_PROBLEM,
+    SLATE_CATEGORY_RUNNING,
+    SLATE_CATEGORY_COUNT,
+} slate_category_t;
+
+/** @brief §5.2's spelling of a category; `NULL` for SLATE_CATEGORY_NONE. */
+const char *slate_category_str(slate_category_t category);
+
+/** @brief Parse the same names. False leaves `*out` untouched. */
+bool slate_category_from_str(const char *name, slate_category_t *out);
+
+/** @brief The category a measurement implies, for the fill described above. */
+slate_category_t slate_category_of_measurement(slate_measurement_t measurement);
+
+/**
  * @brief "numeric or textual `value`, optional `unit`" (§5.2).
  *
  * Both members exist because a sensor is the one kind whose value may not be a
@@ -268,6 +331,7 @@ typedef struct {
     char text[SLATE_SENSOR_TEXT_MAX + 1];
     char unit[SLATE_SENSOR_UNIT_MAX + 1];
     slate_measurement_t measurement;
+    slate_category_t category;
 } slate_sensor_state_t;
 
 /** @brief The kind-specific half of §5.2. Scenes are stateless and have no member. */

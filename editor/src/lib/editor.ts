@@ -39,7 +39,7 @@ export const COMPONENTS: readonly ComponentDefinition[] = [
   {
     type: 'sensor',
     title: 'Sensor',
-    description: 'Read-only value, unit and measurement icon.',
+    description: 'Read-only value, unit and an icon the resource chooses.',
     sizes: [
       [1, 1],
       [2, 1],

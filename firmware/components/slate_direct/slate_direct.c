@@ -170,8 +170,10 @@ static bool parse_sensor(const cJSON *state, slate_sensor_state_t *out)
 
     const char *unit = NULL;
     const char *measurement = NULL;
+    const char *category = NULL;
     if (!optional_string(state, "unit", &unit) ||
-        !optional_string(state, "measurement", &measurement)) {
+        !optional_string(state, "measurement", &measurement) ||
+        !optional_string(state, "category", &category)) {
         return false;
     }
     if (unit != NULL) {
@@ -179,11 +181,15 @@ static bool parse_sensor(const cJSON *state, slate_sensor_state_t *out)
     }
 
     /* §5.2: "Unknown state fields and capabilities are ignored." A measurement
-     * this firmware does not have an icon for is the same forward-compatibility
-     * case one field up, so it reads as unmeasured rather than as a refusal —
-     * the value, its unit and its name are all still renderable. */
+     * this firmware cannot format, or a category it has no glyph for, is the
+     * same forward-compatibility case one field up: it reads as unstated rather
+     * than as a refusal — the value, its unit and its name are all still
+     * renderable, and §7.3 falls back to the icon it had before. */
     if (measurement != NULL && !slate_measurement_from_str(measurement, &out->measurement)) {
         out->measurement = SLATE_MEASUREMENT_NONE;
+    }
+    if (category != NULL && !slate_category_from_str(category, &out->category)) {
+        out->category = SLATE_CATEGORY_NONE;
     }
     return true;
 }

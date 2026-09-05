@@ -591,8 +591,14 @@ Every snapshot has common identity and presentation fields plus kind-specific st
 
 - `light`: `state.power` is `on` or `off`; optional `brightness` and `color_temperature` exist only with matching capabilities.
 - `cover`: position and movement state; actions are `toggle`, `open`, `stop` and `close` when advertised.
-- `sensor`: numeric or textual `value`, optional `unit`, and optional `measurement` such as `temperature`, `humidity`, `pressure` or `power`.
+- `sensor`: numeric or textual `value`, optional `unit`, optional `measurement` such as `temperature`, `humidity`, `pressure` or `power`, and optional `category`.
 - `scene`: stateless; the only action is `activate`.
+
+A sensor carries two independent descriptions of itself because it is asked two questions. `measurement` says what magnitude the number is and decides how §7.3 formats it; `category` says what the reading is about and decides which icon sits beside it. They are separate fields rather than one because a whole class of resource has the second and not the first — a door contact reports a word, measures nothing, and its Home Assistant `device_class` names what it *means*. Folding `door` into `measurement` would have made `{"value": 21.4, "unit": "°C", "measurement": "door"}` a snapshot with nothing wrong with it.
+
+The categories are `temperature`, `humidity`, `pressure`, `power`, `illuminance`, `air_quality`, `gas`, `sound`, `speed`, `battery`, `connectivity`, `door`, `window`, `garage`, `motion`, `occupancy`, `moisture`, `smoke`, `lock`, `plug`, `problem` and `running`. The list is bounded by what §7.3 can draw rather than by what a provider might want to say: a category is a glyph, so two things the panel renders identically are one category, and a category with no glyph would be a distinction with no consequence. It stays provider-neutral for the same reason `measurement` does — a `direct` script says `moisture` in its own words and gets the same icon an HA leak detector gets.
+
+The four measurements are also categories, spelled the same because they mean the same thing, and a measurement implies its category: a provider that sets only `measurement` gets the matching `category` filled in by the store, so nothing that reads a snapshot has to derive it a second time. A category the provider stated is never overwritten — it is the more specific of the two, which is how a battery percentage reads as a battery rather than as a bare number.
 
 Unknown state fields and capabilities are ignored. An unavailable resource keeps its last known values but renders stale; a resource that has never produced a snapshot renders the missing placeholder from §7.5. A provider becoming `offline` marks only that provider's resources stale — an unavailable HA instance must not dim tiles supplied by `direct`. `degraded` does not imply stale: a read-only direct sensor remains fresh even when no action consumer is attached.
 
@@ -698,6 +704,10 @@ Five HA domains map onto §5.2's four kinds. An entity in any other domain is no
 `binary_sensor` is a `sensor` whose `value` is a word, not a fifth kind and not a `light`. The on/off shape would fit `light`, but §5.2 gives `light` a `toggle` and a `set_power` that a door contact cannot honour, and naming a read-only contact a light to borrow its dot is a lie the action bus would have to keep. Normalizing it to `sensor` needs no new vocabulary and renders in §7.3 today, since a sensor's value is already "numeric or textual" — and, for the same reason, on §3.2's bound bar item, which is where a door contact earns its place without spending a cell of the grid.
 
 The word comes from `device_class`, which is where a `binary_sensor` keeps its meaning, and the words are Home Assistant's own, so the panel says what the app the user came from says. `On`/`Off` is the fallback for an absent or unrecognised class. `docs/CONFIGURATION.md` carries the table; the adapter's self-test asserts one class per distinct phrasing, so changing a word is a visible change to a test.
+
+The same `device_class` also supplies §5.2's `category`, which is what puts a door rather than a question mark beside the word. One table serves both sensor domains, because the class names are one namespace and a `battery` is a battery whether it arrives as `41` or as `Low`; several classes share a category wherever the panel draws them the same way. A numeric `sensor` therefore gains an icon for the classes outside §5.2's four measurements — `illuminance`, `battery`, `aqi` and the rest — which used to reach §7.3 with nothing to choose from. A class this firmware has no glyph for supplies no category and falls back to the question mark, which is the honest answer for one entity rather than the rule for a domain.
+
+The category does not depend on the state, because `device_class` is an attribute and not a state. A contact whose first observed state is `unknown` — a panel that came up before its Zigbee integration did, a sensor whose battery died before anyone bound it — is unavailable and renders §7.5's dash, and is still drawn as a door. Taking the icon away with the value would put the question mark back exactly where it was worst.
 
 `unknown` is not `off`. A `sensor` may legitimately read `unknown` and §7.3 shows that text; a `binary_sensor` that says so has not answered, so it goes unavailable and renders §7.5's dash rather than a word that is not true. That is why the table above keys availability on the domain and not on the kind.
 
@@ -841,7 +851,7 @@ Movement shows an animated indicator until the state settles.
 | 2×1  | as above with a leading icon |
 | 2×2  | as above plus a 24 h chart (deferred — see section 15) |
 
-No actions. The normalized `measurement` selects the icon and value formatting; HA `device_class` is one input the HA provider maps onto it.
+No actions. The normalized `category` selects the icon and the normalized `measurement` selects value formatting; HA `device_class` is one input the HA provider maps onto both. The icon is fixed per category and does not follow the value — a door reads the same glyph whether it says `Open` or `Closed` — because §5.2's sensor state carries a word rather than a boolean, and recovering one by matching §5.6's phrasings back out of English is not a thing a component should do. A reading with neither field renders the question mark.
 
 ### 7.4 scene
 

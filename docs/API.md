@@ -217,8 +217,23 @@ A snapshot always replaces the previous one in full.
 |--------|---------|-------------------------|
 | `light` | `power` is `on`/`off`; optional `brightness`, `color_temperature` | `toggle`, `set_power`, `set_brightness`, `set_color_temperature` |
 | `cover` | position and movement | `toggle`, `open`, `stop`, `close` |
-| `sensor` | `value`, optional `unit` and `measurement` | none |
+| `sensor` | `value`, optional `unit`, `measurement` and `category` | none |
 | `scene` | stateless | `activate` |
+
+A sensor's two optional descriptions answer different questions.
+`measurement` — `temperature`, `humidity`, `pressure` or `power` — says what
+magnitude the number is and decides how the tile formats it. `category` says
+what the reading is about and decides its icon: `temperature`, `humidity`,
+`pressure`, `power`, `illuminance`, `air_quality`, `gas`, `sound`, `speed`,
+`battery`, `connectivity`, `door`, `window`, `garage`, `motion`, `occupancy`,
+`moisture`, `smoke`, `lock`, `plug`, `problem` or `running`. A door contact has
+the second and not the first. Either may be omitted, and a name this firmware
+does not know is ignored rather than refused.
+
+The four measurements are also categories and imply them, so a snapshot that
+states only `measurement` is read back from `GET /resources` with the matching
+`category` filled in. State `category` explicitly to say something
+`measurement` cannot — a battery percentage, a leak detector, a door.
 
 An unavailable resource keeps its last values and renders stale. A provider
 going `offline` stales only its own resources: an unreachable Home Assistant

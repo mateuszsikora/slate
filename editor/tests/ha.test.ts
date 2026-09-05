@@ -107,6 +107,55 @@ test('the documented binary_sensor phrasings are exactly the firmware ones', () 
   )
 })
 
+test('the documented device_class icons are exactly the firmware ones', () => {
+  // Same reason as the phrasings above: which glyph a contact gets is a product
+  // decision written down twice, and a table that quietly drifts is worse than
+  // no table. The doc names the icon in English rather than by enum member, so
+  // what is compared is the grouping — which classes are documented, and which
+  // of them the adapter puts on the same icon.
+  const source = readFileSync(
+    new URL('../../firmware/components/slate_ha/slate_ha_entities.c', import.meta.url),
+    'utf8',
+  )
+  const start = source.indexOf('k_categories[] = {')
+  const table = source.slice(start, source.indexOf('};', start))
+  const firmware = new Map<string, string>()
+  for (const row of table.matchAll(/\{"([a-z0-9_]+)", (SLATE_CATEGORY_[A-Z_]+)\}/g)) {
+    firmware.set(row[1], row[2])
+  }
+  assert.ok(firmware.size > 40, `parsed only ${firmware.size} rows from the adapter`)
+
+  const doc = readFileSync(new URL('../../docs/CONFIGURATION.md', import.meta.url), 'utf8')
+  const heading = doc.indexOf('| `device_class` | Icon |')
+  assert.notEqual(heading, -1, 'the icon table is gone from CONFIGURATION.md')
+  const section = doc.slice(heading, doc.indexOf('\n\n', heading)).split('\n').slice(2)
+
+  const documented: string[][] = []
+  for (const line of section) {
+    const classes = [...line.matchAll(/`([a-z0-9_]+)`/g)].map((match) => match[1])
+    if (classes.length > 0) documented.push(classes)
+  }
+
+  assert.deepEqual(
+    documented.flat().sort(),
+    [...firmware.keys()].sort(),
+    'CONFIGURATION.md and the adapter disagree about which classes have an icon',
+  )
+  const seen = new Map<string, string[]>()
+  for (const row of documented) {
+    const categories = new Set(row.map((name) => firmware.get(name)))
+    assert.equal(
+      categories.size,
+      1,
+      `CONFIGURATION.md puts ${row.join(', ')} on one icon, the adapter does not`,
+    )
+    const [category] = categories
+    const earlier = seen.get(category!)
+    assert.equal(earlier, undefined, `${category} is documented twice: ${earlier?.join(', ')}`)
+    seen.set(category!, row)
+  }
+})
+
 test('the picker still refuses a domain no component can render', () => {
   const resources = assembleHaResources(
     catalog([

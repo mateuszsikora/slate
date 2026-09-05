@@ -244,8 +244,11 @@ Movement animates until the state settles.
 | 2×1 | the same with a leading icon |
 
 No actions. The resource's `measurement` — `temperature`, `humidity`,
-`pressure`, `power` — selects the icon and the formatting. A 24 h chart variant
-is deferred.
+`pressure`, `power` — selects the formatting, and its `category` selects the
+icon at 2×1 and larger. A measurement implies the matching category, so a
+temperature reading gets a thermometer without anyone saying so twice; a door
+contact has a category and no measurement, and gets a door. A tile's own `icon`
+overrides whatever the resource reported. A 24 h chart variant is deferred.
 
 ### `scene`
 
@@ -340,22 +343,59 @@ itself shows:
 An entity that reports `unknown` or `unavailable` is stale and renders a dash,
 not `Off`. A contact that has not answered is not a closed door.
 
-**Give a `binary_sensor` tile its own `icon` at 2×1 and larger.** The icon a
-`sensor` tile picks for itself comes from `measurement` — `temperature`,
-`humidity`, `pressure`, `power` — and a contact has none of those: its
-`device_class` names what it means, not what it measures. With no `icon` set,
-the tile therefore falls back to a question mark beside the word. The 1×1 size
-carries no icon at all and needs nothing.
+The same `device_class` also chooses the icon a `sensor` tile shows at 2×1 and
+larger, so a door contact needs no `icon` of its own:
 
 ```json
 {"id": "t1", "type": "sensor", "pos": [0, 0], "size": [2, 1],
  "binding": {"provider": "ha", "resource": "binary_sensor.front_door"},
- "label": "Front door", "icon": "door-closed"}
+ "label": "Front door"}
 ```
 
-`door-closed`, `window-open-variant`, `motion-sensor`, `water`, `garage` and
-`power-plug` are the names in `tools/fonts/icons.txt` that suit the common
-contacts.
+This table covers both sensor domains — a `battery` is drawn as a battery
+whether Home Assistant reports it as `41` or as `Low` — and it is why a
+`sensor` whose class is outside the four `measurement` names now has an icon
+too:
+
+| `device_class` | Icon |
+|----------------|------|
+| `temperature`, `cold`, `heat` | thermometer |
+| `humidity` | humidity |
+| `pressure`, `atmospheric_pressure` | gauge |
+| `power`, `current`, `voltage`, `energy`, `power_factor` | lightning bolt |
+| `illuminance`, `light` | sun |
+| `aqi`, `pm1`, `pm25`, `pm10` | air filter |
+| `gas`, `carbon_monoxide`, `carbon_dioxide`, `volatile_organic_compounds`, `nitrogen_dioxide`, `ozone`, `sulphur_dioxide` | CO₂ molecule |
+| `sound`, `sound_pressure` | speaker |
+| `speed`, `wind_speed` | speedometer |
+| `battery`, `battery_charging` | battery |
+| `connectivity`, `signal_strength` | Wi-Fi |
+| `door`, `opening` | door |
+| `window` | window |
+| `garage_door` | garage |
+| `motion`, `moving`, `vibration` | motion sensor |
+| `occupancy`, `presence` | house |
+| `moisture` | drop of water |
+| `smoke` | flame |
+| `lock` | padlock |
+| `plug` | plug |
+| `problem`, `safety`, `tamper` | warning circle |
+| `running`, `update` | refresh arrow |
+| absent, or a class this firmware has no icon for | question mark |
+
+Classes share an icon where the panel has no reason to draw them differently.
+The icon does not change with the value: an open door and a closed one show the
+same door, and the word beside it is what tells them apart. The 1×1 size
+carries no icon at all.
+
+A tile's own `icon` still overrides all of this — set one when the panel's
+choice is not the one you want, or when the entity's class is not in the table:
+
+```json
+{"id": "t1", "type": "sensor", "pos": [0, 0], "size": [2, 1],
+ "binding": {"provider": "ha", "resource": "binary_sensor.cellar_hatch"},
+ "label": "Cellar hatch", "icon": "garage"}
+```
 
 ## Themes
 

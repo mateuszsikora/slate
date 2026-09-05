@@ -121,6 +121,32 @@ static const char *const MEASUREMENT_NAMES[] = {
     [SLATE_MEASUREMENT_POWER] = "power",
 };
 
+static const char *const CATEGORY_NAMES[] = {
+    [SLATE_CATEGORY_NONE] = NULL,
+    [SLATE_CATEGORY_TEMPERATURE] = "temperature",
+    [SLATE_CATEGORY_HUMIDITY] = "humidity",
+    [SLATE_CATEGORY_PRESSURE] = "pressure",
+    [SLATE_CATEGORY_POWER] = "power",
+    [SLATE_CATEGORY_ILLUMINANCE] = "illuminance",
+    [SLATE_CATEGORY_AIR_QUALITY] = "air_quality",
+    [SLATE_CATEGORY_GAS] = "gas",
+    [SLATE_CATEGORY_SOUND] = "sound",
+    [SLATE_CATEGORY_SPEED] = "speed",
+    [SLATE_CATEGORY_BATTERY] = "battery",
+    [SLATE_CATEGORY_CONNECTIVITY] = "connectivity",
+    [SLATE_CATEGORY_DOOR] = "door",
+    [SLATE_CATEGORY_WINDOW] = "window",
+    [SLATE_CATEGORY_GARAGE] = "garage",
+    [SLATE_CATEGORY_MOTION] = "motion",
+    [SLATE_CATEGORY_OCCUPANCY] = "occupancy",
+    [SLATE_CATEGORY_MOISTURE] = "moisture",
+    [SLATE_CATEGORY_SMOKE] = "smoke",
+    [SLATE_CATEGORY_LOCK] = "lock",
+    [SLATE_CATEGORY_PLUG] = "plug",
+    [SLATE_CATEGORY_PROBLEM] = "problem",
+    [SLATE_CATEGORY_RUNNING] = "running",
+};
+
 static const char *const PRESENTATION_NAMES[] = {
     [SLATE_PRESENT_OK] = "ok",
     [SLATE_PRESENT_STALE] = "stale",
@@ -141,6 +167,8 @@ _Static_assert(sizeof(STATUS_NAMES) / sizeof(STATUS_NAMES[0]) == SLATE_PROVIDER_
                "every provider status needs a name");
 _Static_assert(sizeof(ACTION_NAMES) / sizeof(ACTION_NAMES[0]) == SLATE_ACTION_COUNT,
                "every action needs a name");
+_Static_assert(sizeof(CATEGORY_NAMES) / sizeof(CATEGORY_NAMES[0]) == SLATE_CATEGORY_COUNT,
+               "every category needs a name");
 _Static_assert(sizeof(PRESENTATION_NAMES) / sizeof(PRESENTATION_NAMES[0]) ==
                    SLATE_PRESENT_INCOMPATIBLE + 1,
                "every presentation needs a name");
@@ -209,6 +237,42 @@ bool slate_measurement_from_str(const char *name, slate_measurement_t *out)
     }
     *out = (slate_measurement_t) index;
     return true;
+}
+
+const char *slate_category_str(slate_category_t category)
+{
+    return (unsigned) category < SLATE_CATEGORY_COUNT ? CATEGORY_NAMES[category] : NULL;
+}
+
+bool slate_category_from_str(const char *name, slate_category_t *out)
+{
+    int index = 0;
+    if (out == NULL || !name_lookup(CATEGORY_NAMES, SLATE_CATEGORY_COUNT, name, &index)) {
+        return false;
+    }
+    *out = (slate_category_t) index;
+    return true;
+}
+
+slate_category_t slate_category_of_measurement(slate_measurement_t measurement)
+{
+    /* The four measurements are also four of the categories, and they are
+     * spelled the same in §5.2 because they mean the same thing. Written as a
+     * switch rather than a table so that a fifth measurement cannot be added
+     * without the compiler asking what it is about. */
+    switch (measurement) {
+    case SLATE_MEASUREMENT_TEMPERATURE:
+        return SLATE_CATEGORY_TEMPERATURE;
+    case SLATE_MEASUREMENT_HUMIDITY:
+        return SLATE_CATEGORY_HUMIDITY;
+    case SLATE_MEASUREMENT_PRESSURE:
+        return SLATE_CATEGORY_PRESSURE;
+    case SLATE_MEASUREMENT_POWER:
+        return SLATE_CATEGORY_POWER;
+    case SLATE_MEASUREMENT_NONE:
+        return SLATE_CATEGORY_NONE;
+    }
+    return SLATE_CATEGORY_NONE;
 }
 
 const char *slate_presentation_str(slate_presentation_t presentation)
@@ -749,7 +813,8 @@ static bool state_is_valid(const slate_snapshot_t *snapshot)
     }
     case SLATE_KIND_SENSOR: {
         const slate_sensor_state_t *sensor = &snapshot->state.sensor;
-        if (sensor->measurement > SLATE_MEASUREMENT_POWER) {
+        if (sensor->measurement > SLATE_MEASUREMENT_POWER ||
+            sensor->category >= SLATE_CATEGORY_COUNT) {
             return false;
         }
         /* A textual sensor with nothing to say renders as an empty tile, which
@@ -901,6 +966,16 @@ esp_err_t slate_state_publish(const char *provider, const slate_snapshot_t *snap
             entry->state.sensor = snapshot->state.sensor;
             entry->state.sensor.text[sizeof(entry->state.sensor.text) - 1] = '\0';
             entry->state.sensor.unit[sizeof(entry->state.sensor.unit) - 1] = '\0';
+            /* §5.2: a measurement implies the matching category. Filled in here
+             * for the same reason an advertised percentage gets 0..100 — every
+             * reader would otherwise write this line for itself, and §7.3's
+             * icon would depend on which of the two fields a provider happened
+             * to set. A category the provider stated is never overwritten: it
+             * is the more specific of the two. */
+            if (entry->state.sensor.category == SLATE_CATEGORY_NONE) {
+                entry->state.sensor.category =
+                    slate_category_of_measurement(entry->state.sensor.measurement);
+            }
             break;
         case SLATE_KIND_SCENE:
             break;
@@ -1240,6 +1315,35 @@ esp_err_t slate_state_selftest(void)
               r.state.sensor.numeric && r.state.sensor.value == 21.4 &&
               strcmp(r.state.sensor.unit, "°C") == 0,
           "a degraded provider's resources stay fresh");
+    CHECK(slate_state_get("st-beta", "temp", &r) == ESP_OK &&
+              r.state.sensor.category == SLATE_CATEGORY_TEMPERATURE,
+          "a stated measurement fills in the category it implies");
+
+    /* The `binary_sensor` shape of §5.6: a word, no magnitude, and a category
+     * that is the only thing §7.3 can choose an icon from. */
+    slate_snapshot_t contact = temp;
+    contact.state.sensor = (slate_sensor_state_t) {.category = SLATE_CATEGORY_DOOR};
+    strlcpy(contact.state.sensor.text, "Open", sizeof(contact.state.sensor.text));
+    CHECK(slate_state_publish("st-beta", &contact) == ESP_OK &&
+              slate_state_get("st-beta", "temp", &r) == ESP_OK &&
+              r.state.sensor.measurement == SLATE_MEASUREMENT_NONE &&
+              r.state.sensor.category == SLATE_CATEGORY_DOOR,
+          "a textual sensor carries a category without a measurement");
+
+    slate_snapshot_t both = temp;
+    both.state.sensor.category = SLATE_CATEGORY_BATTERY;
+    CHECK(slate_state_publish("st-beta", &both) == ESP_OK &&
+              slate_state_get("st-beta", "temp", &r) == ESP_OK &&
+              r.state.sensor.category == SLATE_CATEGORY_BATTERY,
+          "a stated category is not overwritten by the measurement's");
+
+    slate_snapshot_t bad_category = temp;
+    bad_category.state.sensor.category = (slate_category_t) SLATE_CATEGORY_COUNT;
+    CHECK(slate_state_publish("st-beta", &bad_category) == ESP_ERR_INVALID_ARG &&
+              slate_state_get("st-beta", "temp", &r) == ESP_OK &&
+              r.state.sensor.category == SLATE_CATEGORY_BATTERY,
+          "a category outside the vocabulary is refused without losing the value");
+    CHECK(slate_state_publish("st-beta", &temp) == ESP_OK, "the sensor returns to its reading");
 
     slate_snapshot_t lamp_gone = lamp;
     lamp_gone.available = false;
