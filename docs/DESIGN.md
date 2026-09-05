@@ -1143,6 +1143,10 @@ Build an LVGL tree from JSON, destroy it, repeat 500 times, logging `lv_mem_moni
 
 Pass: free heap returns to its starting value within 1%, with no downward trend. If it fails: the runtime architecture needs rethinking before anything else proceeds.
 
+Answered in `docs/spikes/s1.md`: **not within 1 % but bit-identical**. Free LVGL heap, live allocation count and fragmentation are the same integers at cycle 500 as at cycle 1 — 0 B of drift, a least-squares slope of 0.0000 B/cycle — over 500 cycles that each build a *different* tree of semantic components with marquee labels and pending-state animations attached, which is the case that actually leaks. A negative control built with a deliberate 64 B per-tile leak drifts −9.9 % at −414 B/cycle, so the zero is a measurement and not a blind spot. ADR-1 and §6.4 stand; nothing needed rethinking before M1.
+
+Two findings outrank the one the spike was asked for. The negative control never moved the ESP heap at all — the leak lived inside LVGL's pre-allocated pool — so a `GET /status` reporting only `heap_free` would have shown a healthy device while the UI heap bled out, which is why §4.1 reports the LVGL heap separately. And the 2 MB budget in §6.2 is overprovisioned by roughly two orders of magnitude: a ten-tile page costs 12.2 KB and peak use across the whole run was 18.5 KB. It does no harm on 8 MB of PSRAM, but the widget tree is not where the memory goes.
+
 ### S-2 — Render performance
 
 A saturated page with 4 animated tiles, driven at 10 resource updates per second. Measure frame time and scrolling smoothness.
@@ -1219,6 +1223,8 @@ Ordered by when each is likely to become the limiting factor:
 
 ## 16. Open questions
 
-- **Backlight dimming.** On this board the CH422G controls the backlight as a binary output; smooth dimming requires bridging one pin to a GPIO. The firmware should detect both variants: the schedule works in on/off mode unmodified and dims smoothly after the modification, which is documented as optional. Decided before M5.
-- **Power and mounting.** Budget roughly 1 A at 5 V with adequate conductor cross-section. Settled before M3, since it constrains where the panel can hang — harder to change than code.
-- **Multiple panels.** Device name suffixed with the MAC address; `POST /identify` to distinguish them. Whether the editor manages several panels from one view is deferred until a second one exists.
+Each entry carries what became of it, because a question that was answered and left standing here reads as one that is still open.
+
+- **Backlight dimming.** On this board the CH422G controls the backlight as a binary output; smooth dimming requires bridging one pin to a GPIO. The firmware should detect both variants: the schedule works in on/off mode unmodified and dims smoothly after the modification, which is documented as optional. **Still open, and past the M5 deadline this entry set for it.** M5 shipped with the schedule and the screen-off timer working as specified and a brightness percentage the panel can only act on at `0`, which is what `CONFIGURATION.md` documents. The hardware modification is being decided in [#41](https://github.com/mateuszsikora/slate/issues/41).
+- **Power and mounting.** **Settled before M3, as this entry intended:** roughly 1 A at 5 V, with a supply and a cable that can deliver it. The failure mode is worth naming because nothing reports it — a thin cable on a long run browns out the backlight before any error appears. The README carries it as a prerequisite rather than a note, since it constrains where the panel can hang and is harder to change than code.
+- **Multiple panels.** **Answered except for the editor.** The device name is suffixed with the MAC address and is the same name everywhere (§4.3), and `POST /identify` flashes the screen to tell two panels apart (§4.1). Whether the editor manages several panels from one view is still deferred until a second one exists.
