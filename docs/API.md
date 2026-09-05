@@ -351,7 +351,10 @@ reset erases NVS and LittleFS, rotates authentication state, answers, and reboot
 
 ### `POST /ota/upload`
 
-The body is a raw `.bin`. On success:
+The body is a raw `.bin`, and curl needs `-H 'Expect:'` to send one: it adds
+`Expect: 100-continue` to a body this size, the panel's HTTP server never
+answers that, and curl then waits out its own timeout before sending anything.
+On success:
 
 ```json
 {"partition": "ota_1", "bytes": 927040, "version": "1.0.0"}
@@ -465,11 +468,12 @@ Refusals from the three `POST`s: `409` (`busy`, `no_update`, `version_mismatch`)
 Three of those are about the channel and are worth telling apart, because they
 look alike from a browser and are not alike at all. `unreachable` is a host that
 did not answer. `no_release` is a manifest that is not there — a channel with
-nothing published on it, which is what a build pointed at a fork that has never
-tagged finds, and not a fault. `release_gone` is the image
-URL of a cached offer answering `404`: the deployment carries one release at a
-time, so an offer this panel read before the newest tag names a file that is no
-longer published. The panel treats that as its own cue to look again, so the
+nothing published on it. A build re-pointed at a channel of its own with
+`-DSLATE_UPDATE_MANIFEST_URL`, and a deployment that has not landed yet, both
+look like this, and neither is a fault. `release_gone` is the image URL of a
+cached offer answering `404`: the deployment carries one release at a time, so
+an offer this panel read before the newest tag names a file that is no longer
+published. The panel treats that as its own cue to look again, so the
 current release is normally on screen by the time somebody reads the message.
 
 Nothing on this path is automatic except the daily check, the check downloads

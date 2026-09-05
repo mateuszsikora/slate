@@ -32,60 +32,29 @@ evening. It verifies the SHA-256 the manifest names before it makes the image
 bootable, and the bootloader returns to the previous version on its own if the
 new one does not come back.
 
-To take this release now rather than at the next daily check, the same install
-over the API — nothing downloaded from this page, nothing cloned:
+That *Install* button is the whole upgrade, and it needs neither this page nor a
+clone of the repository. Driving the same thing from a script — look at the
+channel now, wait for the offer to arrive, install it by name — is three
+endpoints, written out with their refusals in
+[`docs/API.md`](https://github.com/{{REPO}}/blob/v{{VERSION}}/docs/API.md#firmware-updates)
+at the tag this image was built from.
 
-```
-# answers {"token":"…"}; drop the -d if the panel has no administrator PIN
-curl -sS -X POST http://<address>/api/v1/session \
-     -H 'Content-Type: application/json' -d '{"pin":"<PIN>"}'
-export SLATE_TOKEN=<the token from that answer>
-
-# look at the channel now, without waiting for the daily check
-curl -sS -X POST -H "Authorization: Bearer $SLATE_TOKEN" \
-     http://<address>/api/v1/update/check
-
-# until "state" is "idle" and "available" names {{VERSION}}
-curl -sS -H "Authorization: Bearer $SLATE_TOKEN" \
-     http://<address>/api/v1/update
-
-curl -sS -X POST -H "Authorization: Bearer $SLATE_TOKEN" \
-     -H 'Content-Type: application/json' -d '{"version":"{{VERSION}}"}' \
-     http://<address>/api/v1/update/install
-```
-
-The middle request is not optional. `check` answers when it has accepted the
-request, not when it has an answer, and `install` takes the offer the panel is
-holding by then: `409 busy` while the check is still running, `409 no_update` if
-it is holding no offer at all. Naming the version is what keeps this from
-installing something else that arrived in between — a mismatch is refused rather
-than silently obeyed.
-
-`slate-{{VERSION}}.bin` on this page is for what that channel does not cover — a
+`slate-{{VERSION}}.bin` on this page is for what that channel does not cover: a
 panel with no route to the internet, or a return to this version after a later
-one has replaced it on the installer page. It goes to the development upload
-endpoint, which has no manifest, no signature and no HTTPS behind it and is not
-meant to: it is a LAN mechanism between a desk and a wall, behind that same
-token.
+one has replaced it on the installer page. It goes to the panel over
+[`POST /ota/upload`](https://github.com/{{REPO}}/blob/v{{VERSION}}/docs/API.md#post-otaupload),
+which has no manifest, no signature and no HTTPS behind it and is not meant to —
+it is a LAN mechanism between a desk and a wall. From a clone of that same tree,
+`tools/ota/upload.sh <address> slate-{{VERSION}}.bin` is that request with the
+checks worth having around it: it refuses an image built for another chip before
+a megabyte goes over WiFi, and waits for the panel to come back and report the
+version it was sent.
 
-```
-curl -sS -X POST http://<address>/api/v1/ota/upload \
-     -H "Authorization: Bearer $SLATE_TOKEN" \
-     -H 'Content-Type: application/octet-stream' -H 'Expect:' \
-     --data-binary @slate-{{VERSION}}.bin
-```
-
-The `Expect:` is not decoration: without it curl waits out a `100-continue` the
-panel never answers. From a clone of the repository, `tools/ota/upload.sh
-<address> slate-{{VERSION}}.bin` is that request with the checks worth having
-around it — it refuses an image built for another chip before a megabyte goes
-over WiFi, and waits for the panel to come back and report the version it was
-sent.
-
-Every path here keeps the dashboard, authentication settings, External API keys
-and WiFi credentials, which live outside the application partitions. A full
-flash keeps them too unless the flash is erased first — the browser installer
-offers that as a checkbox and says what it costs.
+Nothing here takes the dashboard, authentication settings, External API keys or
+WiFi credentials with it: they live outside the application partitions and
+survive every path above. Erasing the flash first is the one thing that does
+take them — the browser installer offers that as a checkbox and says what it
+costs.
 
 ## Verify
 
