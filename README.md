@@ -44,13 +44,13 @@ document](docs/DESIGN.md):
   configuration and UI runtime, state store and action bus. The direct provider
   and the Home Assistant provider. The component set: light, cover, sensor,
   scene, in every size variant.
-- **M5 — brightness, the night schedule and offline mode are in.** What is open
-  is [#41](https://github.com/mateuszsikora/slate/issues/41): on this board the
-  backlight is a binary output on the CH422G expander, so the panel takes a
+- **M5 — brightness, the night schedule and offline mode are in.** On this board
+  the backlight is a binary output on the CH422G expander, so the panel takes a
   percentage and can only act on `0`. The schedule and the screen-off timer work
   as specified; a night brightness of 20 % lights the panel exactly as brightly
-  as 100 % does. Smooth dimming needs a hardware modification, and that issue is
-  where it is being decided.
+  as 100 % does. Smooth dimming needs a wire soldered to a testpad and a build
+  option that names the pin it went to — both optional, both in
+  [`docs/backlight-dimming.md`](docs/backlight-dimming.md).
 - **M6 — done.** The web editor, served from the device, with the provider and
   resource pickers, JSON import/export, and a second theme.
 - **M7 — done.** First-run setup, optional administrator PIN protection, clear
@@ -439,6 +439,9 @@ Anything that gets fitted here joins the list.
   grid, components, settings, validation errors.
 - [`docs/API.md`](docs/API.md) — the device API and the direct provider,
   endpoint by endpoint.
+- [`docs/backlight-dimming.md`](docs/backlight-dimming.md) — why a brightness
+  percentage is on or off on a stock board, and the optional modification that
+  makes it a level.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the architecture decisions and the
   reasoning behind everything above, including the milestones (§14).
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — sending a change: how to build it, what

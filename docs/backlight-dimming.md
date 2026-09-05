@@ -1,0 +1,154 @@
+# Backlight dimming
+
+The panel Slate runs on cannot dim its backlight as it ships. This page is what
+that means for a brightness percentage, the optional hardware modification that
+makes those percentages real, and the one build option that firmware needs
+afterwards.
+
+You do not have to read it to use Slate. The night schedule, `screen_off_after`
+and touch wake all work on an unmodified board; only the brightness *level* is
+missing there.
+
+- [What the stock board does](#what-the-stock-board-does)
+- [The modification](#the-modification)
+- [Building the firmware for it](#building-the-firmware-for-it)
+- [What the firmware does with it](#what-the-firmware-does-with-it)
+- [Checking that it worked](#checking-that-it-worked)
+
+## What the stock board does
+
+The backlight enable is EXIO2 on the CH422G I²C expander — the pin the
+Waveshare wiki's pinout calls `DISP`. It is an ordinary output: high is lit and
+low is dark, with nothing in between. No pin of the ESP32-S3 is wired to the
+backlight driver's dimming input, so there is nothing for the SoC to modulate.
+
+That is why [`CONFIGURATION.md`](CONFIGURATION.md#settings) says a brightness
+percentage is currently on or off: firmware takes `brightness_night: 20`,
+schedules it correctly, and then lights the panel exactly as brightly as `100`
+would. Only `0` differs, and it is the value the schedule and the inactivity
+timer actually depend on.
+
+## The modification
+
+**This voids whatever warranty the board has, and a shorted wire behind a wall
+panel is worse than a bright screen at night.** It is optional in the strict
+sense: firmware supports both boards, and nothing else in Slate changes.
+
+The board carries a testpad on the backlight driver's dimming input. Bridging it
+to a free GPIO gives the SoC something to modulate:
+
+1. Solder a wire to the testpad. The [Home Assistant community thread][thread]
+   this recipe comes from circles it in a photo, and
+   [`inytar/waveshare-esp32-s3-touch-lcd-7-esphome`][esphome] shows a finished
+   one in `brightness_solder.jpg`.
+2. Route it to a GPIO the panel has not already spent. **GPIO16** is the common
+   choice because it is reachable without soldering at the far end: it is the
+   black wire of the RS485 jack on the back of the board, so a two-pin
+   connector plugs straight in. GPIO6 works and is a tidier route for some
+   people; any free output pin does.
+3. **Isolate the wire.** The one warning everyone who has done this repeats.
+   Electrical tape over the joint, and a route that cannot rub.
+
+Do not use one of the pins the panel already drives — the sixteen RGB data
+lines, HSYNC, VSYNC, DE, PCLK, the I²C pair (GPIO8/GPIO9) or the touch
+interrupt (GPIO4). Firmware refuses those by name at bring-up rather than
+letting a backlight wire corrupt the picture or silence the touch controller,
+but it cannot unsolder them for you.
+
+The CH422G output stays exactly where it was. It is still the enable, and the
+backlight will not light without it — the dimming input does nothing while the
+driver is disabled. Slate keeps driving it, so this is a wire you add rather
+than a wire you move.
+
+A photo of the modification on a Slate panel belongs here and is missing: nobody
+has modified one yet. If you do it, a picture of your joint is a welcome pull
+request.
+
+[thread]: https://community.home-assistant.io/t/esp32-s3-7inch-capacitive-touch-display-adjust-brightness/771030
+[esphome]: https://github.com/inytar/waveshare-esp32-s3-touch-lcd-7-esphome
+
+## Building the firmware for it
+
+The firmware cannot detect the wire. An unbridged pin reads exactly like a
+bridged one — the far end is a driver input, not something that answers — so the
+person who solders it is also the person who tells firmware about it, which they
+do once, at build time:
+
+```bash
+cd firmware
+idf.py menuconfig      # Component config → Slate display
+idf.py build
+```
+
+| Option | Default | What it is |
+|--------|---------|------------|
+| `SLATE_BACKLIGHT_PWM` | off | the whole feature. Off is a board as it ships |
+| `SLATE_BACKLIGHT_PWM_GPIO` | 16 | the pin the testpad is bridged to |
+| `SLATE_BACKLIGHT_PWM_FREQ_HZ` | 1000 | PWM frequency. 1 kHz is what the ESPHome package for this board uses, which makes it the only value known to have driven this backlight. Raise it if yours whines audibly |
+| `SLATE_BACKLIGHT_PWM_MIN_PERCENT` | 7 | the duty floor under a non-zero brightness, described below |
+
+Setting them in `menuconfig` writes `firmware/sdkconfig`, which is generated and
+gitignored; putting the same lines in `firmware/sdkconfig.defaults` is what
+survives deleting it.
+
+A release image from the update channel is built without this option, so
+installing one returns the panel to on/off until you flash your own build again.
+Nothing breaks when that happens — the schedule keeps working, the levels stop
+being levels.
+
+## What the firmware does with it
+
+Nothing above `slate_display_brightness_set()` changes. The schedule, the
+inactivity timer, the setup-card protection in §9.4 and the `settings` in a
+dashboard document are the same on both boards; `brightness_day` and
+`brightness_night` simply start meaning what they say.
+
+Three details are worth knowing:
+
+- **The enable still carries lit-or-dark.** Firmware asserts EXIO2 before a
+  non-zero duty and releases it after a zero one. A firmware built with this
+  option and installed on an *unmodified* board therefore behaves exactly like
+  one built without it: the PWM pin drives nothing, and the enable does what it
+  always did.
+- **Zero is unlit, floor or no floor.** `screen_off_after` and a night
+  brightness of `0` mean a dark panel, so the floor never lifts them.
+- **Every other level is mapped above the floor.** The bottom of this
+  backlight's range is dark rather than dim; the ESPHome package carries
+  `min_power: 0.07` for the same reason. Brightness `1` is therefore the
+  dimmest light the panel actually produces rather than a screen that looks
+  broken. The schedule's log line reports the level that was asked for, not the
+  duty it became — the floor is a property of this backlight's bottom end, not a
+  refusal of the level.
+
+## Checking that it worked
+
+The boot log says which variant is live. With the modification built in and the
+channel up:
+
+```
+I (…) slate_display: backlight dimming on GPIO16: 1000 Hz, 10-bit duty, floor 7%; EXIO2 remains the enable
+```
+
+An error line in its place — a pin the panel already uses, or a channel that
+would not configure — means firmware fell back to on/off, and the panel is
+running as if the option were off.
+
+Then make it prove it, with a dashboard document whose day brightness is
+somewhere in the middle:
+
+```bash
+curl -sS -X PUT http://<address>/api/v1/config \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"schema":1,"theme":"midnight","home_page":"home",
+       "settings":{"brightness_day":30},
+       "pages":[{"id":"home","title":"Home","tiles":[]}]}'
+```
+
+The schedule logs what it applied, and on a modified board the two halves agree:
+
+```
+I (…) brightness: day target 30% -> backlight 30% (pwm)
+```
+
+On an unmodified board the same document logs `-> backlight 100% (on/off)`,
+which is the other half of the same sentence and is not a fault.
