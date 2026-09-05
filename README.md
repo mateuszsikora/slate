@@ -441,8 +441,12 @@ Anything that gets fitted here joins the list.
   endpoint by endpoint.
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the architecture decisions and the
   reasoning behind everything above, including the milestones (§14).
-- [`docs/agent-workflow.md`](docs/agent-workflow.md) — how work on this
-  repository is picked up and verified.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — sending a change: how to build it, what
+  counts as having verified it, and what happens to a firmware patch when you
+  have no panel to test it on.
+- [`docs/agent-workflow.md`](docs/agent-workflow.md) — the same ground for a
+  coding agent working the milestone backlog, and only for one: claiming issues,
+  the `in-progress` label, milestone order.
 - [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — licenses and attribution
   for everything a firmware image carries that is not Slate's own code.
 
