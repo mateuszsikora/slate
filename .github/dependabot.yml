@@ -1,0 +1,87 @@
+# Dependabot for the two npm trees and the workflows.
+#
+# For `editor/` this is not hygiene in the general sense. ADR-6 compiles assets
+# into the image and firmware/components/slate_editor/CMakeLists.txt compresses
+# editor/dist/index.html into slate.bin, so an editor dependency is shipped
+# firmware: it reaches a panel belonging to somebody who never cloned this
+# repository and cannot npm-update anything. For `flasher/` it is the one
+# dependency where a pin makes a bump invisible — esp-web-tools is pinned to an
+# exact version because tools/flasher/build.sh copies its dist/ into the flashing
+# page, so nothing drifts on its own and a version bump only ever happens because
+# somebody decided to make one. This is what makes somebody decide.
+#
+# ESP-IDF components are out of Dependabot's reach; it has no idea what
+# firmware/idf_component.yml is. The equivalent guard is already in place — the
+# "Check the dependency lock is current" step in .github/workflows/ci.yml fails a
+# build that re-solves firmware/dependencies.lock without committing the result.
+#
+# The actions are pinned by tag rather than by commit SHA, and the release
+# workflow holds `contents: write` and `id-token: write`, so a SHA pin is the
+# stricter answer. It is also the one that goes stale silently: a SHA nobody
+# updates is worse than a tag, and this is a repository with one maintainer. Tags
+# plus a weekly sweep is where it stops.
+#
+# **Nothing here will open a pull request while the repository is private** unless
+# the dependency graph is switched on in the code security settings — version
+# updates read from it, and it is off by default on a private repository. Going
+# public turns it on. The file is correct either way; it simply idles until then.
+#
+# One thing Dependabot cannot do for us: THIRD_PARTY_NOTICES.md names versions in
+# its headings (React and ESP Web Tools both), and CONTRIBUTING §Dependencies and
+# licensing asks for the notices in the same pull request as the dependency. A
+# bump to either of those needs that heading edited by hand before it merges.
+
+version: 2
+
+updates:
+  # Shipped inside slate.bin, per the header above. Minor and patch arrive as one
+  # pull request a week rather than six; a major — React 20, Vite 8 — comes on its
+  # own, which is the review it deserves anyway.
+  - package-ecosystem: npm
+    directory: /editor
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore
+    groups:
+      editor:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # One dependency, so nothing to group. Note that a bump here changes what the
+  # flashing page serves to a browser talking to a board over Web Serial, and that
+  # page is built from node_modules rather than from a CDN — read the release notes
+  # rather than the version number.
+  - package-ecosystem: npm
+    directory: /flasher
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore
+
+  # ci.yml and release.yml, both under .github/workflows/, which is what `/` means
+  # for this ecosystem. Grouped including majors: everything here is pinned by
+  # major tag, so nearly every update *is* a major tag move and a minor/patch group
+  # would group nothing. A bad bump is not quiet either — CI runs the changed
+  # workflows on the pull request that proposes them.
+  #
+  # `chore` and not `ci`: CONTRIBUTING lists the commit types, and `ci` is not one.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: chore
+    groups:
+      actions:
+        patterns:
+          - "*"
