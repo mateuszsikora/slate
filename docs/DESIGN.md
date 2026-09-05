@@ -291,7 +291,7 @@ Base: `http://<ip>/api/v1`. `/info` and `/session` are the public browser bootst
 | GET    | `/wifi/scan`       | nearby networks: `ssid`, `rssi`, `channel`, `auth`. Cached — see section 9.2 |
 | POST   | `/wifi`            | set station credentials and, optionally, IPv4 addressing, setup-access-point password and administrator PIN; persist, then apply. Answers before the result is known (section 9.3) |
 | DELETE | `/wifi`            | forget the credentials and raise the setup access point |
-| GET    | `/status`          | network and provider states, RSSI, uptime, free heap, reset reason, reboot counter, resource count |
+| GET    | `/status`          | network and provider states, RSSI, uptime, free heap, LVGL heap and fragmentation, reset reason, reboot counter, resource count |
 | POST   | `/mode`            | `{"mode": "normal"\|"edit"}` |
 | POST   | `/identify`        | flashes the screen — for telling panels apart |
 | POST   | `/ota/upload`      | development OTA; raw `.bin` body (section 11.1) |
@@ -760,7 +760,7 @@ All LVGL access happens on one task; API handlers and every provider post normal
 - The flush waits for VSYNC. Not an optimisation: without it the panel flickers visibly on anything that moves, because the RGB driver applies a framebuffer switch only at a frame boundary, and rendering faster than the panel scans then discards frames. Gating produces exactly one rendered frame per scan-out.
 - Bounce buffer in internal SRAM — required, otherwise WiFi activity causes visible artifacts. The artifact is worth naming, because no counter on the CPU side shows it: the picture rolls vertically, with the bottom of the screen appearing at the top. That is the DMA losing its race to read the framebuffer out of PSRAM while the radio and the renderer compete for the same bus. S-2 measured frames as 4 % *cheaper* without the bounce buffer, and the display unusable.
 - LVGL draw buffer: ~1/10 screen, internal SRAM — but only in a single-framebuffer configuration, which is not the one above. LVGL wants two such buffers so rendering and flushing overlap, and 2 × 76 800 B does not fit: S-2 measured 104 167 B of internal DMA-capable memory free once WiFi is up. Size any internal draw buffer from what is actually free after `esp_wifi_start()`, not from the screen.
-- LVGL heap: 2 MB in PSRAM — the entire widget tree budget.
+- LVGL heap: 2 MB in PSRAM — the entire widget tree budget. Deliberate headroom rather than a measured requirement: S-1 measured 12.2 KB for a ten-tile page and 18.5 KB at peak across a whole run, well under 1 % of it. It does no harm on 8 MB of PSRAM, but anyone sizing memory here or meeting PSRAM pressure later should know the widget tree is not where it goes.
 - State store: sized from the configuration, ~256 B per bound resource plus kind-specific state. Even a config saturating the 64 KB limit stays in the tens of KB. During HA discovery, one opaque WebSocket result may temporarily occupy PSRAM; the browser, not the panel, owns the assembled catalog.
 - Configuration: ≤64 KB, parsed into structs then freed.
 - The setup access point (§9) costs internal SRAM where there is least of it. S-2 measured 104 167 B of internal DMA-capable memory free with the station alone; `WIFI_MODE_APSTA` adds a second interface's buffers on top. It is raised on demand and torn down as soon as the station associates, never left running as a permanent second interface. `APSTA` is the intended mode and §9.4 depends on it: the station must keep trying while the access point is up, which is what lets an unattended panel recover on its own. If it does not fit, that is a budget problem to solve — not a behaviour to drop; §9.4 names the degraded shape it may not fall below.
@@ -1143,6 +1143,10 @@ Build an LVGL tree from JSON, destroy it, repeat 500 times, logging `lv_mem_moni
 
 Pass: free heap returns to its starting value within 1%, with no downward trend. If it fails: the runtime architecture needs rethinking before anything else proceeds.
 
+Answered in `docs/spikes/s1.md`: **not within 1 % but bit-identical**. Free LVGL heap, live allocation count and fragmentation are the same integers at cycle 500 as at cycle 1 — 0 B of drift, a least-squares slope of 0.0000 B/cycle — over 500 cycles that each build a *different* tree of semantic components with marquee labels and pending-state animations attached, which is the case that actually leaks. A negative control built with a deliberate 64 B per-tile leak drifts −9.9 % at −414 B/cycle, so the zero is a measurement and not a blind spot. ADR-1 and §6.4 stand; nothing needed rethinking before M1.
+
+Two findings outrank the one the spike was asked for. The negative control never moved the ESP heap at all — the leak lived inside LVGL's pre-allocated pool — so a `GET /status` reporting only `heap_free` would have shown a healthy device while the UI heap bled out, which is why §4.1 reports the LVGL heap separately. And the 2 MB budget in §6.2 is overprovisioned by roughly two orders of magnitude: a ten-tile page costs 12.2 KB and peak use across the whole run was 18.5 KB. It does no harm on 8 MB of PSRAM, but the widget tree is not where the memory goes.
+
 ### S-2 — Render performance
 
 A saturated page with 4 animated tiles, driven at 10 resource updates per second. Measure frame time and scrolling smoothness.
@@ -1219,6 +1223,8 @@ Ordered by when each is likely to become the limiting factor:
 
 ## 16. Open questions
 
-- **Backlight dimming.** On this board the CH422G controls the backlight as a binary output; smooth dimming requires bridging one pin to a GPIO. The firmware should detect both variants: the schedule works in on/off mode unmodified and dims smoothly after the modification, which is documented as optional. Decided before M5.
-- **Power and mounting.** Budget roughly 1 A at 5 V with adequate conductor cross-section. Settled before M3, since it constrains where the panel can hang — harder to change than code.
-- **Multiple panels.** Device name suffixed with the MAC address; `POST /identify` to distinguish them. Whether the editor manages several panels from one view is deferred until a second one exists.
+Each entry carries what became of it, because a question that was answered and left standing here reads as one that is still open.
+
+- **Backlight dimming.** On this board the CH422G controls the backlight as a binary output; smooth dimming requires bridging one pin to a GPIO. The firmware should detect both variants: the schedule works in on/off mode unmodified and dims smoothly after the modification, which is documented as optional. **Still open, and past the M5 deadline this entry set for it.** M5 shipped with the schedule and the screen-off timer working as specified and a brightness percentage the panel can only act on at `0`, which is what `CONFIGURATION.md` documents. The hardware modification is being decided in [#41](https://github.com/mateuszsikora/slate/issues/41).
+- **Power and mounting.** **Settled before M3, as this entry intended:** roughly 1 A at 5 V, with a supply and a cable that can deliver it. The failure mode is worth naming because nothing reports it — a thin cable on a long run browns out the backlight before any error appears. The README carries it as a prerequisite rather than a note, since it constrains where the panel can hang and is harder to change than code.
+- **Multiple panels.** **Answered except for the editor.** The device name is suffixed with the last three bytes of the base MAC and is one name everywhere — `slate-<mac6>` as the setup access point (§9.2), `slate-<mac6>.local` over mDNS (§4.3) — and `POST /identify` flashes the screen to tell two panels apart (§4.1). Whether the editor manages several panels from one view is still deferred until a second one exists.
