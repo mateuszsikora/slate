@@ -350,19 +350,39 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           : > CHANGES.md
-          # Reverse-chronological by creation, so the first entry is the release before this
-          # one — including a prerelease, which the tag pattern in version allows and which
-          # is a starting point like any other.
-          previous=$(gh api "repos/$REPO/releases?per_page=1" --jq '.[0].tag_name // empty')
+          # Newest first, and a prerelease counts: the tag pattern in version allows one and
+          # it is a starting point like any other. Two things about this list are worth
+          # naming, because neither is what it looks like.
+          #
+          # "Newest" is by the date of the commit each tag points at — GitHub sorts releases
+          # by created_at, which is that commit's timestamp and not the moment the release
+          # was published. The two agree while tags are cut from the tip of main. They stop
+          # agreeing for a patch tagged on a commit older than the newest release, which
+          # sorts below it and takes its own lineage's predecessor as the starting point
+          # instead of the most recently published version. For a backport that is the
+          # better answer, so this is written down rather than worked around.
+          #
+          # And drafts are on this list, because the token that reads it is the one that
+          # writes releases. Both shapes a draft comes in are trouble: a tag that does not
+          # exist yet fails the range below, after the whole firmware build and a long way
+          # from its cause; no tag at all is an empty string, which jq's `//` passes through
+          # as a value, and which would then read here as "no earlier release" and publish a
+          # release quietly missing its list. Filtered out rather than diagnosed — a draft
+          # is not a release, which is the whole of what the filter says.
+          previous=$(gh api "repos/$REPO/releases?per_page=20" \
+                       --jq 'map(select(.draft | not) | .tag_name | select(. != "")) | .[0] // empty')
           if [ -z "$previous" ]; then
             echo "no earlier release: these notes carry no list of changes"
           else
             echo "changes from $previous to $TAG:"
             # Through a variable rather than a redirection, so that a refusal — which gh
-            # prints on stdout as the JSON it arrived as — fails this step over an empty
-            # file rather than over release notes made of an error message.
+            # prints on stdout as the JSON it arrived as, keeping only its one-line summary
+            # for stderr — fails this step over an empty file rather than over release notes
+            # made of an error message. `// ""` is the same care one level down: a body that
+            # is somehow absent degrades to the no-section path rather than publishing the
+            # word "null" under a heading.
             notes=$(gh api --method POST "repos/$REPO/releases/generate-notes" \
-                      -f tag_name="$TAG" -f previous_tag_name="$previous" --jq .body)
+                      -f tag_name="$TAG" -f previous_tag_name="$previous" --jq '.body // ""')
             printf '%s\n' "$notes" > CHANGES.md
             cat CHANGES.md
           fi
