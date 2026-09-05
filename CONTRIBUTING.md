@@ -20,9 +20,12 @@ contributed pull request.
 
 **A question is not a pull request.** "Will this work on the 4.3 inch board",
 "how do I bind a template sensor", "the panel raised its access point again
-after I changed routers" — open an issue for those, or read
+after I changed routers" — those belong in
+[Discussions](https://github.com/mateuszsikora/slate/discussions/categories/q-a)
+rather than the issue tracker, where a closed thread reads as a defect that was
+fixed and the answer goes with it. Read
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) and
-[`docs/API.md`](docs/API.md), which answer more of them than their length
+[`docs/API.md`](docs/API.md) first; they answer more of these than their length
 suggests. A **suspected vulnerability goes nowhere near a public issue**:
 [`SECURITY.md`](SECURITY.md) has the private channel, and also the list of
 documented trades that look like findings and are not.

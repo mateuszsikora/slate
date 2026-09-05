@@ -6,6 +6,9 @@ contact_links:
   - name: Security report
     url: https://github.com/mateuszsikora/slate/security/advisories/new
     about: Report a vulnerability privately. SECURITY.md lists what counts as one — several of the trades in README §Security look like findings and are not.
+  - name: Question about using Slate
+    url: https://github.com/mateuszsikora/slate/discussions/categories/q-a
+    about: Will it work on my board, how do I bind this, why did the panel raise its access point — ask in Q&A. Answers are best-effort, and the marked one stays findable for whoever asks next.
   - name: Configuration reference
     url: https://github.com/mateuszsikora/slate/blob/main/docs/CONFIGURATION.md
     about: The dashboard document — grid, components, settings, and what each validation error means.

@@ -444,6 +444,10 @@ Anything that gets fitted here joins the list.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — sending a change: how to build it, what
   counts as having verified it, and what happens to a firmware patch when you
   have no panel to test it on.
+- [Discussions](https://github.com/mateuszsikora/slate/discussions/categories/q-a)
+  — a question about using Slate rather than a defect in it: whether it works
+  on your board, how to bind something, why the panel raised its access point
+  again. Answers are best-effort, and the marked one stays findable.
 - [`docs/agent-workflow.md`](docs/agent-workflow.md) — the same ground for a
   coding agent working the milestone backlog, and only for one: claiming issues,
   the `in-progress` label, milestone order.
