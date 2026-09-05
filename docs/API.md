@@ -464,8 +464,9 @@ Refusals from the three `POST`s: `409` (`busy`, `no_update`, `version_mismatch`)
 
 Three of those are about the channel and are worth telling apart, because they
 look alike from a browser and are not alike at all. `unreachable` is a host that
-did not answer. `no_release` is a manifest that is not there — the state of
-every panel before the first tag, and not a fault. `release_gone` is the image
+did not answer. `no_release` is a manifest that is not there — a channel with
+nothing published on it, which is what a build pointed at a fork that has never
+tagged finds, and not a fault. `release_gone` is the image
 URL of a cached offer answering `404`: the deployment carries one release at a
 time, so an offer this panel read before the newest tag names a file that is no
 longer published. The panel treats that as its own cue to look again, so the

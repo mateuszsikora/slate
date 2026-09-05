@@ -37,7 +37,7 @@ is required by the other, and nothing outside the local network is involved.
 
 ## Project status
 
-Slate works and is in daily use. Against the milestones in [§14 of the design
+Slate is released and in daily use. Against the milestones in [§14 of the design
 document](docs/DESIGN.md):
 
 - **M0–M4 — done.** Board bring-up, partition table, WiFi station and setup
@@ -58,16 +58,16 @@ document](docs/DESIGN.md):
   network diagnostics, static addressing and the physical recovery gestures
   are in. The panel's QR contains only its address; authentication happens in
   the editor and never puts a credential in a URL.
-- **M8 — the release path exists; the first release has not been tagged.**
-  Pushing a `v*` tag builds the image, publishes it with checksums, and deploys
-  the browser installer beside the manifest panels check for updates against.
-  Enclosures are settled by pointing at a design that has been printed and
-  fitted rather than by publishing one.
+- **M8 — done.** Pushing a `v*` tag builds the image, publishes it with
+  checksums, and deploys the browser installer beside the manifest panels check
+  for updates against. Enclosures are settled by pointing at a design that has
+  been printed and fitted rather than by publishing one.
 
-Until that first tag exists **there is nothing to download**, and the way to a
-running panel is a build from source and one flash over a cable — the last
-section of this file. After that first flash, updates travel over WiFi and the
-cable goes back in the drawer.
+The way to a running panel is the browser installer below and one flash over a
+cable; after that first flash, updates travel over WiFi and the cable goes back
+in the drawer. Building from source stays a supported path — the last section of
+this file — and is what a change of your own needs, not what installing a
+release needs.
 
 This is a personal project published as open source. There is no commercial
 roadmap and no support commitment, and hardware support is limited to the one
@@ -101,10 +101,11 @@ board below.
 
 ### From the browser
 
-Once a version is tagged, the installer lives at
-**<https://mateuszsikora.github.io/slate/>**: connect the panel over USB, press
-the button, pick the port. It needs no toolchain, no ESP-IDF and no command
-line, and it writes the same four images `idf.py flash` would.
+The installer lives at **<https://mateuszsikora.github.io/slate/>**: connect the
+panel over USB, press the button, pick the port. It needs no toolchain, no
+ESP-IDF and no command line, and it writes the same four images `idf.py flash`
+would. It carries the most recent release; older ones stay on the
+[Releases page](https://github.com/mateuszsikora/slate/releases).
 
 It also offers to erase the flash first. On a panel that has never run Slate
 there is nothing to lose. On one that has, an erase takes the dashboard,
@@ -118,8 +119,8 @@ and the `.elf` and `.map` that a crash report from that image is read against.
 ### From source
 
 Building takes ESP-IDF and two asset generators, and is described in
-[Building from source](#building-from-source) at the end of this file. It is
-also the only path today, since nothing has been tagged yet.
+[Building from source](#building-from-source) at the end of this file. It is the
+path for running a change of your own; installing a release needs none of it.
 
 ### By asking a coding agent
 
@@ -298,8 +299,10 @@ curl -sS -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application
      -d '{"scheduled":false}' http://192.168.1.42/api/v1/update/settings
 ```
 
-Until a version is tagged there is nothing on that channel, and the panel says
-exactly that — `no_release`, not an unreachable server.
+A panel that finds nothing on that channel says exactly that — `no_release`, not
+an unreachable server. `check` answers once it has accepted the request rather
+than once it has looked, so a script that posts `install` straight after it gets
+`409 busy`; the `GET` between the two is what says the offer has arrived.
 
 **Over WiFi from your own build**, which is what development uses. The panel
 accepts an image on an authenticated endpoint, which is what
