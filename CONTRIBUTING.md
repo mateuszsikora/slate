@@ -22,8 +22,8 @@ contributed pull request.
 "how do I bind a template sensor", "the panel raised its access point again
 after I changed routers" — those belong in
 [Discussions](https://github.com/mateuszsikora/slate/discussions/categories/q-a)
-rather than the issue tracker, where an answer reads as a defect that was fixed
-and is gone the moment the thread closes. Read
+rather than the issue tracker, where a closed thread reads as a defect that was
+fixed and the answer goes with it. Read
 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) and
 [`docs/API.md`](docs/API.md) first; they answer more of these than their length
 suggests. A **suspected vulnerability goes nowhere near a public issue**:
