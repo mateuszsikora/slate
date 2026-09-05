@@ -1143,6 +1143,10 @@ Build an LVGL tree from JSON, destroy it, repeat 500 times, logging `lv_mem_moni
 
 Pass: free heap returns to its starting value within 1%, with no downward trend. If it fails: the runtime architecture needs rethinking before anything else proceeds.
 
+Answered in `docs/spikes/s1.md`: **it passes bit-identically**, not within 1 %. Across 500 build/destroy cycles the free LVGL heap drifted 0 B (0.0000 %) with a fitted trend of 0.0000 B/cycle, and the live allocation count and fragmentation are the same integers at cycle 500 as at cycle 1. ADR-1 and §6.4 stand; nothing needed rethinking before M1. The trees were varied between cycles and built from semantic components with live animations attached, because rebuilding one identical tree 500 times measures the allocator's reuse rather than §6.4's real case.
+
+Two findings outrank the one the spike was asked for. A leak-injection control showed that a leak inside LVGL's pre-allocated pool never reaches the ESP allocator — during the leaking run PSRAM free never moved — so a `GET /status` reporting only `heap_free` would call a device healthy while the UI heap bled out; §4.1 carries `lvgl_heap_free`, `lvgl_heap_total` and `lvgl_frag_pct` for that reason. And the 2 MB LVGL heap in §6.2 is overprovisioned by two orders of magnitude: a full page of ten tiles costs 12.2 KB, peak use across the whole run was 18.5 KB. It does no harm on 8 MB of PSRAM and is left as it is, but the widget tree is not where the memory goes.
+
 ### S-2 — Render performance
 
 A saturated page with 4 animated tiles, driven at 10 resource updates per second. Measure frame time and scrolling smoothness.
@@ -1219,6 +1223,13 @@ Ordered by when each is likely to become the limiting factor:
 
 ## 16. Open questions
 
-- **Backlight dimming.** On this board the CH422G controls the backlight as a binary output; smooth dimming requires bridging one pin to a GPIO. The firmware should detect both variants: the schedule works in on/off mode unmodified and dims smoothly after the modification, which is documented as optional. Decided before M5.
-- **Power and mounting.** Budget roughly 1 A at 5 V with adequate conductor cross-section. Settled before M3, since it constrains where the panel can hang — harder to change than code.
-- **Multiple panels.** Device name suffixed with the MAC address; `POST /identify` to distinguish them. Whether the editor manages several panels from one view is deferred until a second one exists.
+Posed before the work, and closed out here against what the work did. Each entry keeps its original brief, because the constraint is part of the answer, and states the outcome under it.
+
+### Still open
+
+- **Backlight dimming.** On this board the CH422G controls the backlight as a binary output; smooth dimming requires bridging one pin to a GPIO. The firmware should detect both variants: the schedule works in on/off mode unmodified and dims smoothly after the modification, which is documented as optional. **The brief said decided before M5; M5 shipped without it.** What shipped is the on/off half — the night schedule, the screen-off timer, and a brightness percentage the panel can only act on at `0`. The modification, and whether to ask anyone for it at all, is being decided in [#41](https://github.com/mateuszsikora/slate/issues/41), which is the live thread rather than this paragraph.
+- **Multiple panels.** Device name suffixed with the MAC address; `POST /identify` to distinguish them. **Both of those shipped** — the panel names itself `slate-<mac6>` and advertises under it, and §4 carries `/identify`. What is still open is the last clause only: whether the editor manages several panels from one view, deferred until a second one exists.
+
+### Settled
+
+- **Power and mounting.** Budget roughly 1 A at 5 V with adequate conductor cross-section. **Settled before M3, as intended**, and it is now a requirement rather than a budget: about 1 A at 5 V from a supply and a cable that can actually deliver it. The failure mode is what makes it worth stating — a thin cable on a long run browns out the backlight before anything reports an error, so it reads as a panel fault rather than a power one. That is why it sits in the README next to the board and the WiFi requirement, and why the advice is to settle power and mounting before the panel goes on a wall.
