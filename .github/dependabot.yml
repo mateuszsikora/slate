@@ -10,10 +10,17 @@
 # page, so nothing drifts on its own and a version bump only ever happens because
 # somebody decided to make one. This is what makes somebody decide.
 #
-# ESP-IDF components are out of Dependabot's reach; it has no idea what
-# firmware/idf_component.yml is. The equivalent guard is already in place — the
-# "Check the dependency lock is current" step in .github/workflows/ci.yml fails a
-# build that re-solves firmware/dependencies.lock without committing the result.
+# Two things stay out of reach, and both are meant to. ESP-IDF components first:
+# Dependabot has no idea what firmware/idf_component.yml is, and the equivalent
+# guard is already in place — the "Check the dependency lock is current" step in
+# .github/workflows/ci.yml fails a build that re-solves
+# firmware/dependencies.lock without committing the result. Then the toolchain
+# container, espressif/idf:v5.5.5 (ci.yml:139, release.yml:214): the
+# github-actions ecosystem reads `uses:` and not a job's `container:` key, so
+# nothing below sees it. That one wants to stay unwatched. Its version is what
+# CONTRIBUTING tells a contributor to install and what every flash-size figure in
+# docs/spikes/s3.md was measured on, so it moves when somebody decides to
+# re-measure, not on a Monday morning.
 #
 # The actions are pinned by tag rather than by commit SHA, and the release
 # workflow holds `contents: write` and `id-token: write`, so a SHA pin is the
@@ -37,6 +44,13 @@ updates:
   # Shipped inside slate.bin, per the header above. Minor and patch arrive as one
   # pull request a week rather than six; a major — React 20, Vite 8 — comes on its
   # own, which is the review it deserves anyway.
+  #
+  # react and react-dom stay outside the group for the same reason a major does.
+  # THIRD_PARTY_NOTICES.md:157 names their versions in a heading, so a bump to
+  # either is also an edit to that file — and "bump the editor group with 5
+  # updates" is not a title that tells anybody so, with nothing in CI to catch it
+  # afterwards. The rest of the tree appears in no notice: it is either a build
+  # tool or a type definition, and neither reaches an image.
   - package-ecosystem: npm
     directory: /editor
     schedule:
@@ -49,6 +63,9 @@ updates:
       editor:
         patterns:
           - "*"
+        exclude-patterns:
+          - react
+          - react-dom
         update-types:
           - minor
           - patch
@@ -69,8 +86,19 @@ updates:
   # ci.yml and release.yml, both under .github/workflows/, which is what `/` means
   # for this ecosystem. Grouped including majors: everything here is pinned by
   # major tag, so nearly every update *is* a major tag move and a minor/patch group
-  # would group nothing. A bad bump is not quiet either — CI runs the changed
-  # workflows on the pull request that proposes them.
+  # would group nothing.
+  #
+  # Most of the group tests itself. checkout, setup-node, cache, upload-artifact
+  # and download-artifact all appear in ci.yml, which runs on every pull request —
+  # including the one proposing the new version, which therefore arrives already
+  # exercised.
+  #
+  # The two Pages actions are excluded because that is not true of them. They
+  # appear only in release.yml, and release.yml triggers on `v*` and nothing else,
+  # so a bump to either is first executed by a tag push — the one run here with no
+  # check in front of it, in the workflow whose own header records two settings it
+  # cannot verify. Ungrouped, at least it arrives as a pull request that names what
+  # it is moving instead of hiding in a bump of five.
   #
   # `chore` and not `ci`: CONTRIBUTING lists the commit types, and `ci` is not one.
   - package-ecosystem: github-actions
@@ -85,3 +113,6 @@ updates:
       actions:
         patterns:
           - "*"
+        exclude-patterns:
+          - actions/upload-pages-artifact
+          - actions/deploy-pages
