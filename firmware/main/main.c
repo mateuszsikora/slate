@@ -665,6 +665,15 @@ static void start_api(void)
 
 static void start_display(void)
 {
+    /* The level the schedule last applied, handed to the panel before it comes
+     * up. §6.2's first frame lights the glass as soon as there is something to
+     * show, which is well before the configuration is read and before SNTP has
+     * answered — and 100 % is the wrong answer for a panel with #41's
+     * modification that is booting into the night (#183). The direction matters:
+     * the schedule is a consumer of the display, so the level is pushed down
+     * here rather than asked for from inside the panel. */
+    slate_display_set_first_frame_level(slate_brightness_boot_level());
+
     /* A display allocation or bus failure is not made recoverable by rebooting
      * into the same failure. Keep the API and setup access point alive so the
      * next firmware can still arrive without a cable; the backlight remains

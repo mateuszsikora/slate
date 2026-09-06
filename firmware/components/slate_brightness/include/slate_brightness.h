@@ -7,6 +7,8 @@
  */
 #pragma once
 
+#include <stdint.h>
+
 #include "esp_err.h"
 
 #include "slate_config.h"
@@ -17,6 +19,22 @@ extern "C" {
 
 /** @brief Start the policy task and attach it to the touch input boundary. */
 esp_err_t slate_brightness_init(void);
+
+/**
+ * @brief The level a boot should light the panel at, from 1 through 100.
+ *
+ * The level this policy last applied for a scheduled reason, kept in NVS so it
+ * survives a reboot and an OTA, and 100 % on a panel that has never applied
+ * one. It answers a question nobody else can at that point in the boot: the
+ * panel is up before the configuration is read and long before the clock syncs,
+ * and §6.2's first frame has to light at *something* (#183).
+ *
+ * Safe before slate_brightness_init(), which is where it is meant to be called
+ * from — app_main pushes it into slate_display_set_first_frame_level() before
+ * the panel comes up. It is a remembered fact rather than an inference about
+ * the time: an unsynced clock still may not decide it is night.
+ */
+uint8_t slate_brightness_boot_level(void);
 
 /**
  * @brief Replace the live brightness settings.

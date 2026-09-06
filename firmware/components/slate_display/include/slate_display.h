@@ -142,6 +142,24 @@ esp_err_t slate_display_backlight_set(bool on);
 bool slate_display_backlight_is_on(void);
 
 /**
+ * @brief Choose the level the first frame lights the panel at.
+ *
+ * Call before slate_display_init(); afterwards the frame this describes has
+ * already been shown. The default is 100 %, which is a panel nothing is
+ * remembered about — on a board with the backlight modification of
+ * `docs/backlight-dimming.md` that is a real full duty, and #183 is what
+ * happens when it lands at three in the morning.
+ *
+ * The panel is not the component that can work out what the level should be:
+ * the schedule in §3.3 owns brightness, and it is a consumer of this boundary
+ * rather than the other way round. So the value arrives here as a number
+ * somebody else decided, and the only judgement made about it is that it must
+ * light the panel — 0 and values above 100 are refused, leaving the previous
+ * level in force. §9.4's setup card overrides it while it is on screen.
+ */
+void slate_display_set_first_frame_level(uint8_t percent);
+
+/**
  * @brief Set the requested backlight level from 0 through 100 percent.
  *
  * The unmodified CH422G path quantizes zero to off and every non-zero value to

@@ -130,6 +130,7 @@ typedef struct {
 #define SLATE_KEY_WIFI_SSID    "wifi_ssid"  /* #8/#55, POST /wifi */
 #define SLATE_KEY_BOOT_COUNT   "boot_count" /* #10, GET /status */
 #define SLATE_KEY_UPDATE_SCHED "upd_sched"  /* #155, POST /update/settings */
+#define SLATE_KEY_BACKLIGHT    "bl_level"   /* #183, the level a boot lights at */
 
 /*
  * §9.2's optional WPA2 passphrase for the setup access point. Not one of the two
