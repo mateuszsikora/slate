@@ -134,12 +134,21 @@ Three details are worth knowing:
   measurement: it is how the ESPHome package drives this pin, and nobody here
   has a modified board to confirm it on. A panel that gets darker as the number
   goes up has found the one thing this page cannot check.
-- **A boot starts at full brightness.** The first frame lights the panel at
-  100 % — that is what keeps uninitialised memory off the glass — and the
-  schedule lowers it once it has a configuration and a synced clock. On an
-  unmodified board nobody can see this, because 20 % is 100 % there anyway; on a
-  modified one, a night-time boot or OTA is briefly bright.
-  [#183](https://github.com/mateuszsikora/slate/issues/183) has the detail.
+- **A boot starts where the last one left off.** The first frame lights the
+  panel at the level the schedule last applied — that is what keeps
+  uninitialised memory off the glass, and it is remembered across a reboot and
+  an OTA, so a panel that went down at 20 % does not come back at 100 %. The
+  level then stands until the clock syncs, because an unsynced clock is not
+  allowed to decide it is night: this is a fact carried over from the last run
+  rather than an inference about the time. A dashboard with no `night_start` and
+  `night_end` ends it sooner — there is one brightness in that document and
+  nothing to be uncertain about — and if no time server answers within two
+  minutes the panel falls back to `brightness_day`, so one that cannot reach the
+  network is never stuck on a level nothing can change. A brightness of `0` is
+  never the remembered level — a panel that boots dark and never syncs would
+  have nothing to show for itself — so `brightness_night: 0` comes up lit and
+  blanks a moment later. On an unmodified board none of this is visible, because
+  20 % is 100 % there anyway.
 
 ## Checking that it worked
 

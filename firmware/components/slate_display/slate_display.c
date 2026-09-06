@@ -158,6 +158,9 @@ static atomic_uchar s_backlight_level = ATOMIC_VAR_INIT(0);
 static atomic_bool s_pwm_ready = ATOMIC_VAR_INIT(false);
 #endif
 static bool s_first_frame_shown;
+/* 100 % until somebody who knows better says otherwise, which is what a panel
+ * with nothing remembered about it comes up at. #183 and the setter below. */
+static uint8_t s_first_frame_level = 100;
 static slate_display_heap_metrics_t s_heap_metrics;
 static int64_t s_heap_metrics_at_us;
 static lv_obj_t *s_setup_overlay;
@@ -584,6 +587,12 @@ static esp_err_t panel_init(void)
  * thing that happens; latching before the write would turn one NACK into a
  * panel that renders perfectly and is black for the rest of the boot. Retried
  * every frame, complained about once.
+ *
+ * The level is whatever was pushed down before the panel came up (#183), except
+ * under a setup presentation: §9.4's address has to be readable, and
+ * slate_display_brightness_set() refuses anything below 100 % while a card is on
+ * screen — asking anyway would turn the retry above into a panel that renders
+ * and stays dark.
  */
 static void backlight_enable_first_frame(void)
 {
@@ -593,7 +602,8 @@ static void backlight_enable_first_frame(void)
         return;
     }
 
-    esp_err_t err = slate_display_backlight_set(true);
+    uint8_t level = slate_display_setup_active() ? 100 : s_first_frame_level;
+    esp_err_t err = slate_display_brightness_set(level);
     if (err != ESP_OK) {
         if (!failure_logged) {
             failure_logged = true;
@@ -603,7 +613,12 @@ static void backlight_enable_first_frame(void)
     }
 
     s_first_frame_shown = true;
-    ESP_LOGI(TAG, "first frame displayed; backlight on");
+    /* Both numbers, for the reason the schedule's own line carries both: on an
+     * unmodified board the level asked for and the level the glass is at are
+     * different sentences, and a boot log claiming 20 % on a panel at full
+     * brightness would be the wrong one. */
+    ESP_LOGI(TAG, "first frame displayed; boot level %u%% -> backlight %u%%",
+             (unsigned) level, (unsigned) slate_display_brightness_level());
 }
 
 static void flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
@@ -1680,6 +1695,20 @@ bool slate_display_ready(void)
 esp_err_t slate_display_backlight_set(bool on)
 {
     return slate_display_brightness_set(on ? 100 : 0);
+}
+
+void slate_display_set_first_frame_level(uint8_t percent)
+{
+    /* Zero is refused rather than honoured. §6.2's promise is that the first
+     * frame is the first thing shown, and a first frame nobody can see is the
+     * schedule's business — it can blank the panel a moment later, from a state
+     * where a person watching has seen it work. */
+    if (percent == 0 || percent > 100) {
+        ESP_LOGW(TAG, "first frame level %u%% out of range; keeping %u%%",
+                 (unsigned) percent, (unsigned) s_first_frame_level);
+        return;
+    }
+    s_first_frame_level = percent;
 }
 
 esp_err_t slate_display_brightness_set(uint8_t percent)

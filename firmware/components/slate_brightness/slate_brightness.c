@@ -17,6 +17,7 @@
 #include "esp_timer.h"
 
 #include "slate_display.h"
+#include "slate_store.h"
 #include "slate_time.h"
 #include "slate_touch.h"
 
@@ -28,9 +29,25 @@ static const char *TAG = "brightness";
 #define BRIGHTNESS_DEFAULT_LEVEL     100
 #define BRIGHTNESS_ERROR_LOG_PERIOD_US (60LL * 1000000LL)
 
+/*
+ * How long the level a previous run left behind stands while the clock has not
+ * come back. Two minutes is far longer than a station join and an SNTP exchange
+ * take, and short enough that a panel with no route to a time server — a week
+ * in setup mode, §9 — is not left on a level nothing can change: after it, the
+ * configured day brightness applies and the schedule behaves as it always did.
+ */
+#define BRIGHTNESS_BOOT_HOLD_US (120LL * 1000000LL)
+
+/* A store that will not take the level is retried on this period rather than on
+ * the policy's own, which would put a flash write a second behind the lock a
+ * touch waits 100 ms for. Long enough that a failing NVS is not a load, short
+ * enough that a transient one heals within a day/night transition. */
+#define BRIGHTNESS_WRITE_RETRY_US (60LL * 1000000LL)
+
 typedef enum {
     TARGET_DAY,
     TARGET_NIGHT,
+    TARGET_BOOT,
     TARGET_INACTIVITY,
     TARGET_SETUP,
 } target_reason_t;
@@ -49,6 +66,8 @@ typedef struct {
     bool synced;
     bool setup_active;
     bool inactivity_blanked;
+    bool boot_hold;
+    uint8_t boot_level;
     int local_minute;
 } policy_input_t;
 
@@ -69,6 +88,11 @@ static TaskHandle_t s_task;
 static atomic_bool s_ready = ATOMIC_VAR_INIT(false);
 static brightness_settings_t s_settings;
 static bool s_configured;
+static uint8_t s_boot_level;
+static bool s_boot_level_known;
+static int64_t s_boot_hold_until_us;
+static bool s_boot_level_write_failed;
+static int64_t s_boot_level_retry_at_us;
 static int64_t s_last_activity_us;
 static bool s_inactivity_blanked;
 static uint8_t s_last_target = UINT8_MAX;
@@ -85,6 +109,63 @@ static brightness_settings_t default_settings(void)
         .night = BRIGHTNESS_DEFAULT_LEVEL,
         .wake_on_touch = true,
     };
+}
+
+/*
+ * The level a boot lights at, which is the level the last run ended on rather
+ * than a guess about the time. It has to survive a reboot because none of the
+ * three things that would let the policy work it out are available yet — the
+ * panel comes up before the configuration is read and long before SNTP answers
+ * — and a remembered fact is the only honest answer available in that window.
+ *
+ * Zero is never remembered. A stored zero is a panel that boots dark, and on
+ * one whose clock never syncs it stays dark, which is the failure §9 exists to
+ * remove; `brightness_night: 0` therefore comes up at the last lit level and
+ * blanks a moment later, from a state somebody watching has seen work.
+ */
+static uint8_t boot_level(void)
+{
+    if (!s_boot_level_known) {
+        uint32_t stored = 0;
+        s_boot_level = slate_store_u32_get(SLATE_KEY_BACKLIGHT, &stored) == ESP_OK &&
+                               stored > 0 && stored <= 100
+                           ? (uint8_t) stored
+                           : BRIGHTNESS_DEFAULT_LEVEL;
+        s_boot_level_known = true;
+    }
+    return s_boot_level;
+}
+
+static void remember_boot_level(uint8_t level)
+{
+    if (level == 0 || level == boot_level()) {
+        return;
+    }
+
+    /* Twice a day and on a configuration edit, so the flash write is rare
+     * enough to make on the policy lock: the touch path's own 100 ms timeout
+     * covers the milliseconds it costs, and a deferred-write path would exist
+     * for no other reason. That argument only holds while the write succeeds —
+     * a store that refuses would otherwise be retried on the policy's own
+     * one-second period, which is how a rare write becomes a slow lock a touch
+     * is waiting behind. So a failure backs off. */
+    int64_t now = esp_timer_get_time();
+    if (s_boot_level_write_failed && now < s_boot_level_retry_at_us) {
+        return;
+    }
+
+    esp_err_t err = slate_store_u32_set(SLATE_KEY_BACKLIGHT, level);
+    if (err != ESP_OK) {
+        if (!s_boot_level_write_failed) {
+            ESP_LOGW(TAG, "remembering %u%% for the next boot: %s — boots will light at %u%%",
+                     (unsigned) level, esp_err_to_name(err), (unsigned) s_boot_level);
+        }
+        s_boot_level_write_failed = true;
+        s_boot_level_retry_at_us = now + BRIGHTNESS_WRITE_RETRY_US;
+        return;
+    }
+    s_boot_level_write_failed = false;
+    s_boot_level = level;
 }
 
 static bool settings_equal(const brightness_settings_t *left,
@@ -139,6 +220,21 @@ static bool minute_is_night(int minute, int start, int end)
     return minute >= start || minute < end;
 }
 
+/*
+ * Whether the level a previous run left behind is still the best answer there
+ * is. Three conditions, and each is a different way of saying the policy cannot
+ * do better yet: the clock has not come back, the schedule it would serve is
+ * either unknown or has a night window in it, and the wait has not gone on long
+ * enough to be a panel that will never be told the time. A configuration
+ * without a night window ends it immediately — there is one level in that
+ * document and no uncertainty about which one applies.
+ */
+static bool boot_hold_active(bool synced, bool configured, bool night_schedule,
+                             int64_t now_us, int64_t until_us)
+{
+    return !synced && (!configured || night_schedule) && now_us < until_us;
+}
+
 static policy_target_t policy_target(const brightness_settings_t *settings,
                                      const policy_input_t *input)
 {
@@ -152,6 +248,16 @@ static policy_target_t policy_target(const brightness_settings_t *settings,
         minute_is_night(input->local_minute, settings->night_start,
                         settings->night_end)) {
         return (policy_target_t) {.level = settings->night, .reason = TARGET_NIGHT};
+    }
+    /* An unsynced clock still may not decide it is night — slate_time.c is
+     * explicit about that, and a week in setup mode must not dim the panel. So
+     * this does not infer anything from the time: it keeps the level the last
+     * run ended on until the clock can answer, which is the difference between
+     * remembering and guessing. Once a configuration without a night schedule
+     * has arrived there is nothing to be uncertain about, and the day level is
+     * the only level there is. */
+    if (input->boot_hold) {
+        return (policy_target_t) {.level = input->boot_level, .reason = TARGET_BOOT};
     }
     return (policy_target_t) {.level = settings->day, .reason = TARGET_DAY};
 }
@@ -176,6 +282,8 @@ static const char *reason_name(target_reason_t reason)
         return "day";
     case TARGET_NIGHT:
         return "night";
+    case TARGET_BOOT:
+        return "boot";
     case TARGET_INACTIVITY:
         return "inactivity";
     case TARGET_SETUP:
@@ -190,6 +298,7 @@ static policy_input_t current_input_locked(bool setup_active)
         .synced = slate_time_synced(),
         .setup_active = setup_active,
         .inactivity_blanked = s_inactivity_blanked,
+        .boot_level = boot_level(),
     };
     if (input.synced) {
         time_t now = time(NULL);
@@ -200,6 +309,12 @@ static policy_input_t current_input_locked(bool setup_active)
             input.synced = false;
         }
     }
+    /* Before a configuration arrives the settings are the defaults, and their
+     * day of 100 % is exactly the value this issue is about — so the hold
+     * covers that window too, not only a configured night schedule. */
+    input.boot_hold = boot_hold_active(input.synced, s_configured,
+                                       s_settings.night_schedule,
+                                       esp_timer_get_time(), s_boot_hold_until_us);
     return input;
 }
 
@@ -232,6 +347,14 @@ static esp_err_t apply_locked(bool setup_active)
         return err;
     }
     s_last_apply_error = ESP_OK;
+
+    /* Only the two scheduled reasons are worth carrying into the next boot.
+     * Inactivity is a level a person is not looking at, and §9.4's setup 100 %
+     * is a card rather than a brightness — a panel that rebooted out of either
+     * should come back to the schedule, not to the state that interrupted it. */
+    if (target.reason == TARGET_DAY || target.reason == TARGET_NIGHT) {
+        remember_boot_level(target.level);
+    }
 
     if (target.level != s_last_target || target.reason != s_last_reason) {
         uint8_t actual = slate_display_brightness_level();
@@ -331,6 +454,10 @@ esp_err_t slate_brightness_init(void)
     }
     s_settings = default_settings();
     s_configured = false;
+    s_boot_hold_until_us = esp_timer_get_time() + BRIGHTNESS_BOOT_HOLD_US;
+    /* Read here rather than in the log line below, which runs after the task
+     * that owns this state has started. */
+    uint8_t booted_at = boot_level();
     s_last_activity_us = esp_timer_get_time();
     s_inactivity_blanked = false;
     s_last_target = UINT8_MAX;
@@ -360,9 +487,17 @@ esp_err_t slate_brightness_init(void)
         service_locked();
         xSemaphoreGive(s_lock);
     }
-    ESP_LOGI(TAG, "brightness policy ready; touch wake %s",
+    ESP_LOGI(TAG,
+             "brightness policy ready; %u%% stands until the clock syncs, a configuration "
+             "without a night window arrives, or %d s pass; touch wake %s",
+             (unsigned) booted_at, (int) (BRIGHTNESS_BOOT_HOLD_US / 1000000LL),
              slate_touch_ready() ? "attached" : "unavailable");
     return ESP_OK;
+}
+
+uint8_t slate_brightness_boot_level(void)
+{
+    return boot_level();
 }
 
 esp_err_t slate_brightness_configure(const slate_config_settings_t *settings)
@@ -478,6 +613,33 @@ esp_err_t slate_brightness_selftest(void)
     target = policy_target(&settings, &input);
     SELFTEST_CHECK(target.level == 80 && target.reason == TARGET_DAY,
                    "unsynced clock cannot enter night mode");
+    input.boot_hold = true;
+    input.boot_level = 45;
+    target = policy_target(&settings, &input);
+    SELFTEST_CHECK(target.level == 45 && target.reason == TARGET_BOOT,
+                   "unsynced boot keeps the remembered level");
+    /* The hold is only ever in force while the clock is unsynced, so the two
+     * checks that follow are the pair that matters: a clock that works outranks
+     * what was remembered, and the setup card and the inactivity timer below
+     * outrank it as well — those two run with the hold still set. */
+    input.synced = true;
+    target = policy_target(&settings, &input);
+    SELFTEST_CHECK(target.level == 15 && target.reason == TARGET_NIGHT,
+                   "a working clock outranks the remembered level");
+    input.synced = false;
+
+    const int64_t until = 120 * 1000000LL;
+    SELFTEST_CHECK(boot_hold_active(false, false, false, 0, until),
+                   "an unconfigured panel holds its boot level");
+    SELFTEST_CHECK(boot_hold_active(false, true, true, 0, until),
+                   "a configured night schedule holds it too");
+    SELFTEST_CHECK(!boot_hold_active(false, true, false, 0, until),
+                   "a configuration without a night window ends the hold");
+    SELFTEST_CHECK(!boot_hold_active(true, true, true, 0, until),
+                   "a synced clock ends the hold");
+    SELFTEST_CHECK(!boot_hold_active(false, false, false, until, until),
+                   "the hold expires rather than waiting for ever");
+
     input.setup_active = true;
     input.inactivity_blanked = true;
     target = policy_target(&settings, &input);
