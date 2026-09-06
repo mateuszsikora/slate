@@ -52,8 +52,9 @@ and physical-screen observations.
 Run on `a9f72ce` over an isolated WLAN that serves nothing else, so no unrelated
 device was disturbed. The panel was provisioned onto it, the WLAN was switched
 off at the access point without touching the panel, and it was switched back on
-seven minutes later. The panel was never touched, rebooted or cabled between
-those two moments.
+seven minutes later. Between those two moments the panel was not rebooted, not
+cabled and had nothing submitted to it. It was touched once, to wake a blanked
+screen, and that touch is timed and accounted for below.
 
 **The threshold is measured from the panel's own clock, not from a stopwatch.**
 The retained log ring gives failed association attempts at 309360, 341779,
@@ -80,15 +81,17 @@ bound puts boot between 22:08:18 and 22:08:51, which places 406650 ms between
 
 **The backlight criterion had a deadline, and the panel let it pass.**
 `screen_off_after` was set to one minute for the run so that the inactivity
-timer would be armed rather than disabled — at the shipped default of never
-there is nothing for setup mode to suspend. The screen had blanked and was
-woken by hand at 390734 ms: `backlight woken by touch`, which the policy logs
-only when the level actually rose from zero, and which restarts the timer. The
-screen was therefore lit, not dark, when setup mode arrived 15.9 s later, and
-the `brightness: setup target 100% -> backlight 100% (on/off)` line at 406737 ms
-records a change of *reason* from `day` to `setup` rather than a change of
-level. The policy logs either, so that line does not witness a dark screen
-being lit and is not offered as one.
+timer would be armed rather than disabled — at the shipped default of never the
+inactivity half of the suspension has nothing to act on. The screen had blanked
+and was woken by hand at 390734 ms: `backlight woken by touch`, which the policy
+logs only when the level actually rose from zero, and which restarts the timer.
+The level it rose to is in the ring one millisecond earlier, at 390733 ms:
+`brightness: day target 100% -> backlight 100% (on/off)`. The screen was
+therefore lit, not dark, when setup mode arrived 15.9 s later, and the
+`brightness: setup target 100% -> backlight 100% (on/off)` line at 406737 ms is
+a change of *reason* from that `day` to `setup` rather than a change of level.
+The policy logs either, so that line does not witness a dark screen being lit
+and is not offered as one.
 
 The result is the suspension itself. That restarted timer was due to blank the
 screen at 450734 ms, 44.1 s after the banner appeared. It did not: from
