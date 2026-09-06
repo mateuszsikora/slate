@@ -39,6 +39,9 @@ export const UPDATE_MESSAGES: Record<string, string> = {
   truncated: 'The request did not reach the panel in one piece.',
   invalid_json: 'The panel could not read that request as JSON.',
   invalid_version: 'That request did not name a version the panel could read.',
+  empty_body: 'The panel refused that request: the route needs a body and there was none.',
+  invalid_scheduled: 'That request did not say whether the daily check should be on or off.',
+  store_failed: 'The panel could not save that setting.',
 }
 
 /** One §4 error code as a sentence. An unknown code is shown, never swallowed. */
@@ -80,4 +83,23 @@ export function checkedAgo(seconds: number): string {
   if (seconds < 5400) return `${Math.round(seconds / 60)} min ago`
   if (seconds < 172800) return `${Math.round(seconds / 3600)} h ago`
   return `${Math.round(seconds / 86400)} days ago`
+}
+
+/**
+ * When the panel last looked, and whether it will look again unasked.
+ *
+ * The schedule is a setting rather than a property of the firmware, so this
+ * sentence cannot say "once a day" and be done: a panel that has been told to
+ * stop, and still reads that it looks daily, is being described as a panel
+ * somebody else owns. What does not change either way is the second half —
+ * §11.4 installs nothing without a person, whoever asked for the check.
+ */
+export function updateNote(update: UpdateStatus): string {
+  const checked =
+    update.checked_s_ago === null
+      ? 'The panel has not checked yet.'
+      : `Checked ${checkedAgo(update.checked_s_ago)}.`
+  return update.scheduled
+    ? `${checked} The panel looks once a day and installs nothing on its own.`
+    : `${checked} The daily check is off, so the panel looks only when asked. It installs nothing on its own either way.`
 }

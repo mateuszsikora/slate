@@ -2,24 +2,31 @@
  * §11.4's release channel, from the editor: what is running, what is offered,
  * and the one button that installs it.
  *
- * The panel checks once a day on its own and this page never changes that
- * schedule. What it does is show the answer, let somebody ask for a fresh one,
- * and carry the accept — which is the whole user-facing part of "installation
- * only on explicit request". The confirmation says the panel will restart,
- * because that is the part somebody standing in front of a wall panel cares
- * about, and that the dashboard and credentials are kept, because §11.4's
- * promise is worth stating where it is being relied on.
+ * The panel checks once a day on its own. This page shows the answer, lets
+ * somebody ask for a fresh one, and carries the accept — which is the whole
+ * user-facing part of "installation only on explicit request". The confirmation
+ * says the panel will restart, because that is the part somebody standing in
+ * front of a wall panel cares about, and that the dashboard and credentials are
+ * kept, because §11.4's promise is worth stating where it is being relied on.
+ *
+ * The checkbox turns that daily check off (#155). It is here rather than in the
+ * settings dialog because the thing it governs is on this page: §12's one
+ * outbound request is the same request whose answer the rest of this section
+ * displays, and a person deciding about it wants to see what it buys. It is a
+ * device setting, not part of the configuration document — that file is
+ * exported and shared between panels (§10), and this is a property of a wall.
  */
 
 import { useCallback, useEffect, useState } from 'react'
 
 import { ApiError, type UpdateStatus } from '../lib/api'
-import { checkedAgo, updateError, updateHeadline, updatePercent } from '../lib/update'
+import { updateError, updateHeadline, updateNote, updatePercent } from '../lib/update'
 
 interface Props {
   onFetch: () => Promise<UpdateStatus>
   onCheck: () => Promise<void>
   onInstall: (version: string) => Promise<void>
+  onSchedule: (scheduled: boolean) => Promise<void>
 }
 
 /* Idle is a day-scale question and does not deserve a poll a second. A job in
@@ -27,7 +34,7 @@ interface Props {
 const IDLE_POLL_MS = 60000
 const BUSY_POLL_MS = 1500
 
-export function UpdatePanel({ onFetch, onCheck, onInstall }: Props) {
+export function UpdatePanel({ onFetch, onCheck, onInstall, onSchedule }: Props) {
   const [update, setUpdate] = useState<UpdateStatus | null>(null)
   const [failure, setFailure] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
@@ -156,11 +163,23 @@ export function UpdatePanel({ onFetch, onCheck, onInstall }: Props) {
             ) : null}
           </div>
 
-          <p className="update__note">
-            {update.checked_s_ago === null
-              ? 'The panel has not checked yet; it looks once a day.'
-              : `Checked ${checkedAgo(update.checked_s_ago)}. The panel looks once a day and installs nothing on its own.`}
-          </p>
+          {/* Under the buttons, not above them: the offer and the accept are
+              what somebody came to this section for, and the schedule is the
+              standing decision behind them. */}
+          <label className={`update__schedule${frozen ? ' update__schedule--frozen' : ''}`}>
+            <input
+              type="checkbox"
+              checked={update.scheduled}
+              disabled={frozen}
+              onChange={(event) => {
+                const wanted = event.target.checked
+                run(() => onSchedule(wanted))
+              }}
+            />
+            Check for new releases once a day
+          </label>
+
+          <p className="update__note">{updateNote(update)}</p>
         </>
       )}
     </section>

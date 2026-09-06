@@ -15,6 +15,7 @@
  *     GET  /api/v1/update           what is running, what is offered, what happened
  *     POST /api/v1/update/check     look now instead of waiting for the daily check
  *     POST /api/v1/update/install   install the offered release, then reboot
+ *     POST /api/v1/update/settings  make the daily check, or stop making it
  *
  * The two mechanisms share nothing but the OTA partitions, and that is
  * deliberate: slate_ota's endpoint has no manifest, no versioning and no TLS,
@@ -47,6 +48,15 @@
  * URL that is not `https://` becomes the same state at startup, with an error
  * in the boot log — the checksum in a manifest fetched over plain HTTP is worth
  * exactly what the network says it is, and so is the image URL beside it.
+ *
+ * That knob belongs to whoever compiles the firmware, and the audience the
+ * browser flasher exists for does not. `POST /update/settings` is the same
+ * decision made from the editor and kept in NVS: `scheduled` false is a panel
+ * that has a channel and makes no daily request against it, which `GET /update`
+ * reports as its own state rather than as the channel-less build above. What it
+ * switches off is the schedule and nothing else — an explicit check is a request
+ * somebody made, so `POST /update/check` works either way. NVS means a factory
+ * reset returns it to on, along with everything else §9.5 resets.
  *
  * An offer requires all four of: a `board` equal to §4.1's model id, a
  * `min_schema` no higher than the configuration schema this firmware supports,
@@ -101,10 +111,11 @@ extern "C" {
 #endif
 
 /**
- * @brief Register the three update routes and start the daily check.
+ * @brief Register the four update routes and start the daily check.
  *
  * Call after slate_api_init(), like every other component that registers a
- * route. A panel built with an empty manifest URL registers the routes and
+ * route, and after slate_store_init(), which holds whether the daily check is
+ * wanted. A panel built with an empty manifest URL registers the routes and
  * starts no task: `GET /update` still answers, and answers that there is no
  * channel.
  */

@@ -31,6 +31,7 @@
 #include "slate_api.h"
 #include "slate_config.h"
 #include "slate_ota.h"
+#include "slate_store.h"
 #include "slate_wifi.h"
 
 static const char *TAG = "update";
@@ -131,6 +132,10 @@ _Static_assert(CHUNK_BYTES >= SLATE_OTA_IMAGE_PREFIX_BYTES,
 #define JOB_CHECK   (1U << 0)
 #define JOB_INSTALL (1U << 1)
 
+/* Not a job: the worker is asleep on a wait computed from a setting that has
+ * just changed, and this is how it is told to compute a new one. */
+#define JOB_RESCHEDULE (1U << 2)
+
 typedef enum {
     UPDATE_IDLE = 0,
     UPDATE_CHECKING,
@@ -151,6 +156,7 @@ static struct {
     SemaphoreHandle_t lock;
     TaskHandle_t task;
     bool has_channel;
+    bool scheduled; /* the daily check; false on a build with no channel */
     update_state_t state;
     bool offered;
     release_t offer;
@@ -880,6 +886,35 @@ refuse:
     return false;
 }
 
+/* --- The schedule as a setting ------------------------------------------- */
+
+/**
+ * Whether this panel checks on its own, as it was last told.
+ *
+ * SLATE_UPDATE_MANIFEST_URL, at the top of this file, is the other way to stop
+ * §12's one outbound request, and it is a build knob: somebody who installed
+ * from the browser flasher has no rebuild available to them, and so no way to
+ * stop it short of blocking the panel at their router. This setting is that
+ * way, and it is deliberately narrower than the knob — the channel is still
+ * compiled in, `POST /update/check` still works, and only the schedule goes.
+ *
+ * Absent is on. A panel that never learns a fix exists is the other failure,
+ * and §11.4's install still needs a person either way. A factory reset erases
+ * NVS, so it returns to on with everything else; that is the same answer the
+ * Home Assistant credentials and the administrator PIN give, and §9.5 makes it
+ * the recovery path for a panel nobody can talk to.
+ */
+static bool load_scheduled(void)
+{
+    uint32_t stored = 1;
+    esp_err_t err = slate_store_u32_get(SLATE_KEY_UPDATE_SCHED, &stored);
+    if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "reading the update schedule: %s; checking daily", esp_err_to_name(err));
+        return true;
+    }
+    return stored != 0;
+}
+
 /* --- Worker ------------------------------------------------------------- */
 
 /**
@@ -913,20 +948,59 @@ static void update_task(void *arg)
     int64_t next_check_us = esp_timer_get_time() + FIRST_CHECK_DELAY_US;
 
     for (;;) {
-        int64_t remaining_us = next_check_us - esp_timer_get_time();
-        TickType_t wait = remaining_us > 0 ? us_to_ticks(remaining_us) : (TickType_t) 0;
+        lock();
+        bool scheduled = s_update.scheduled;
+        unlock();
+
+        /* `next_check_us` is when the panel is *due*, and it is kept whether or
+         * not anything is waiting for it. A schedule that is off is therefore a
+         * wait with no timeout rather than a clock that was thrown away: switch
+         * it back on and the day it was part-way through is still the day it is
+         * part-way through, and one that elapsed meanwhile comes due at once. */
+        TickType_t wait = portMAX_DELAY;
+        if (scheduled) {
+            int64_t remaining_us = next_check_us - esp_timer_get_time();
+            /* The extra tick is what makes waking up and being due the same
+             * event. us_to_ticks() truncates, so a wait computed with less than
+             * a tick left is a wait of zero, and the due date it was computed
+             * from is still in the future when the wait returns — a loop that
+             * re-arms a zero wait, at priority 4, for as long as that remainder
+             * lasts. One tick is under a millisecond once a day; the spin it
+             * removes is a millisecond of nothing else running. */
+            wait = remaining_us > 0 ? us_to_ticks(remaining_us) + 1 : (TickType_t) 0;
+        }
 
         uint32_t jobs = 0;
         xTaskNotifyWait(0, UINT32_MAX, &jobs, wait);
 
         if (jobs & JOB_INSTALL) {
             if (install()) {
-                /* Check now rather than at the scheduled time: the next loop
-                 * pass computes a wait of zero and runs it. */
-                next_check_us = esp_timer_get_time();
+                /* Refresh the offer now rather than at the scheduled time, and
+                 * by the route a person would use rather than by moving the due
+                 * date: what asked for this check is the install somebody just
+                 * pressed, so it runs on a panel whose daily check is switched
+                 * off exactly as it does on one whose daily check is on. */
+                xTaskNotify(s_update.task, JOB_CHECK, eSetBits);
             }
             /* Otherwise install() either reboots or leaves a panel that should
              * keep checking on the schedule it already had. */
+            continue;
+        }
+
+        /* Re-read rather than trust the value the wait was computed from: what
+         * ended that wait may have been the setting changing under it. */
+        lock();
+        scheduled = s_update.scheduled;
+        unlock();
+
+        /* Two reasons to check, and being awake is not one of them. An explicit
+         * request is always a reason — §11.4's schedule is what a person turns
+         * off, and a check they asked for is a request, not a schedule. A due
+         * date is a reason only while the schedule is on. Anything else was
+         * JOB_RESCHEDULE, and its whole effect is the loop above running
+         * again with a wait computed from the setting it just changed. */
+        bool due = scheduled && esp_timer_get_time() >= next_check_us;
+        if ((jobs & JOB_CHECK) == 0 && !due) {
             continue;
         }
 
@@ -939,10 +1013,16 @@ static void update_task(void *arg)
          * property of this component that cannot be observed by watching it for
          * a minute, and the arithmetic that produces it has already been wrong
          * once — see us_to_ticks(). A line per check makes the next such
-         * mistake a thing somebody reads instead of a thing somebody measures. */
+         * mistake a thing somebody reads instead of a thing somebody measures.
+         * A panel that was told to stop checking says that here for the same
+         * reason: it is the one line proving the setting reached the worker. */
         int64_t interval_us = check();
         next_check_us = esp_timer_get_time() + interval_us;
-        ESP_LOGI(TAG, "next check in %" PRId64 " s", interval_us / 1000000);
+        if (scheduled) {
+            ESP_LOGI(TAG, "next check in %" PRId64 " s", interval_us / 1000000);
+        } else {
+            ESP_LOGI(TAG, "the daily check is off; nothing is scheduled");
+        }
     }
 }
 
@@ -954,6 +1034,7 @@ static esp_err_t status_handler(httpd_req_t *req)
 
     lock();
     update_state_t state = s_update.state;
+    bool scheduled = s_update.scheduled;
     bool offered = s_update.offered;
     release_t offer = s_update.offer;
     char error[ERROR_MAX];
@@ -974,6 +1055,12 @@ static esp_err_t status_handler(httpd_req_t *req)
                     ? cJSON_AddStringToObject(root, "manifest_url", SLATE_UPDATE_MANIFEST_URL) !=
                           NULL
                     : cJSON_AddNullToObject(root, "manifest_url") != NULL);
+    /* The two ways a panel makes no daily request are not the same thing and a
+     * client has to be able to tell them apart: `manifest_url` is null when this
+     * firmware was built without a channel, and `scheduled` is false when the
+     * panel has one and was told not to use it. The second is a setting somebody
+     * can change from here; the first needs a different build. */
+    ok = ok && cJSON_AddBoolToObject(root, "scheduled", scheduled) != NULL;
     ok = ok && (checked_us == 0
                     ? cJSON_AddNullToObject(root, "checked_s_ago") != NULL
                     : cJSON_AddNumberToObject(root, "checked_s_ago",
@@ -1018,9 +1105,11 @@ static esp_err_t accepted(httpd_req_t *req)
 }
 
 /**
- * Both POSTs are requests to start work, not reports that it finished. §11.4's
- * daily check and its install are seconds of TLS and minutes of flash writing,
- * and this device answers HTTP from one task (`slate_ota.h`).
+ * The two POSTs that reach here are requests to start work, not reports that it
+ * finished. §11.4's daily check and its install are seconds of TLS and minutes
+ * of flash writing, and this device answers HTTP from one task (`slate_ota.h`).
+ * `POST /update/settings` is the third and does not come this way: an NVS write
+ * is not work anybody has to wait out.
  */
 static esp_err_t start_job(httpd_req_t *req, uint32_t job)
 {
@@ -1115,6 +1204,77 @@ static esp_err_t install_handler(httpd_req_t *req)
     return start_job(req, JOB_INSTALL);
 }
 
+/**
+ * Turn §11.4's daily check on or off, on a panel nobody can rebuild.
+ *
+ * `{"scheduled": false}` is the whole body, and the whole effect is the
+ * schedule: the channel stays compiled in, an offer already made stays made,
+ * and `POST /update/check` and `POST /update/install` keep working — see
+ * load_scheduled() for why that line is drawn where it is.
+ *
+ * A build with no channel refuses this the way the other two POSTs refuse: there
+ * is no schedule to have an opinion about, and storing one would leave a client
+ * that wrote `true` reading `false` back out of `GET /update`.
+ */
+static esp_err_t settings_handler(httpd_req_t *req)
+{
+    if (!s_update.has_channel) {
+        return slate_api_refuse(req, "503 Service Unavailable", "no_channel");
+    }
+
+    char body[64];
+    if (req->content_len >= sizeof(body)) {
+        return slate_api_refuse(req, "413 Payload Too Large", "too_large");
+    }
+    /* An absent body is not "leave it as it is": this route exists to be told
+     * one of two things, and neither of them is nothing. §4.1 already has the
+     * code for that, shared by every endpoint here that takes a body. */
+    if (req->content_len == 0) {
+        return slate_api_refuse(req, "400 Bad Request", "empty_body");
+    }
+
+    size_t received = 0;
+    while (received < req->content_len) {
+        int chunk = httpd_req_recv(req, body + received, req->content_len - received);
+        if (chunk <= 0) {
+            return slate_api_refuse(req, "400 Bad Request", "truncated");
+        }
+        received += chunk;
+    }
+
+    cJSON *root = cJSON_ParseWithLength(body, received);
+    if (root == NULL || !cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return slate_api_refuse(req, "400 Bad Request", "invalid_json");
+    }
+    const cJSON *value = cJSON_GetObjectItemCaseSensitive(root, "scheduled");
+    bool valid = cJSON_IsBool(value);
+    bool scheduled = valid && cJSON_IsTrue(value);
+    cJSON_Delete(root);
+    if (!valid) {
+        return slate_api_refuse(req, "400 Bad Request", "invalid_scheduled");
+    }
+
+    if (slate_store_u32_set(SLATE_KEY_UPDATE_SCHED, scheduled ? 1U : 0U) != ESP_OK) {
+        return slate_api_refuse(req, "500 Internal Server Error", "store_failed");
+    }
+
+    lock();
+    s_update.scheduled = scheduled;
+    unlock();
+
+    /* The worker is asleep on a wait computed from the value that just changed:
+     * an indefinite one if this switched the schedule on, a due date if it
+     * switched it off. One notification covers both, because all it does is
+     * send the loop back round to compute the wait again — which is what
+     * "resumes the daily one without a reboot" comes down to. */
+    xTaskNotify(s_update.task, JOB_RESCHEDULE, eSetBits);
+
+    ESP_LOGI(TAG, "the daily check is now %s", scheduled ? "on" : "off");
+    httpd_resp_set_status(req, "204 No Content");
+    return httpd_resp_send(req, NULL, 0);
+}
+
 esp_err_t slate_update_init(void)
 {
     if (s_update.lock != NULL) {
@@ -1141,16 +1301,25 @@ esp_err_t slate_update_init(void)
         .method = HTTP_POST,
         .handler = install_handler,
     };
+    static const httpd_uri_t settings = {
+        .uri = SLATE_API_BASE_PATH "/update/settings",
+        .method = HTTP_POST,
+        .handler = settings_handler,
+    };
 
-    /* §4.3: the two POSTs write flash and reboot the panel, and the GET says
-     * which firmware is running and where it came from. All three are
-     * administrator surface, so all three carry the token. */
+    /* §4.3: two of the POSTs write flash and reboot the panel, the third
+     * decides whether this panel talks to anything outside the LAN at all
+     * (§12), and the GET says which firmware is running and where it came from.
+     * All four are administrator surface, so all four carry the token. */
     esp_err_t err = slate_api_register_uri(&status, SLATE_API_AUTH_DEVICE_TOKEN);
     if (err == ESP_OK) {
         err = slate_api_register_uri(&check_now, SLATE_API_AUTH_DEVICE_TOKEN);
     }
     if (err == ESP_OK) {
         err = slate_api_register_uri(&install_now, SLATE_API_AUTH_DEVICE_TOKEN);
+    }
+    if (err == ESP_OK) {
+        err = slate_api_register_uri(&settings, SLATE_API_AUTH_DEVICE_TOKEN);
     }
     if (err != ESP_OK) {
         vSemaphoreDelete(s_update.lock);
@@ -1173,13 +1342,21 @@ esp_err_t slate_update_init(void)
         return ESP_OK;
     }
 
+    /* Before the task, not after: it runs at a higher priority than the caller
+     * and reads this on its first pass, so a task started while the field still
+     * held its static `false` could go to sleep indefinitely on a panel that was
+     * never told to stop checking. */
+    s_update.scheduled = load_scheduled();
+
     if (xTaskCreate(update_task, "slate_update", TASK_STACK, NULL, TASK_PRIORITY,
                     &s_update.task) != pdPASS) {
         ESP_LOGE(TAG, "no memory for the update task; no checks will be made");
+        s_update.scheduled = false;
         return ESP_ERR_NO_MEM;
     }
 
     s_update.has_channel = true;
-    ESP_LOGI(TAG, "release channel ready: %s", SLATE_UPDATE_MANIFEST_URL);
+    ESP_LOGI(TAG, "release channel ready: %s (daily check %s)", SLATE_UPDATE_MANIFEST_URL,
+             s_update.scheduled ? "on" : "off");
     return ESP_OK;
 }
