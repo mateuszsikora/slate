@@ -1,0 +1,72 @@
+menu "Slate display"
+
+config SLATE_BACKLIGHT_PWM
+    bool "Backlight dimming through a GPIO-bridged PWM (hardware modification)"
+    default n
+    help
+        Leave this off for a board as it ships. The CH422G drives the backlight
+        enable as a plain output there, so a brightness percentage can only be
+        acted on at 0 — which is what docs/CONFIGURATION.md documents.
+
+        Turn it on only after bridging the backlight testpad to a free GPIO, as
+        described in docs/backlight-dimming.md. The expander output stays the
+        enable in both builds; this option adds an LEDC channel that carries the
+        level. On an unmodified board a firmware built with it behaves exactly
+        like one built without it, because the pin drives nothing.
+
+config SLATE_BACKLIGHT_PWM_GPIO
+    int "GPIO the backlight testpad is bridged to"
+    depends on SLATE_BACKLIGHT_PWM
+    default 16
+    range 0 48
+    help
+        The installer chooses this pin, so there is no default that is right for
+        everyone; 16 is the one the recipe in docs/backlight-dimming.md reaches
+        through the RS485 jack.
+
+        The pins this board has already spent are refused at bring-up with a log
+        line, and the firmware falls back to on/off rather than fighting them:
+        the sixteen RGB data lines, HSYNC, VSYNC, DE, PCLK, the I2C pair, the
+        touch interrupt, GPIO26-37, which is where the module reaches its own
+        flash and the PSRAM both framebuffers live in, and GPIO19/20, the USB
+        Serial/JTAG pads an analog PHY holds in every image regardless of what
+        the GPIO matrix is told.
+
+        GPIO43/44 is accepted with a warning instead. UART0 is taken cleanly, so
+        it does work — it just leaves the panel with no console to say so on.
+
+config SLATE_BACKLIGHT_PWM_FREQ_HZ
+    int "Backlight PWM frequency (Hz)"
+    depends on SLATE_BACKLIGHT_PWM
+    default 1000
+    range 200 39000
+    help
+        1 kHz is what the ESPHome package for this board uses, which makes it
+        the only frequency known to have driven this backlight. Raise it if the
+        board whines audibly; the 10-bit duty resolution the firmware uses keeps
+        every value in this range achievable.
+
+config SLATE_BACKLIGHT_PWM_MIN_PERCENT
+    int "Duty floor under a non-zero brightness (percent)"
+    depends on SLATE_BACKLIGHT_PWM
+    default 7
+    range 1 50
+    help
+        The bottom of the range is dark rather than dim on this panel. A
+        non-zero brightness is mapped into the band between this floor and full
+        duty, so brightness 1 is the dimmest light the panel actually produces
+        instead of an unlit screen.
+
+        Which is why the range starts at 1 rather than 0. A floor of zero would
+        make brightness 1 an unlit panel that still reports itself as lit, and
+        the touch boundary reads that report to decide whether a press is a wake
+        or a tile: black glass, and the light in the living room goes on.
+
+        7 is the ESPHome package's min_power of 0.07. The thread that package
+        cites recommends 0.3 for the same board, which is a wide enough
+        disagreement to say that neither number has been measured here: expect
+        to re-measure it on yours.
+
+        Zero brightness is still zero duty, and the enable output goes with it.
+
+endmenu

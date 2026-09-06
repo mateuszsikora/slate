@@ -25,6 +25,9 @@
 #include "freertos/task.h"
 
 #include "driver/i2c_master.h"
+#ifdef CONFIG_SLATE_BACKLIGHT_PWM
+#include "driver/ledc.h"
+#endif
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
@@ -86,6 +89,47 @@ static const int SLATE_DATA_GPIOS[16] = {
      1, /* R3 */  2, /* R4 */ 42, /* R5 */ 41, /* R6 */ 40, /* R7 */
 };
 
+#ifdef CONFIG_SLATE_BACKLIGHT_PWM
+/* §16's soldered variant, built in by CONFIG_SLATE_BACKLIGHT_PWM and never
+ * probed for: the installer picks the pin the testpad is bridged to, and a pin
+ * nobody soldered reads exactly like one somebody did.
+ *
+ * The expander output remains the enable in this build. That is not a
+ * conservative guess — the recipe docs/backlight-dimming.md follows dims a
+ * driver input that does nothing while EXIO2 is low, which is also why an
+ * unmodified board runs this firmware unharmed: the enable still carries on and
+ * off, and the LEDC pin drives nothing.
+ *
+ * 10 bits is more resolution than 101 levels need and keeps every frequency
+ * this component's Kconfig accepts reachable from either low-speed clock
+ * source, so the timer needs no clock-tree arithmetic to configure. */
+#define SLATE_BACKLIGHT_LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define SLATE_BACKLIGHT_LEDC_TIMER      LEDC_TIMER_0
+#define SLATE_BACKLIGHT_LEDC_CHANNEL    LEDC_CHANNEL_0
+#define SLATE_BACKLIGHT_LEDC_RESOLUTION LEDC_TIMER_10_BIT
+#define SLATE_BACKLIGHT_LEDC_FULL_DUTY  (1u << SLATE_BACKLIGHT_LEDC_RESOLUTION)
+
+/* GPIO4, from slate_touch.c, which owns it. Named here because a backlight wire
+ * soldered onto it would silence touch instead of dimming anything. */
+#define SLATE_PIN_TOUCH_INT 4
+
+/* §6.3's ESP32-S3-WROOM-1-N16R8: SPI flash on GPIO26–32, octal PSRAM on
+ * GPIO33–37. Neither leaves the module, so neither is solderable by accident —
+ * but both are typeable into a Kconfig field. */
+#define SLATE_PIN_FLASH_PSRAM_FIRST 26
+#define SLATE_PIN_FLASH_PSRAM_LAST  37
+
+/* D− and D+ of the USB Serial/JTAG port, which sdkconfig.defaults keeps as the
+ * secondary console in every image. Refused rather than merely warned about,
+ * unlike UART0 below: these pads are held by an analog PHY through
+ * USB_SERIAL_JTAG.conf0.usb_pad_enable, and LEDC's bring-up only reassigns the
+ * GPIO matrix — it does not switch that PHY off. What two drivers fighting over
+ * one pad does is not "the console stops working", it is unknown, and they go
+ * to a USB-C socket nobody solders a backlight wire into. */
+#define SLATE_PIN_USB_DM 19
+#define SLATE_PIN_USB_DP 20
+#endif
+
 typedef struct {
     slate_display_work_fn fn;
     void *ctx;
@@ -106,6 +150,13 @@ static esp_err_t s_init_result = ESP_ERR_INVALID_STATE;
 static bool s_lvgl_initialized;
 static bool s_ready;
 static atomic_uchar s_backlight_level = ATOMIC_VAR_INIT(0);
+#ifdef CONFIG_SLATE_BACKLIGHT_PWM
+/* False until the LEDC channel is up, and after any failure that leaves it
+ * unusable. Read as "which variant is live", so it is what makes the difference
+ * between a modified board and a build that could not have the pin it was given
+ * — both keep the panel usable through the enable output. */
+static atomic_bool s_pwm_ready = ATOMIC_VAR_INIT(false);
+#endif
 static bool s_first_frame_shown;
 static slate_display_heap_metrics_t s_heap_metrics;
 static int64_t s_heap_metrics_at_us;
@@ -213,6 +264,203 @@ void *slate_display_lvgl_pool_alloc(size_t size)
     return s_lvgl_pool;
 }
 
+#ifdef CONFIG_SLATE_BACKLIGHT_PWM
+/* The pins this board has already spent, and what each is spent on. A backlight
+ * wire on one of them is a wiring mistake with a confusing symptom — an RGB line
+ * driven at 1 kHz is a corrupted picture rather than a dark one — so it is
+ * refused by name at bring-up instead of being taken and fought over.
+ *
+ * The reason is returned rather than a bool so that the refusal and the list are
+ * one thing. Two rounds of review found the other arrangement drifting: a pin
+ * added here while the log line beside it went on naming three categories that
+ * no longer covered it, which sends an installer to look at a panel pinout their
+ * pin is not on.
+ *
+ * This check is the only thing standing between a mistyped pin and the damage,
+ * because nothing below it objects: ESP-IDF's valid-output mask rejects only the
+ * four pins an ESP32-S3 does not have, and ledc_channel_config() logs "GPIO %d
+ * is not usable" over an already-reserved pin and then connects it and returns
+ * ESP_OK anyway.
+ *
+ * Hence the flash and PSRAM band, which is not a panel pin and is the worst
+ * answer of all: §6.3's N16R8 module reaches its flash over GPIO26–32 and its
+ * octal PSRAM over GPIO33–37, and that PSRAM is where both framebuffers live.
+ * Handing one of those to LEDC is a boot loop that reports success first. */
+static const char *backlight_pwm_pin_owner(int pin)
+{
+    for (size_t i = 0; i < sizeof(SLATE_DATA_GPIOS) / sizeof(SLATE_DATA_GPIOS[0]); i++) {
+        if (SLATE_DATA_GPIOS[i] == pin) {
+            return "an RGB data line";
+        }
+    }
+    if (pin >= SLATE_PIN_FLASH_PSRAM_FIRST && pin <= SLATE_PIN_FLASH_PSRAM_LAST) {
+        return "the module's own flash or PSRAM";
+    }
+    if (pin == SLATE_PIN_USB_DM || pin == SLATE_PIN_USB_DP) {
+        return "a USB Serial/JTAG pad";
+    }
+    if (pin == SLATE_PIN_HSYNC || pin == SLATE_PIN_VSYNC || pin == SLATE_PIN_DE ||
+        pin == SLATE_PIN_PCLK) {
+        return "a panel timing signal";
+    }
+    if (pin == SLATE_I2C_SDA_GPIO || pin == SLATE_I2C_SCL_GPIO) {
+        return "the I2C bus";
+    }
+    if (pin == SLATE_PIN_TOUCH_INT) {
+        return "the touch interrupt";
+    }
+    return NULL;
+}
+
+/* Usable, and worth a word before the panel is on a wall. UART0 is taken
+ * cleanly — gpio_func_sel() releases the IO MUX pad and LEDC gets the pin — so
+ * the cost is exactly one thing: the boot log this component's own "backlight
+ * dimming on GPIO…" line appears in. That is a poor trade for a pin, and it is
+ * the installer's trade to make rather than a fault. */
+static const char *backlight_pwm_pin_caution(int pin)
+{
+    if (pin == 43 || pin == 44) {
+        return "the UART0 console";
+    }
+    return NULL;
+}
+
+/*
+ * Brought up dark, like the enable output above it: LVGL has not drawn anything
+ * yet, and the first presented frame is what lights the panel.
+ *
+ * A failure here is logged and survived. The alternative is a panel that
+ * renders perfectly and never lights because a duty resolution was rejected —
+ * the enable output alone is a worse backlight than the modification promised,
+ * and a working one.
+ */
+static void backlight_pwm_init(void)
+{
+    const int pin = CONFIG_SLATE_BACKLIGHT_PWM_GPIO;
+
+    if (!GPIO_IS_VALID_OUTPUT_GPIO(pin)) {
+        ESP_LOGE(TAG, "backlight PWM GPIO%d cannot drive an output; staying on/off", pin);
+        return;
+    }
+    const char *owner = backlight_pwm_pin_owner(pin);
+    if (owner != NULL) {
+        ESP_LOGE(TAG, "backlight PWM GPIO%d is %s; staying on/off", pin, owner);
+        return;
+    }
+    const char *caution = backlight_pwm_pin_caution(pin);
+    if (caution != NULL) {
+        ESP_LOGW(TAG, "backlight PWM GPIO%d is %s; dimming it takes that port with it",
+                 pin, caution);
+    }
+
+    const ledc_timer_config_t timer = {
+        .speed_mode = SLATE_BACKLIGHT_LEDC_MODE,
+        .timer_num = SLATE_BACKLIGHT_LEDC_TIMER,
+        .duty_resolution = SLATE_BACKLIGHT_LEDC_RESOLUTION,
+        .freq_hz = CONFIG_SLATE_BACKLIGHT_PWM_FREQ_HZ,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    esp_err_t err = ledc_timer_config(&timer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "backlight PWM timer at %d Hz: %s; staying on/off",
+                 CONFIG_SLATE_BACKLIGHT_PWM_FREQ_HZ, esp_err_to_name(err));
+        return;
+    }
+
+    const ledc_channel_config_t channel = {
+        .gpio_num = pin,
+        .speed_mode = SLATE_BACKLIGHT_LEDC_MODE,
+        .channel = SLATE_BACKLIGHT_LEDC_CHANNEL,
+        .timer_sel = SLATE_BACKLIGHT_LEDC_TIMER,
+        .duty = 0,
+        .hpoint = 0,
+    };
+    err = ledc_channel_config(&channel);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "backlight PWM channel on GPIO%d: %s; staying on/off", pin,
+                 esp_err_to_name(err));
+        return;
+    }
+
+    atomic_store_explicit(&s_pwm_ready, true, memory_order_release);
+    ESP_LOGI(TAG, "backlight dimming on GPIO%d: %d Hz, %d-bit duty, floor %d%%; "
+                  "EXIO2 remains the enable",
+             pin, CONFIG_SLATE_BACKLIGHT_PWM_FREQ_HZ, SLATE_BACKLIGHT_LEDC_RESOLUTION,
+             CONFIG_SLATE_BACKLIGHT_PWM_MIN_PERCENT);
+}
+
+/*
+ * Zero is zero — an unlit panel is what §3.3's `screen_off_after` and a night
+ * brightness of 0 mean, and no floor may lift it. The remaining 1..100 are
+ * spread across the band from the floor to full duty, endpoints included, so
+ * brightness 1 is exactly the dimmest light this backlight produces rather than
+ * one step above it.
+ */
+static uint32_t backlight_pwm_duty(uint8_t percent)
+{
+    if (percent == 0) {
+        return 0;
+    }
+    if (percent >= 100) {
+        return SLATE_BACKLIGHT_LEDC_FULL_DUTY;
+    }
+
+    const uint32_t floor_duty =
+        (uint32_t) CONFIG_SLATE_BACKLIGHT_PWM_MIN_PERCENT * SLATE_BACKLIGHT_LEDC_FULL_DUTY / 100u;
+    return floor_duty + (SLATE_BACKLIGHT_LEDC_FULL_DUTY - floor_duty) * (percent - 1u) / 99u;
+}
+#endif /* CONFIG_SLATE_BACKLIGHT_PWM */
+
+/*
+ * The one place the two variants of §16 differ. The enable output carries "lit
+ * or dark" in both, because that is what it does on a modified board too; the
+ * level only exists where a channel was built in and came up.
+ *
+ * Order matters at the ends of the range and nowhere else: the enable is
+ * asserted before a duty that expects it, and released after a duty of zero, so
+ * neither transition can show a frame at the wrong brightness on the way.
+ *
+ * A failed duty write at zero does not skip that release. §3.3's screen-off and
+ * a night brightness of 0 are both requests for a dark panel, and the enable can
+ * deliver one on its own; returning early with it still asserted would answer a
+ * transient I2C or LEDC failure with a lit screen at three in the morning. The
+ * error is still what the caller gets, so the level is not recorded and the
+ * schedule tries again on its next pass.
+ */
+static esp_err_t backlight_apply(uint8_t percent)
+{
+#ifdef CONFIG_SLATE_BACKLIGHT_PWM
+    if (atomic_load_explicit(&s_pwm_ready, memory_order_acquire)) {
+        if (percent > 0) {
+            ESP_RETURN_ON_ERROR(slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, true),
+                                TAG, "backlight enable");
+        }
+
+        esp_err_t err = ledc_set_duty(SLATE_BACKLIGHT_LEDC_MODE, SLATE_BACKLIGHT_LEDC_CHANNEL,
+                                      backlight_pwm_duty(percent));
+        if (err == ESP_OK) {
+            err = ledc_update_duty(SLATE_BACKLIGHT_LEDC_MODE, SLATE_BACKLIGHT_LEDC_CHANNEL);
+        }
+
+        if (percent == 0) {
+            /* Logged here rather than by ESP_RETURN_ON_ERROR below, which this
+             * branch skips in order to release the enable first. Without it a
+             * duty failure would be the one backlight failure this component
+             * stays quiet about. */
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "backlight duty: %s", esp_err_to_name(err));
+            }
+            esp_err_t enable_err =
+                slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, false);
+            return err != ESP_OK ? err : enable_err;
+        }
+        ESP_RETURN_ON_ERROR(err, TAG, "backlight duty");
+        return ESP_OK;
+    }
+#endif
+    return slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, percent > 0);
+}
+
 static esp_err_t i2c_init(void)
 {
     const i2c_master_bus_config_t config = {
@@ -280,6 +528,9 @@ static esp_err_t panel_init(void)
 {
     ESP_RETURN_ON_ERROR(i2c_init(), TAG, "I2C bring-up");
     ESP_RETURN_ON_ERROR(expander_init(), TAG, "expander bring-up");
+#ifdef CONFIG_SLATE_BACKLIGHT_PWM
+    backlight_pwm_init();
+#endif
 
     esp_lcd_rgb_panel_config_t config = {
         .clk_src = LCD_CLK_SRC_DEFAULT,
@@ -497,6 +748,14 @@ static void display_resources_deinit(void)
         atomic_store_explicit(&s_backlight_level, 0, memory_order_release);
         s_first_frame_shown = false;
     }
+#ifdef CONFIG_SLATE_BACKLIGHT_PWM
+    if (atomic_exchange_explicit(&s_pwm_ready, false, memory_order_acq_rel)) {
+        /* Idle low, matching the enable that has just been released: a channel
+         * left running would keep driving the pin after the panel is gone. */
+        cleanup_error("backlight PWM",
+                      ledc_stop(SLATE_BACKLIGHT_LEDC_MODE, SLATE_BACKLIGHT_LEDC_CHANNEL, 0));
+    }
+#endif
 
     /* Before LVGL goes, because the VSYNC ISR completes flushes through
      * s_display. This runs on the display task, which is pinned to the core the
@@ -1437,11 +1696,19 @@ esp_err_t slate_display_brightness_set(uint8_t percent)
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* S-2 confirmed the installed path is a binary CH422G output. Keep the
-     * percentage contract here so #41's configured LEDC variant does not leak
-     * into the scheduler or its callers. */
-    uint8_t actual = percent == 0 ? 0 : 100;
-    esp_err_t err = slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, actual > 0);
+    /* Quantization is the unmodified board's, not the contract's: S-2 confirmed
+     * the installed path is a binary CH422G output, and #41's build option adds
+     * a channel that can keep the level instead. The level reported back is the
+     * one this hardware is producing — the requested percentage where a duty
+     * carries it, and 0 or 100 where the enable output is all there is — so a
+     * caller polling it settles rather than re-applying every pass.
+     *
+     * The duty floor is deliberately not reflected here: it is a property of
+     * this backlight's bottom end, not a refusal of the level that was asked
+     * for. */
+    bool dimmable = slate_display_backlight_mode() == SLATE_DISPLAY_BACKLIGHT_PWM;
+    uint8_t actual = dimmable ? percent : (percent == 0 ? 0 : 100);
+    esp_err_t err = backlight_apply(percent);
     if (err == ESP_OK) {
         atomic_store_explicit(&s_backlight_level, actual, memory_order_release);
     }
@@ -1465,8 +1732,14 @@ bool slate_display_setup_active(void)
 
 slate_display_backlight_mode_t slate_display_backlight_mode(void)
 {
-    /* S-2 confirmed EXIO2 on this board is a binary output with no PWM path.
-     * #41 owns the soldered variant and the pin it would need. */
+    /* S-2 confirmed EXIO2 on this board is a binary output with no PWM path, so
+     * that is the answer for a board as it ships. #41's build option is what
+     * changes it, and only once the channel it configures is actually up. */
+#ifdef CONFIG_SLATE_BACKLIGHT_PWM
+    if (atomic_load_explicit(&s_pwm_ready, memory_order_acquire)) {
+        return SLATE_DISPLAY_BACKLIGHT_PWM;
+    }
+#endif
     return SLATE_DISPLAY_BACKLIGHT_ON_OFF;
 }
 

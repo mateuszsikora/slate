@@ -25,11 +25,17 @@ typedef void (*slate_display_work_fn)(void *ctx);
  *
  * §16 asks the firmware to distinguish the two. On an unmodified board the
  * CH422G drives the backlight enable as a plain output and `ON_OFF` is the only
- * answer there is; `PWM` names the variant that appears once the testpoint
- * described in #41 has been bridged to a GPIO. That bridge cannot be probed —
- * the installer chooses the pin, and a pin nobody soldered reads the same as
- * one somebody did — so it will arrive as configuration rather than detection.
- * #28's night schedule branches here rather than assuming either.
+ * answer there is; `PWM` names the variant that appears once the testpad
+ * described in `docs/backlight-dimming.md` has been bridged to a GPIO. That
+ * bridge cannot be probed — the installer chooses the pin, and a pin nobody
+ * soldered reads the same as one somebody did — so it arrives as configuration
+ * rather than detection: `CONFIG_SLATE_BACKLIGHT_PWM` and the pin beside it.
+ *
+ * `PWM` therefore means a channel that was built in and came up, not a wire
+ * somebody promises to have soldered. A build with the option on answers
+ * `ON_OFF` when the pin it was given is one the panel already uses, and the
+ * expander keeps the backlight working either way. #28's night schedule
+ * branches here rather than assuming either.
  */
 typedef enum {
     SLATE_DISPLAY_BACKLIGHT_ON_OFF,
@@ -139,10 +145,11 @@ bool slate_display_backlight_is_on(void);
  * @brief Set the requested backlight level from 0 through 100 percent.
  *
  * The unmodified CH422G path quantizes zero to off and every non-zero value to
- * on. A future PWM implementation behind the same boundary can preserve the
- * requested level. While a setup card or recovery banner is active, values
- * below 100 are refused with ESP_ERR_INVALID_STATE so §9.4's address remains
- * readable.
+ * on. The PWM variant behind the same boundary keeps the requested level,
+ * mapping it above a configured duty floor because the bottom of this
+ * backlight's range is dark rather than dim; zero is unlit in both. While a
+ * setup card or recovery banner is active, values below 100 are refused with
+ * ESP_ERR_INVALID_STATE so §9.4's address remains readable.
  */
 esp_err_t slate_display_brightness_set(uint8_t percent);
 

@@ -93,12 +93,16 @@ Every setting is optional and an omitted one is not the same as a zero.
 | `screen_off_after` | integer minutes | blank the screen after this much inactivity. `0` means never |
 | `wake_on_touch` | boolean | whether a touch on a blanked screen wakes it instead of acting on a tile |
 
-**A brightness percentage is currently on or off.** On this board the backlight
-is a binary output on the CH422G expander, so any value above zero is full
+**A brightness percentage is on or off on a board as it ships.** The backlight
+is a binary output on the CH422G expander there, so any value above zero is full
 brightness and only `0` turns it off. The schedule and the screen-off timer work
 as specified; a night brightness of 20 % lights the panel exactly as brightly as
-100 % does. Smooth dimming needs a hardware modification and is being decided in
-[#41](https://github.com/mateuszsikora/slate/issues/41).
+100 % does.
+
+Smooth dimming needs a wire soldered from a testpad to a free GPIO, and a
+firmware built with the option that names that pin. Both are optional and both
+are in [`backlight-dimming.md`](backlight-dimming.md); nothing in this document
+changes when you do them, the percentages simply start meaning what they say.
 
 The screen never blanks while the panel is in setup mode — the whole point of
 that mode is an address somebody can read.
