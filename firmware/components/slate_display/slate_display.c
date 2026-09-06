@@ -118,6 +118,16 @@ static const int SLATE_DATA_GPIOS[16] = {
  * but both are typeable into a Kconfig field. */
 #define SLATE_PIN_FLASH_PSRAM_FIRST 26
 #define SLATE_PIN_FLASH_PSRAM_LAST  37
+
+/* D− and D+ of the USB Serial/JTAG port, which sdkconfig.defaults keeps as the
+ * secondary console in every image. Refused rather than merely warned about,
+ * unlike UART0 below: these pads are held by an analog PHY through
+ * USB_SERIAL_JTAG.conf0.usb_pad_enable, and LEDC's bring-up only reassigns the
+ * GPIO matrix — it does not switch that PHY off. What two drivers fighting over
+ * one pad does is not "the console stops working", it is unknown, and they go
+ * to a USB-C socket nobody solders a backlight wire into. */
+#define SLATE_PIN_USB_DM 19
+#define SLATE_PIN_USB_DP 20
 #endif
 
 typedef struct {
@@ -280,20 +290,21 @@ static bool backlight_pwm_pin_is_taken(int pin)
     if (pin >= SLATE_PIN_FLASH_PSRAM_FIRST && pin <= SLATE_PIN_FLASH_PSRAM_LAST) {
         return true;
     }
+    if (pin == SLATE_PIN_USB_DM || pin == SLATE_PIN_USB_DP) {
+        return true;
+    }
     return pin == SLATE_PIN_HSYNC || pin == SLATE_PIN_VSYNC || pin == SLATE_PIN_DE ||
            pin == SLATE_PIN_PCLK || pin == SLATE_I2C_SDA_GPIO || pin == SLATE_I2C_SCL_GPIO ||
            pin == SLATE_PIN_TOUCH_INT;
 }
 
-/* Usable, and worth a word before the panel is on a wall: these carry the two
- * consoles a flashed panel is reached over. Taking one costs the boot log this
- * component's own "backlight dimming on GPIO…" line appears in, which is a poor
- * trade for a pin — but it is the installer's trade to make, not a fault. */
+/* Usable, and worth a word before the panel is on a wall. UART0 is taken
+ * cleanly — gpio_func_sel() releases the IO MUX pad and LEDC gets the pin — so
+ * the cost is exactly one thing: the boot log this component's own "backlight
+ * dimming on GPIO…" line appears in. That is a poor trade for a pin, and it is
+ * the installer's trade to make rather than a fault. */
 static const char *backlight_pwm_pin_caution(int pin)
 {
-    if (pin == 19 || pin == 20) {
-        return "the USB Serial/JTAG port";
-    }
     if (pin == 43 || pin == 44) {
         return "the UART0 console";
     }
@@ -418,6 +429,13 @@ static esp_err_t backlight_apply(uint8_t percent)
         }
 
         if (percent == 0) {
+            /* Logged here rather than by ESP_RETURN_ON_ERROR below, which this
+             * branch skips in order to release the enable first. Without it a
+             * duty failure would be the one backlight failure this component
+             * stays quiet about. */
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "backlight duty: %s", esp_err_to_name(err));
+            }
             esp_err_t enable_err =
                 slate_ch422g_set_level(s_expander, SLATE_EXIO_DISP, false);
             return err != ESP_OK ? err : enable_err;

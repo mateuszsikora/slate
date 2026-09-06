@@ -51,15 +51,16 @@ to a free GPIO gives the SoC something to modulate:
 
 Do not use a pin this board has already spent — the sixteen RGB data lines,
 HSYNC, VSYNC, DE, PCLK, the I²C pair (GPIO8/GPIO9), the touch interrupt
-(GPIO4), or GPIO26–37, where the module reaches its own flash and the PSRAM
-that holds both framebuffers. Firmware refuses all of those by name at
-bring-up and falls back to on/off rather than letting a backlight wire corrupt
-the picture, silence the touch controller or take the framebuffers out from
-under the panel — but it cannot unsolder them for you.
+(GPIO4), GPIO26–37, where the module reaches its own flash and the PSRAM that
+holds both framebuffers, or GPIO19/20, the USB Serial/JTAG pads. Firmware
+refuses all of those by name at bring-up and falls back to on/off rather than
+letting a backlight wire corrupt the picture, silence the touch controller or
+take the framebuffers out from under the panel — but it cannot unsolder them
+for you.
 
-GPIO19/20 (USB) and GPIO43/44 (UART0) are accepted with a warning rather than
-refused. They work; they are also the two consoles the log line below appears
-on, so dimming through one of them means giving that up.
+GPIO43/44 (UART0) is accepted with a warning rather than refused. It does work:
+the pin is taken cleanly and the only casualty is the console the log lines
+below appear on, which is the installer's call to make.
 
 The CH422G output stays exactly where it was. It is still the enable, and the
 backlight will not light without it — the dimming input does nothing while the
@@ -143,9 +144,11 @@ channel up:
 I (…) slate_display: backlight dimming on GPIO16: 1000 Hz, 10-bit duty, floor 7%; EXIO2 remains the enable
 ```
 
-An error line in its place — a pin the panel already uses, or a channel that
+An error line *in its place* — a pin the panel already uses, or a channel that
 would not configure — means firmware fell back to on/off, and the panel is
-running as if the option were off.
+running as if the option were off. A warning line *above* it is the other case:
+GPIO43/44 is yours if you want it, and the line is only there to say the console
+it just printed on is the last one.
 
 Then make it prove it, with a dashboard document whose day brightness is
 somewhere in the middle:

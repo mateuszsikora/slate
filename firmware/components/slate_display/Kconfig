@@ -27,12 +27,13 @@ config SLATE_BACKLIGHT_PWM_GPIO
         The pins this board has already spent are refused at bring-up with a log
         line, and the firmware falls back to on/off rather than fighting them:
         the sixteen RGB data lines, HSYNC, VSYNC, DE, PCLK, the I2C pair, the
-        touch interrupt, and GPIO26-37, which is where the module reaches its
-        own flash and the PSRAM both framebuffers live in.
+        touch interrupt, GPIO26-37, which is where the module reaches its own
+        flash and the PSRAM both framebuffers live in, and GPIO19/20, the USB
+        Serial/JTAG pads an analog PHY holds in every image regardless of what
+        the GPIO matrix is told.
 
-        GPIO19/20 and GPIO43/44 are accepted with a warning instead. They work,
-        and they are the USB and UART consoles — a panel that dims through one
-        of them has no boot log left to say so.
+        GPIO43/44 is accepted with a warning instead. UART0 is taken cleanly, so
+        it does work — it just leaves the panel with no console to say so on.
 
 config SLATE_BACKLIGHT_PWM_FREQ_HZ
     int "Backlight PWM frequency (Hz)"
@@ -49,12 +50,17 @@ config SLATE_BACKLIGHT_PWM_MIN_PERCENT
     int "Duty floor under a non-zero brightness (percent)"
     depends on SLATE_BACKLIGHT_PWM
     default 7
-    range 0 50
+    range 1 50
     help
         The bottom of the range is dark rather than dim on this panel. A
         non-zero brightness is mapped into the band between this floor and full
         duty, so brightness 1 is the dimmest light the panel actually produces
         instead of an unlit screen.
+
+        Which is why the range starts at 1 rather than 0. A floor of zero would
+        make brightness 1 an unlit panel that still reports itself as lit, and
+        the touch boundary reads that report to decide whether a press is a wake
+        or a tile: black glass, and the light in the living room goes on.
 
         7 is the ESPHome package's min_power of 0.07. The thread that package
         cites recommends 0.3 for the same board, which is a wide enough
