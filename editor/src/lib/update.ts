@@ -39,6 +39,7 @@ export const UPDATE_MESSAGES: Record<string, string> = {
   truncated: 'The request did not reach the panel in one piece.',
   invalid_json: 'The panel could not read that request as JSON.',
   invalid_version: 'That request did not name a version the panel could read.',
+  empty_body: 'The panel refused that request: the route needs a body and there was none.',
   invalid_scheduled: 'That request did not say whether the daily check should be on or off.',
   store_failed: 'The panel could not save that setting.',
 }

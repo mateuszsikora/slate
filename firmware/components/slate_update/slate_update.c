@@ -1227,9 +1227,10 @@ static esp_err_t settings_handler(httpd_req_t *req)
         return slate_api_refuse(req, "413 Payload Too Large", "too_large");
     }
     /* An absent body is not "leave it as it is": this route exists to be told
-     * one of two things, and neither of them is nothing. */
+     * one of two things, and neither of them is nothing. §4.1 already has the
+     * code for that, shared by every endpoint here that takes a body. */
     if (req->content_len == 0) {
-        return slate_api_refuse(req, "400 Bad Request", "invalid_scheduled");
+        return slate_api_refuse(req, "400 Bad Request", "empty_body");
     }
 
     size_t received = 0;

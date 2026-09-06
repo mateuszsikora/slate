@@ -1167,7 +1167,10 @@ summary:focus-visible,
   cursor: pointer;
 }
 
-.update__schedule input:disabled {
+/* The whole row is the click target, so the whole row stops offering itself
+   while the checkbox is disabled — a label that still reads as clickable is
+   the one part of a frozen control that does not look frozen. */
+.update__schedule--frozen {
   cursor: default;
 }
 

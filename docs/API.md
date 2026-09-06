@@ -454,8 +454,8 @@ an opinion about.
 
 Refusals from the three `POST`s: `409` (`busy`, `no_update`, `version_mismatch`),
 `503 no_channel`, `500 store_failed`, and the usual body errors
-(`unexpected_body`, `invalid_json`, `invalid_version`, `invalid_scheduled`,
-`too_large`, `truncated`). Failures reported in `error`:
+(`unexpected_body`, `empty_body`, `invalid_json`, `invalid_version`,
+`invalid_scheduled`, `too_large`, `truncated`). Failures reported in `error`:
 `offline`, `unreachable`, `no_release`, `release_gone`, `manifest_invalid`,
 `board_mismatch`, `schema_too_new`, `insecure_url`, `download_failed`,
 `checksum_mismatch`, `not_an_image`, `version_mismatch`, `invalid_image`,

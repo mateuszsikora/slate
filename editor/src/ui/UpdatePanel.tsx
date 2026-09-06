@@ -166,7 +166,7 @@ export function UpdatePanel({ onFetch, onCheck, onInstall, onSchedule }: Props) 
           {/* Under the buttons, not above them: the offer and the accept are
               what somebody came to this section for, and the schedule is the
               standing decision behind them. */}
-          <label className="update__schedule">
+          <label className={`update__schedule${frozen ? ' update__schedule--frozen' : ''}`}>
             <input
               type="checkbox"
               checked={update.scheduled}
