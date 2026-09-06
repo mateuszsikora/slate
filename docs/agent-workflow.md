@@ -2,6 +2,11 @@
 
 Instructions for a coding agent picking up work on Slate. Follow them in order.
 
+If you were asked to set up a panel rather than to change Slate's code, this is
+not the document you want either: [`agent-setup.md`](agent-setup.md) is the
+runbook for taking a board from a cable to a published dashboard, and it touches
+nothing in the repository.
+
 If you are a person with a change to send, this is not the document you want — most of what follows is about working a backlog in milestone order, which you have no reason to do. [`CONTRIBUTING.md`](../CONTRIBUTING.md) is the front door, and it covers the same ground on scope, verification and commit shape that §§5–8 here do.
 
 Everything you write that lands on GitHub — issue comments, branch names, commit messages, PR titles and bodies — is in **English**.
