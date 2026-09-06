@@ -265,10 +265,16 @@ void *slate_display_lvgl_pool_alloc(size_t size)
 }
 
 #ifdef CONFIG_SLATE_BACKLIGHT_PWM
-/* The pins this board has already spent. A backlight wire on one of them is a
- * wiring mistake with a confusing symptom — an RGB line driven at 1 kHz is a
- * corrupted picture rather than a dark one — so it is refused by name at
- * bring-up instead of being taken and fought over.
+/* The pins this board has already spent, and what each is spent on. A backlight
+ * wire on one of them is a wiring mistake with a confusing symptom — an RGB line
+ * driven at 1 kHz is a corrupted picture rather than a dark one — so it is
+ * refused by name at bring-up instead of being taken and fought over.
+ *
+ * The reason is returned rather than a bool so that the refusal and the list are
+ * one thing. Two rounds of review found the other arrangement drifting: a pin
+ * added here while the log line beside it went on naming three categories that
+ * no longer covered it, which sends an installer to look at a panel pinout their
+ * pin is not on.
  *
  * This check is the only thing standing between a mistyped pin and the damage,
  * because nothing below it objects: ESP-IDF's valid-output mask rejects only the
@@ -280,22 +286,30 @@ void *slate_display_lvgl_pool_alloc(size_t size)
  * answer of all: §6.3's N16R8 module reaches its flash over GPIO26–32 and its
  * octal PSRAM over GPIO33–37, and that PSRAM is where both framebuffers live.
  * Handing one of those to LEDC is a boot loop that reports success first. */
-static bool backlight_pwm_pin_is_taken(int pin)
+static const char *backlight_pwm_pin_owner(int pin)
 {
     for (size_t i = 0; i < sizeof(SLATE_DATA_GPIOS) / sizeof(SLATE_DATA_GPIOS[0]); i++) {
         if (SLATE_DATA_GPIOS[i] == pin) {
-            return true;
+            return "an RGB data line";
         }
     }
     if (pin >= SLATE_PIN_FLASH_PSRAM_FIRST && pin <= SLATE_PIN_FLASH_PSRAM_LAST) {
-        return true;
+        return "the module's own flash or PSRAM";
     }
     if (pin == SLATE_PIN_USB_DM || pin == SLATE_PIN_USB_DP) {
-        return true;
+        return "a USB Serial/JTAG pad";
     }
-    return pin == SLATE_PIN_HSYNC || pin == SLATE_PIN_VSYNC || pin == SLATE_PIN_DE ||
-           pin == SLATE_PIN_PCLK || pin == SLATE_I2C_SDA_GPIO || pin == SLATE_I2C_SCL_GPIO ||
-           pin == SLATE_PIN_TOUCH_INT;
+    if (pin == SLATE_PIN_HSYNC || pin == SLATE_PIN_VSYNC || pin == SLATE_PIN_DE ||
+        pin == SLATE_PIN_PCLK) {
+        return "a panel timing signal";
+    }
+    if (pin == SLATE_I2C_SDA_GPIO || pin == SLATE_I2C_SCL_GPIO) {
+        return "the I2C bus";
+    }
+    if (pin == SLATE_PIN_TOUCH_INT) {
+        return "the touch interrupt";
+    }
+    return NULL;
 }
 
 /* Usable, and worth a word before the panel is on a wall. UART0 is taken
@@ -328,9 +342,9 @@ static void backlight_pwm_init(void)
         ESP_LOGE(TAG, "backlight PWM GPIO%d cannot drive an output; staying on/off", pin);
         return;
     }
-    if (backlight_pwm_pin_is_taken(pin)) {
-        ESP_LOGE(TAG, "backlight PWM GPIO%d is already spent by the panel, the touch "
-                      "controller or the module's flash and PSRAM; staying on/off", pin);
+    const char *owner = backlight_pwm_pin_owner(pin);
+    if (owner != NULL) {
+        ESP_LOGE(TAG, "backlight PWM GPIO%d is %s; staying on/off", pin, owner);
         return;
     }
     const char *caution = backlight_pwm_pin_caution(pin);

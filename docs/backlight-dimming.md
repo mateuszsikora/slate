@@ -134,6 +134,12 @@ Three details are worth knowing:
   measurement: it is how the ESPHome package drives this pin, and nobody here
   has a modified board to confirm it on. A panel that gets darker as the number
   goes up has found the one thing this page cannot check.
+- **A boot starts at full brightness.** The first frame lights the panel at
+  100 % — that is what keeps uninitialised memory off the glass — and the
+  schedule lowers it once it has a configuration and a synced clock. On an
+  unmodified board nobody can see this, because 20 % is 100 % there anyway; on a
+  modified one, a night-time boot or OTA is briefly bright.
+  [#183](https://github.com/mateuszsikora/slate/issues/183) has the detail.
 
 ## Checking that it worked
 
