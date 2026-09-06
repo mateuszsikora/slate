@@ -39,16 +39,21 @@ it. Collect the rest **before** touching the board, because the middle of phase
 may be on the panel's own access point by then, with no route to the person you
 want to ask.
 
-| Input | Where it comes from |
-|-------|--------------------|
-| Serial port | detected, phase 1 |
-| WiFi SSID | the network the host is on, confirmed with the operator |
-| WiFi passphrase | **ask.** It is not on the host in a form you should read |
-| Administrator PIN | ask, or generate 4–12 digits and report it in phase 10 |
-| Home Assistant URL | `GET /ha/discover`, or ask |
-| Home Assistant token | given, and see [Rules](#rules) about where it may live |
-| Which light, which sensor | phase 7 — **ask when more than one matches** |
-| Timezone | the host's, e.g. `readlink /etc/localtime`; confirm it |
+| Input | Name it goes under | Where it comes from |
+|-------|--------------------|---------------------|
+| Serial port | — | detected, phase 1 |
+| WiFi SSID | — | confirmed with the operator, and visible to the panel in `GET /wifi/scan` |
+| WiFi passphrase | — | **ask.** It is not on the host in a form you should read |
+| Administrator PIN | — | ask, or generate 4–12 digits and report it in phase 10 |
+| Panel session credential | `SLATE_TOKEN` | `POST /session`, phase 5 |
+| Home Assistant URL | `HA_URL` | `GET /ha/discover`, or ask |
+| Home Assistant token | `HA_TOKEN` | given, and see [Rules](#rules) about where it may live |
+| Which light, which sensor | — | phase 7 — **ask when more than one matches** |
+| Timezone | — | the host's, e.g. `readlink /etc/localtime`; confirm it |
+
+The three exported names are the ones every command below assumes, and
+`SLATE_TOKEN` is already the repository's convention in `CONFIGURATION.md` and
+`tools/ota/upload.sh`.
 
 Ask for all of the missing ones in one message. Do not guess a WiFi passphrase,
 do not invent a Home Assistant URL, and do not pick between two lights called
@@ -77,27 +82,41 @@ something like *Living room* and *Living room lamp* on the operator's behalf.
 
 ## 1. Find the board
 
+`esptool.py` comes with ESP-IDF, and this phase already needs it, so source the
+environment before anything else. Phase 2 builds from the same shell and does
+not repeat this:
+
 ```bash
-ls /dev/cu.usbmodem*                 # macOS
-ls /dev/ttyACM* /dev/ttyUSB*         # Linux
+. "$HOME/esp/esp-idf/export.sh"
 ```
 
-Exactly one port should be new. If several appear, ask which one rather than
-flashing the first — the other one may be somebody's radio.
+Then find the port. List the whole directory and filter rather than globbing
+several patterns at once — under `zsh` a pattern that matches nothing aborts the
+entire command, so `ls /dev/cu.usbmodem* /dev/cu.usbserial*` can print nothing at
+all on a machine where the first pattern would have matched:
 
-Then confirm the module is the 16 MB part, because
-`firmware/partitions.csv` is drawn for 16 MB and a panel with 8 MB will accept
-the flash and fail later:
+```bash
+ls /dev/cu.*                         # macOS — look for cu.usbmodem*
+ls /dev                              # Linux — look for ttyACM* or ttyUSB*
+```
+
+Usually one port is new. Two is not a fault in itself — some carrier boards
+expose a USB-serial bridge alongside the ESP32-S3's native USB — but if you
+cannot tell which is which, ask rather than flashing the first: the other one
+may be somebody's radio.
+
+Then confirm the module, because `firmware/partitions.csv` is drawn for 16 MB
+and a panel with 8 MB will accept the flash and fail later:
 
 ```bash
 esptool.py --port /dev/cu.usbmodem1101 flash_id
 ```
 
-That command comes with ESP-IDF, so it is available in the shell phase 2 builds
-from. **Done when** the chip reads as ESP32-S3 and the detected flash size is
-16MB.
-Anything smaller: stop and say so. Do not flash it. If the port does not appear
-at all, the usual cause is a charging-only USB-C cable.
+**Done when** the chip reads as ESP32-S3 with `Detected flash size: 16MB`. The
+same output names the PSRAM — `Features: WiFi, BLE, Embedded PSRAM 8MB` — so one
+command confirms the whole N16R8 part without anyone reading the marking on the
+module. Anything smaller: stop and say so. Do not flash it. If the port does not
+appear at all, the usual cause is a charging-only USB-C cable.
 
 ## 2. Get an image onto it
 
@@ -160,21 +179,50 @@ and you cannot see it, so work from the API instead: on that access point
 `GET /wifi/scan`, `POST /wifi` and `GET /info` answer without a session, and
 everything else answers `401` exactly as it does on the station.
 
-Getting onto that access point means moving the host's WiFi, which drops its
-route to your Home Assistant, to the internet and possibly to whoever asked you
-to do this. **Offer the operator both paths and let them choose:**
+Getting onto that access point means moving the host's WiFi. **Find out what
+that costs before offering to do it:**
+
+```bash
+route -n get default | awk '/interface/{print $2}'    # which interface has the route
+networksetup -listallhardwareports                    # which one is Wi-Fi
+```
+
+If those two are the same interface, moving the WiFi takes the host off the
+internet — which includes your own connection to whatever is running you. You
+can still do it, but only as **one script that joins, provisions and returns
+without stopping**: an agent that needs a round trip while the host is offline
+cannot finish the phase it started. If the default route is on a wired
+interface, as it often is on a desk machine, the WiFi radio is free and this
+phase costs nothing.
+
+**Offer the operator both paths and let them choose:**
 
 - *They do it* — they join a phone or laptop to `slate-<mac6>`, open
   `http://192.168.4.1`, and provision the panel through the setup page. You wait
   and pick up at the end of this phase. This is the shorter path and the one that
   needs nothing from your host.
-- *You do it* — confirm first, then, on macOS:
+- *You do it* — confirm first, then, on macOS, using the Wi-Fi device from
+  `-listallhardwareports` rather than assuming `en0`:
 
   ```bash
-  networksetup -getairportnetwork en0                    # remember this
   networksetup -setairportnetwork en0 slate-a1b2c3       # open network, no password
+  ipconfig getifaddr en0                                 # expect 192.168.4.x
   curl -sS http://192.168.4.1/api/v1/info                # confirm: network.mode == "ap"
   ```
+
+  Do not try to read the network you are leaving with `networksetup
+  -getairportnetwork`. On current macOS it answers `You are not associated with
+  an AirPort network` even when the interface is associated and carrying
+  traffic, because reporting the SSID is gated behind Location Services and a
+  command-line tool does not have it. `networksetup
+  -listpreferredwirelessnetworks <device>` does work — it reads stored
+  configuration rather than the radio — and the network to return to is
+  normally the one the operator named as the panel's target anyway.
+
+  The panel is the better scanner in any case. `GET /wifi/scan` on the access
+  point returns what the panel's own radio can see, with `auth` and `age_s`,
+  which is the list that matters: an SSID the host can see and the panel cannot
+  is not a network the panel can join.
 
   Submit the credentials, the PIN and the addressing in one request. Nothing on
   this interface needs a session, and the passphrase reaches `curl` on stdin
@@ -191,19 +239,34 @@ to do this. **Offer the operator both paths and let them choose:**
   `202` means accepted, not connected. **The outcome appears on the panel, not
   in the response** — there is one radio, and the access point drops you at the
   instant the station associates, so there is nothing to poll for from here.
-  Return the host to its own network immediately:
+
+  Then return the host to its own network, which needs more care than it looks
+  like it should:
 
   ```bash
-  networksetup -setairportnetwork en0 home               # keychain has the password
+  networksetup -removepreferredwirelessnetwork en0 slate-a1b2c3
+  networksetup -setairportpower en0 off && networksetup -setairportpower en0 on
+  ipconfig waitall
+  ipconfig getifaddr en0                                 # must not be empty
   ```
+
+  Two things make the obvious version of this wrong. **Joining the panel's
+  access point puts it at the top of the host's preferred networks**, and it is
+  an open network that is still in range, so macOS will silently associate with
+  it again the moment the radio comes back — a host that looks reconnected can
+  be sitting on `192.168.4.2` instead. Removing it first is not tidiness, it is
+  the fix. And **an explicit `networksetup -setairportnetwork <device> <home
+  network>` fails non-interactively**, with `Error: -3900 tmpErr`, because the
+  stored passphrase is not available to it in that context; each attempt leaves
+  the interface `inactive`. Letting macOS auto-join after a radio cycle works.
+  Do not declare this phase done until `ipconfig getifaddr` on the Wi-Fi device
+  prints an address on the operator's own subnet.
 
 Either way, find the panel again from the host's normal network:
 
 ```bash
-for i in $(seq 30); do
-  curl -fsS --max-time 2 http://slate-a1b2c3.local/api/v1/info && break
-  sleep 2
-done
+curl -sS --retry 20 --retry-delay 3 --retry-all-errors \
+     --connect-timeout 3 --max-time 90 http://slate-a1b2c3.local/api/v1/info
 ```
 
 **Done when** `GET /info` reports `network.mode: "sta"` with an `ip` and
@@ -232,10 +295,16 @@ curl -sS -X POST http://192.168.1.42/api/v1/session \
 JSON
 ```
 
-The response is `{"token":"…"}`; keep it in an environment variable for the rest
-of the run. Omit the body on a panel left open. Five failed PIN attempts answer
-`429 try_later` with `Retry-After: 30` — wait it out rather than retrying into
-it. The credential is in-memory and rotates on a PIN change or a factory reset.
+Whether to send a body at all is not a guess: `GET /info` reports
+`authentication` as `pin` or `open`, and an open panel takes `POST /session`
+with no body. That field is what the editor uses to decide whether to show a PIN
+prompt, and it is what you use here.
+
+The response is `{"token":"…"}`. Export it as **`SLATE_TOKEN`**, which is the
+name the rest of this document, `CONFIGURATION.md` and `tools/ota/upload.sh` all
+use. Five failed PIN attempts answer `429 try_later` with `Retry-After: 30` —
+wait it out rather than retrying into it. The credential is in-memory and rotates
+on a PIN change or a factory reset.
 
 **Done when** an authenticated request works: `GET /status` should answer `200`
 with `providers` listing `ha` as `unconfigured`.
@@ -252,15 +321,22 @@ An empty result is normal — mDNS does not always cross a VLAN — and manual e
 is the fallback. Ask rather than probing addresses.
 
 Then configure it, with both the session credential and the long-lived token off
-argv:
+argv. This request is the one place in the runbook that needs a body *and* a
+credential, so the header cannot come from a pipe: the heredoc claims stdin, and
+`curl` ends up trying to parse the JSON body as a configuration file and fails
+with `option --config: error encountered when reading a file` before it sends
+anything. Process substitution gives the header its own descriptor:
 
 ```bash
-printf 'header = "Authorization: Bearer %s"\n' "$SLATE_TOKEN" |
-curl -sS --config - -X POST http://192.168.1.42/api/v1/ha \
+curl -sS --config <(printf 'header = "Authorization: Bearer %s"\n' "$SLATE_TOKEN") \
+     -X POST http://192.168.1.42/api/v1/ha \
      -H 'Content-Type: application/json' --data-binary @- -w '%{http_code}\n' <<JSON
-{"url":"http://homeassistant.local:8123","token":"${HA_TOKEN}"}
+{"url":"${HA_URL}","token":"${HA_TOKEN}"}
 JSON
 ```
+
+`HA_URL` and `HA_TOKEN` are the operator's two Home Assistant inputs, exported
+under those names; `/dev/fd` keeps the token out of `argv` and off the disk.
 
 **Done when** this answers `204`, which the panel sends only after testing the
 credentials against the instance — existing working credentials survive a failed
@@ -320,7 +396,7 @@ is the dashboard the request above asks for:
   "theme": "midnight",
   "home_page": "home",
   "settings": {"timezone": "Europe/Warsaw", "brightness_day": 100,
-               "brightness_night": 20, "night_start": "22:30",
+               "brightness_night": 100, "night_start": "22:30",
                "night_end": "06:30", "wake_on_touch": true},
   "pages": [
     {
@@ -341,8 +417,15 @@ is the dashboard the request above asks for:
 
 `theme` must be an id the running firmware carries — `GET /info` lists them
 rather than leaving you to assume `midnight` exists. `settings.timezone` is an
-IANA name and the clock is meaningless without it. Then validate, and only then
-publish:
+IANA name and the clock is meaningless without it.
+
+`brightness_night` is `100` above on purpose. On a board as it ships the
+backlight is a binary output on the CH422G expander, so every value above zero
+is full brightness and only `0` turns the screen off; a `20` there would be a
+night dimming you then report in phase 10 and the operator never sees. Use `0`
+if they want the screen dark at night, and mention
+[`backlight-dimming.md`](backlight-dimming.md) if they wanted a level — it is a
+wire and a build option, not a setting. Then validate, and only then publish:
 
 ```bash
 printf 'header = "Authorization: Bearer %s"\n' "$SLATE_TOKEN" |
@@ -376,9 +459,16 @@ curl -sS --config - 'http://192.168.1.42/api/v1/resources?provider=ha'
 **Done when** `/status` reports the `ha` provider as `online`, and `/resources`
 returns a snapshot for each bound entity with `available: true` and a plausible
 `state` — a `power` of `on` or `off` for the light, a number and a unit for the
-sensor. The panel subscribes only to the entities the active dashboard
-references, so an entity missing here is a binding that does not match anything
-in Home Assistant, which usually means a typo in an entity id.
+sensor.
+
+Give it a few seconds before believing an empty answer. The `204` means the
+screen and the subscriptions were swapped; it does not mean Home Assistant has
+answered yet, and a `/resources` read in the same breath as the `PUT` can come
+back short. Poll rather than diagnose: re-read until both resources appear or
+about fifteen seconds have passed. Only then is a missing entity a real finding
+— the panel subscribes solely to what the active dashboard references, so an
+entity absent after that is a binding matching nothing in Home Assistant, which
+is almost always a typo in an entity id.
 
 Touching a tile is the one thing you cannot verify from here. Say so, and ask
 the operator to tap the light once.
