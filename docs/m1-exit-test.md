@@ -51,10 +51,16 @@ and physical-screen observations.
 
 Run on `a9f72ce` over an isolated WLAN that serves nothing else, so no unrelated
 device was disturbed. The panel was provisioned onto it, the WLAN was switched
-off at the access point without touching the panel, and it was switched back on
-seven minutes later. Between those two moments the panel was not rebooted, not
-cabled and had nothing submitted to it. It was touched once, to wake a blanked
-screen, and that touch is timed and accounted for below.
+off at the access point without touching the panel, and switched back on between
+7 min 44 s and 8 min 47 s later — bounded below by the attempt at 570833 ms,
+which still failed with `not_found`, and above by the attempt one backoff step
+later that associated at 602618 ms. Wall-clock sampling from a second host puts
+it at 8 min 19 s, inside that bound. Seven minutes was the intention, taken from
+§9.4's router that comes back at minute seven; it is not what was measured.
+
+Between those two moments the panel was not rebooted, not cabled and had nothing
+submitted to it. It was touched once, to wake a blanked screen, and that touch
+is timed and accounted for below.
 
 **The threshold is measured from the panel's own clock, not from a stopwatch.**
 The retained log ring gives failed association attempts at 309360, 341779,
@@ -144,5 +150,9 @@ are unattested.
 
 Every screen observation recorded here was made after the threshold. The one
 touch of the run, at 390734 ms, came 15.9 s before the banner existed: it woke a
-blanked screen to wait for the banner, not to read it. Waking a screen does not
-help a panel associate, so it does not weaken the unattended-recovery result.
+blanked screen to wait for the banner, not to read it. That it was the only one
+is a record for as much of the outage as the ring still holds — `backlight woken
+by touch` appears in it once, and the ring reaches back to 306945 ms — while the
+first three minutes after the loss fall outside the ring and rest on the
+operator's account. Waking a screen does not help a panel associate, so neither
+the touch nor that gap weakens the unattended-recovery result.
