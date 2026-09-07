@@ -311,6 +311,18 @@ with `providers` listing `ha` as `unconfigured`.
 
 ## 6. Connect Home Assistant
 
+Check whether there is anything to do first — the operator may have connected it
+themselves, and `GET /status` will already report the `ha` provider as `online`:
+
+```bash
+curl -sS --config <(printf 'header = "Authorization: Bearer %s"\n' "$SLATE_TOKEN") \
+     http://192.168.1.42/api/v1/ha        # {"configured":true,"url":"http://…"}
+```
+
+A `configured: true` means this phase is done and you never see the token, which
+changes how phase 7 works but does not block it. Do not reconfigure a working
+connection to obtain one.
+
 Find the instance, if the operator did not name it:
 
 ```bash
@@ -353,10 +365,9 @@ needs.
 
 ## 7. Choose the entities
 
-Ask Home Assistant directly. You have the token, and its REST API answers in one
-request; the panel's `/ha/catalog` route exists for the browser's benefit,
-splitting the catalog into four stages so an ESP32 never holds more than one
-small response, and it has nothing to offer you.
+**If you hold the token, ask Home Assistant directly.** Its REST API answers in
+one request, where the panel's `/ha/catalog` splits the same material into four
+stages so an ESP32 never holds more than one small response at a time.
 
 ```bash
 printf 'header = "Authorization: Bearer %s"\n' "$HA_TOKEN" |
@@ -370,6 +381,18 @@ jq -r '.[] | select(.entity_id | startswith("sensor."))
        | [.entity_id, .attributes.friendly_name, .attributes.unit_of_measurement]
        | @tsv' /tmp/states.json
 ```
+
+**If you do not hold the token, `/ha/catalog` is the only way through.** That
+happens whenever the operator connected Home Assistant themselves — through the
+editor, or before you arrived — because no endpoint returns a stored token. The
+panel is then the only thing that can see the catalog, and the relay is what it
+sees it through: `POST /ha/catalog` with `{"stage":"states"}` returns
+`202 {"request":N}`, and `GET /ha/catalog?request=N` answers `{"status":
+"pending"}` until the Home Assistant result is ready, which reading consumes.
+One stage may be in flight, an unconsumed one expires after 30 s, and `states`
+alone carries the entity ids and the attributes the filters below need. Skipping
+phase 6 because Home Assistant is already configured is normal; it does not
+leave you without a way to choose entities.
 
 Only five Home Assistant domains can be bound at all — `light`, `cover`,
 `sensor`, `binary_sensor`, `scene` — so filtering by domain is not a
