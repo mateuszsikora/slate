@@ -450,9 +450,13 @@ curl -sS --config <(printf 'header = "Authorization: Bearer %s"\n' "$SLATE_TOKEN
 ```
 
 A `404 not_found` means the panel has no dashboard and this phase is a first
-publication. Anything else is a document somebody already has on their wall.
-Show the operator what is in it and ask before overwriting it, and keep that
-file either way — it is the only copy that exists.
+publication — and note that `-o` writes the body whichever status comes back, so
+on that path the file holds the error envelope rather than a dashboard. Delete
+it, or you will later mistake it for a backup.
+
+Anything else is a document somebody already has on their wall. Show the
+operator what is in it and ask before overwriting it, and keep that file — it is
+the only copy that exists.
 
 The grid is 4 columns × 3 rows below a fixed system bar, `pos` is
 `[column, row]` zero-based from the top left, and `size` is one of five
