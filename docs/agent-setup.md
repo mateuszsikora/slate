@@ -46,7 +46,7 @@ want to ask.
 | WiFi passphrase | — | **ask.** It is not on the host in a form you should read |
 | Administrator PIN | — | ask, or generate 4–12 digits and report it in phase 10 |
 | Panel session credential | `SLATE_TOKEN` | `POST /session`, phase 5 |
-| Home Assistant URL | `HA_URL` | `GET /ha/discover`, or ask |
+| Home Assistant URL | `HA_URL` | `GET /ha/discover` — which needs the phase 5 session — or ask. No trailing slash |
 | Home Assistant token | `HA_TOKEN` | given, and see [Rules](#rules) about where it may live |
 | Which light, which sensor | — | phase 7 — **ask when more than one matches** |
 | Timezone | — | the host's, e.g. `readlink /etc/localtime`; confirm it |
@@ -120,18 +120,20 @@ appear at all, the usual cause is a charging-only USB-C cable.
 
 ## 2. Get an image onto it
 
-Until a version is tagged there is nothing to download, so this phase is a build
-from source. Check first — `gh release list` in the repository, or the manifest
-the browser installer is published beside — and if a release exists, prefer its
-`slate-<version>.bin` over building.
+**Over a cable, you build from source.** A release's `slate-<version>.bin` is
+one of four images a blank board needs — the bootloader, the partition table and
+`ota_data_initial` go with it, at offsets that live in the flasher's manifest
+rather than in the file you downloaded — so a released binary is what the
+browser installer writes and what an update installs over WiFi, not something to
+hand to `esptool.py` here. `idf.py flash` writes all four and computes the
+offsets from the build itself.
 
 Building needs ESP-IDF v5.5.5 and Node.js 24, and the fonts and the editor
 bundle are generated rather than committed: a clean checkout **cannot** build
-the firmware until both exist, and the failure does not explain itself. In
-order, from the repository root:
+the firmware until both exist, and the failure does not explain itself. The
+environment is already sourced from phase 1, so from the repository root:
 
 ```bash
-. "$HOME/esp/esp-idf/export.sh"
 tools/fonts/generate.sh
 tools/editor/build.sh
 cd firmware && idf.py build
@@ -226,14 +228,17 @@ phase costs nothing.
 
   Submit the credentials, the PIN and the addressing in one request. Nothing on
   this interface needs a session, and the passphrase reaches `curl` on stdin
-  rather than as an argument:
+  rather than as an argument. Build the body with `jq` rather than writing it
+  into a heredoc — a passphrase is the one input most likely to contain a `$`, a
+  backtick, a quote or a backslash, and an unquoted heredoc would let the shell
+  expand the first two while the last two produce `400 invalid_json`:
 
   ```bash
+  jq -n --arg ssid "$SSID" --arg pw "$WIFI_PASS" --arg pin "$ADMIN_PIN" \
+     '{ssid: $ssid, password: $pw, admin_pin: $pin, ipv4: {mode: "dhcp"}}' |
   curl -sS -X POST http://192.168.4.1/api/v1/wifi \
        -H 'Content-Type: application/json' \
-       --data-binary @- -w '%{http_code}\n' <<JSON
-  {"ssid":"home","password":"…","admin_pin":"1234","ipv4":{"mode":"dhcp"}}
-  JSON
+       --data-binary @- -w '%{http_code}\n'
   ```
 
   `202` means accepted, not connected. **The outcome appears on the panel, not
@@ -300,6 +305,11 @@ Whether to send a body at all is not a guess: `GET /info` reports
 with no body. That field is what the editor uses to decide whether to show a PIN
 prompt, and it is what you use here.
 
+If it says `pin` and you did not set that PIN — which is what happens whenever
+the operator provisioned the panel themselves in phase 4, or the panel was
+already on the wall — **ask for it before sending anything**. There are five
+attempts, and spending them on guesses buys a `429` and a wait.
+
 The response is `{"token":"…"}`. Export it as **`SLATE_TOKEN`**, which is the
 name the rest of this document, `CONFIGURATION.md` and `tools/ota/upload.sh` all
 use. Five failed PIN attempts answer `429 try_later` with `Retry-After: 30` —
@@ -323,38 +333,49 @@ A `configured: true` means this phase is done and you never see the token, which
 changes how phase 7 works but does not block it. Do not reconfigure a working
 connection to obtain one.
 
-Find the instance, if the operator did not name it:
-
-```bash
-curl -sS http://192.168.1.42/api/v1/ha/discover      # {"instances":[{"name":…,"url":…}]}
-```
-
-An empty result is normal — mDNS does not always cross a VLAN — and manual entry
-is the fallback. Ask rather than probing addresses.
-
-Then configure it, with both the session credential and the long-lived token off
-argv. This request is the one place in the runbook that needs a body *and* a
-credential, so the header cannot come from a pipe: the heredoc claims stdin, and
-`curl` ends up trying to parse the JSON body as a configuration file and fails
-with `option --config: error encountered when reading a file` before it sends
-anything. Process substitution gives the header its own descriptor:
+Find the instance, if the operator did not name it. This endpoint needs the
+session from phase 5 — only `GET /info` and `POST /session` are public, and a
+`401` here is that, not an expired credential:
 
 ```bash
 curl -sS --config <(printf 'header = "Authorization: Bearer %s"\n' "$SLATE_TOKEN") \
-     -X POST http://192.168.1.42/api/v1/ha \
-     -H 'Content-Type: application/json' --data-binary @- -w '%{http_code}\n' <<JSON
-{"url":"${HA_URL}","token":"${HA_TOKEN}"}
-JSON
+     http://192.168.1.42/api/v1/ha/discover     # {"instances":[{"name":…,"url":…}]}
 ```
 
+An empty result is normal — mDNS does not always cross a VLAN, and a panel on a
+different subnet from Home Assistant will routinely see nothing here while
+routing between them works perfectly well. Manual entry is the fallback. Ask
+rather than probing addresses.
+
+Then configure it. Both credentials stay off `argv`, and the body is built
+rather than typed:
+
+```bash
+jq -n --arg url "$HA_URL" --arg token "$HA_TOKEN" '{url: $url, token: $token}' |
+curl -sS --config <(printf 'header = "Authorization: Bearer %s"\n' "$SLATE_TOKEN") \
+     -X POST http://192.168.1.42/api/v1/ha \
+     -H 'Content-Type: application/json' --data-binary @- -w '%{http_code}\n'
+```
+
+Two things about that shape are deliberate. The header comes from process
+substitution rather than a pipe because the body already claims stdin; hand
+`--config` a pipe here and `curl` parses the JSON as a configuration file and
+fails with `option --config: error encountered when reading a file` before
+sending anything. And the body is assembled by `jq` rather than written into a
+heredoc, so that a value containing a quote or a backslash produces valid JSON
+instead of `400 invalid_json`.
+
 `HA_URL` and `HA_TOKEN` are the operator's two Home Assistant inputs, exported
-under those names; `/dev/fd` keeps the token out of `argv` and off the disk.
+under those names. A trailing slash on `HA_URL` is harmless here — the panel
+normalises it and `GET /ha` reads it back without one — but it matters in
+phase 7, where it would produce `//api/states`.
 
 **Done when** this answers `204`, which the panel sends only after testing the
 credentials against the instance — existing working credentials survive a failed
 attempt, so there is nothing to undo. The refusals are worth reporting verbatim:
 `422 ha_auth_invalid` is a bad or expired token, `502 ha_unreachable` is a URL
-or a network, `400 bad_url` is neither.
+or a network, `400 bad_url` is neither, and `503 ha_busy` is a panel already
+doing this — wait rather than repeating it.
 
 One thing to check before blaming the token: a token belonging to a
 `system-read-only` account renders a perfect dashboard on which nothing responds
@@ -393,6 +414,12 @@ One stage may be in flight, an unconsumed one expires after 30 s, and `states`
 alone carries the entity ids and the attributes the filters below need. Skipping
 phase 6 because Home Assistant is already configured is normal; it does not
 leave you without a way to choose entities.
+
+Two refusals belong to this route and to no other: `409 catalog_busy` means
+another stage is still in flight, and `409 provider_unavailable` means the
+panel's own Home Assistant WebSocket is not authenticated yet — a provider that
+has not finished connecting, not a problem with your request. Both are worth
+waiting out rather than retrying immediately.
 
 Those two filters assume `jq`, which is the only tool this runbook needs that
 neither ESP-IDF nor macOS brings; check for it before relying on the commands as
@@ -442,6 +469,13 @@ is the dashboard the request above asks for:
   ]
 }
 ```
+
+**Read `GET /config` before you write one.** A `404 not_found` means the panel
+has no dashboard and this phase is a first publication. Anything else is a
+document somebody already has on their wall, and `PUT` replaces it whole — it
+does not merge. Show the operator what is there and ask before overwriting it,
+and keep the response you read as a backup either way, because it is the only
+copy that exists.
 
 `theme` must be an id the running firmware carries — `GET /info` lists them
 rather than leaving you to assume `midnight` exists. `settings.timezone` is an
@@ -538,8 +572,11 @@ running any of this again.
   panel's access point when the phase ends.
 - Do not write any credential into the repository, a commit, or a command line
   on a shared machine.
-- Do not guess a WiFi passphrase, a Home Assistant URL, or which of two similar
-  entities was meant.
+- Do not guess a WiFi passphrase, an administrator PIN you did not set, a Home
+  Assistant URL, or which of two similar entities was meant.
+- Do not `PUT /config` over a dashboard somebody already has without asking.
+  `GET /config` first: anything other than `404 not_found` is somebody's
+  document, and the replacement is whole-document and irreversible.
 - Do not retry into `429 try_later`; honour the `Retry-After`.
 - Do not report a panel as set up on a `204` alone — phase 9 is what makes that
   claim true.
