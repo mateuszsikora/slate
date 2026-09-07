@@ -99,6 +99,61 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 
+# --- Sockets (DESIGN.md §9.2, §9.4) ---
+# The default is 10, and the HTTP server alone is entitled to all ten. It takes
+# three for itself — the listener, and the control pair it wakes its own select()
+# with — plus one per open connection up to max_open_sockets, which
+# HTTPD_DEFAULT_CONFIG() sets to 7. Its own guard is
+# `HTTPD_MAX_SOCKETS < max_open_sockets + 3` (httpd_main.c), which at the
+# defaults is `10 < 10`: false by exactly one, so the server starts and nothing
+# warns.
+#
+# Setup mode needs an eleventh socket, and §9.2 is what needs it: the captive DNS
+# responder, which is the only other thing in this firmware holding one while the
+# station is down. Two that look like they belong on that list and do not are
+# mDNS and SNTP — both sit on raw lwIP PCBs (mdns_networking_lwip.c, sntp.c) and
+# cost no socket at all, the first of them only because
+# CONFIG_MDNS_NETWORKING_SOCKET is left unset.
+#
+# What that looks like on the panel is not a slow page. `accept()` returns
+# ENFILE, esp_http_server logs "error accepting new connection", and it does not
+# recover: `lru_purge_enable` recycles the server's connections only once the
+# server's own count reaches seven, which is a count the table can no longer let
+# it reach. Measured at 0 of 100 probes answered while the host still held its
+# DHCP lease and still had the panel's AP MAC in its ARP table (#188).
+#
+# 20 leaves the worst shape about eight spare. Setup mode is the ten plus the
+# responder; a connected panel gives the responder back and takes Home
+# Assistant's WebSocket and a release check that may be running while somebody
+# uploads an image. Neither has to be counted exactly for the panel to stay
+# reachable, and that is the point of the margin.
+#
+# The keep-alive that stops dropped clients from taking sockets with them is in
+# slate_api.c, next to the server they belong to.
+#
+# Two consequences the option's name does not give away. lwIP puts its
+# descriptors at the top of the range — LWIP_SOCKET_OFFSET is
+# `FD_SETSIZE - CONFIG_LWIP_MAX_SOCKETS` — so this moves the boundary from 54 to
+# 44 and it is everything that is *not* a socket, littlefs and the console
+# included, that has the smaller half. It is not close: raising this again by an
+# order of magnitude is what would need checking, not this.
+#
+# The other is that LWIP_MAX_ACTIVE_TCP stays at 16 and is deliberately not
+# raised alongside. Four of the sockets that emptied the table are not active TCP
+# connections at all: the server's control pair and the captive responder are
+# UDP, and its listener draws on LWIP_MAX_LISTENING_TCP, which is a pool of its
+# own (MEMP_NUM_TCP_PCB_LISTEN, not MEMP_NUM_TCP_PCB). What is left — the seven
+# connections and the handful of outbound clients — fits inside 16 with room, and
+# the keep-alive named above lowers that pressure rather than raising it: an
+# expired keepalive aborts the connection with a reset rather than parking it in
+# TIME_WAIT, so the socket and the control block come back together.
+#
+# What the ten extra sockets cost, measured on the panel rather than added up:
+# the boot report's free internal heap moved from 250 255 B to 249 655 B, the
+# station-up line from 78 775 B to 78 191 B and the APSTA line from 83 571 B to
+# 82 971 B. About 600 B, which §6.2's budget carries without noticing.
+CONFIG_LWIP_MAX_SOCKETS=20
+
 # --- Home Assistant WebSocket client (DESIGN.md §5.5, issue #16) ---
 # The manual fallback may point at an HTTPS Home Assistant URL. Verify public
 # certificates against the same compact common-roots bundle S-3 measured;

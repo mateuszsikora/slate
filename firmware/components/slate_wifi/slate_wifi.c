@@ -47,7 +47,13 @@ ESP_EVENT_DEFINE_BASE(SLATE_WIFI_EVENT);
 
 /* 1 -> 2 -> 4 -> 8 -> 15 -> 30 s, then 30 s for as long as it takes. Written
  * out rather than computed: the sequence doubles and then stops doubling, and
- * a shift with a clamp reads like an approximation of it. */
+ * a shift with a clamp reads like an approximation of it.
+ *
+ * Ascending, and the last element is the ceiling rather than merely the last
+ * step: sleep_or_restart() reads it as the interval to hold at while somebody is
+ * on the setup access point, and as the point past which there is nothing left
+ * to hold. A longer step inserted anywhere but the end would not break anything
+ * loudly — it would quietly stop being held. */
 static const uint32_t BACKOFF_MS[] = {1000, 2000, 4000, 8000, 15000, 30000};
 #define BACKOFF_STEPS (sizeof(BACKOFF_MS) / sizeof(BACKOFF_MS[0]))
 
@@ -686,24 +692,91 @@ static bool abandon_attempt(void)
 }
 
 /**
+ * Is somebody attached to the setup access point?
+ *
+ * Asked of the driver on every check rather than counted from
+ * WIFI_EVENT_AP_STACONNECTED and AP_STADISCONNECTED, because the two are not
+ * symmetrical: taking the access point down (#55's release_ap(), which is the
+ * normal way it ends) removes the interface without a disconnect per client, and
+ * a count that has drifted upwards is a panel holding its retry at the ceiling
+ * for a room nobody is in. This answer cannot drift — it is the driver's own
+ * association table, and it is empty whenever there is no access point to be on.
+ */
+static bool setup_client_attached(void)
+{
+    /* Nobody can be attached to an access point that was never asked for, and
+     * this is the common case: every panel retrying an outage before §9.4's five
+     * minutes are up runs the loop below with no access point at all. */
+    if (!s_setup_requested) {
+        return false;
+    }
+
+    wifi_sta_list_t clients;
+    return esp_wifi_ap_get_sta_list(&clients) == ESP_OK && clients.num > 0;
+}
+
+/**
  * Wait out a delay, returning early if the credentials change.
  *
  * The early return is what makes `POST /wifi` feel immediate on a panel that
  * is thirty seconds into a backoff. Without it a corrected password sits
  * unused until a timer that was counting for the wrong one expires.
+ *
+ * The other half is §9.4's, and it is why this waits in slices instead of once.
+ * An attempt takes the radio off the access point's channel for the couple of
+ * seconds it lasts, and the early steps of the backoff spend that couple of
+ * seconds every one, two, four — which is a person watching a setup page that
+ * will not load while the panel tries credentials they are standing there to
+ * replace. While anybody is attached, the wait is held at the backoff's own
+ * ceiling: the thirty seconds an unattended panel settles at anyway, inside
+ * §9.4's "at most a minute apart", with the sequence itself untouched.
+ *
+ * What it deliberately does not do is stop. §9.4 makes "raising the access point
+ * must never stop the station trying" a requirement, so this changes the spacing
+ * of attempts and never whether one happens — a panel whose network comes back
+ * while somebody is on the setup page still rejoins it within the ceiling.
  */
 static bool sleep_or_restart(uint32_t ms)
 {
-    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
+    /* Long enough that this is not a busy loop, short enough that a client
+     * attaching extends the wait it is already inside, and that the last one
+     * leaving returns the panel to its own cadence promptly. */
+    const TickType_t SLICE = pdMS_TO_TICKS(1000);
+
+    const uint32_t ceiling_ms = BACKOFF_MS[BACKOFF_STEPS - 1];
+    const TickType_t ceiling = pdMS_TO_TICKS(ceiling_ms);
+
+    /* At the ceiling there is nothing a client could add, so that wait — the one
+     * every long outage settles into — is taken in a single sleep, exactly as it
+     * was before any of this. Only the short steps are asked to look up. */
+    const bool holdable = pdMS_TO_TICKS(ms) < ceiling;
+
+    TickType_t began = xTaskGetTickCount();
+    bool held = false;
 
     for (;;) {
-        TickType_t now = xTaskGetTickCount();
-        if ((int32_t) (deadline - now) <= 0) {
+        TickType_t wait_for = pdMS_TO_TICKS(ms);
+
+        if (holdable && setup_client_attached()) {
+            wait_for = ceiling;
+            if (!held) {
+                held = true;
+                ESP_LOGI(TAG, "somebody is on the setup access point — next attempt in %" PRIu32
+                              " ms rather than %" PRIu32 " ms",
+                         ceiling_ms, ms);
+            }
+        }
+
+        int32_t left = (int32_t) (began + wait_for - xTaskGetTickCount());
+        if (left <= 0) {
             return false;
+        }
+        if (holdable && left > (int32_t) SLICE) {
+            left = (int32_t) SLICE;
         }
 
         msg_t msg;
-        if (xQueueReceive(s_queue, &msg, deadline - now) == pdTRUE && is_restart(&msg)) {
+        if (xQueueReceive(s_queue, &msg, (TickType_t) left) == pdTRUE && is_restart(&msg)) {
             return true;
         }
     }
