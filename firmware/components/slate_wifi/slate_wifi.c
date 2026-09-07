@@ -47,7 +47,13 @@ ESP_EVENT_DEFINE_BASE(SLATE_WIFI_EVENT);
 
 /* 1 -> 2 -> 4 -> 8 -> 15 -> 30 s, then 30 s for as long as it takes. Written
  * out rather than computed: the sequence doubles and then stops doubling, and
- * a shift with a clamp reads like an approximation of it. */
+ * a shift with a clamp reads like an approximation of it.
+ *
+ * Ascending, and the last element is the ceiling rather than merely the last
+ * step: sleep_or_restart() reads it as the interval to hold at while somebody is
+ * on the setup access point, and as the point past which there is nothing left
+ * to hold. A longer step inserted anywhere but the end would not break anything
+ * loudly — it would quietly stop being held. */
 static const uint32_t BACKOFF_MS[] = {1000, 2000, 4000, 8000, 15000, 30000};
 #define BACKOFF_STEPS (sizeof(BACKOFF_MS) / sizeof(BACKOFF_MS[0]))
 

@@ -100,24 +100,33 @@ CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 
 # --- Sockets (DESIGN.md §9.2, §9.4) ---
-# The default is 10, and setup mode wants every one of them before a browser has
-# opened its second connection: the HTTP server's listener, its control socket
-# and the seven connections HTTPD_DEFAULT_CONFIG() allows come to nine, the
-# captive DNS responder takes the tenth, and mDNS — which §4.3 requires on the
-# access point as well as the station — asks for more than there are.
+# The default is 10, and the HTTP server alone is entitled to all ten. It takes
+# three for itself — the listener, and the control pair it wakes its own select()
+# with — plus one per open connection up to max_open_sockets, which
+# HTTPD_DEFAULT_CONFIG() sets to 7. Its own guard is
+# `HTTPD_MAX_SOCKETS < max_open_sockets + 3` (httpd_main.c), which at the
+# defaults is `10 < 10`: false by exactly one, so the server starts and nothing
+# warns.
+#
+# Setup mode needs an eleventh socket, and §9.2 is what needs it: the captive DNS
+# responder, which is the only other thing in this firmware holding one while the
+# station is down. Two that look like they belong on that list and do not are
+# mDNS and SNTP — both sit on raw lwIP PCBs (mdns_networking_lwip.c, sntp.c) and
+# cost no socket at all, the first of them only because
+# CONFIG_MDNS_NETWORKING_SOCKET is left unset.
 #
 # What that looks like on the panel is not a slow page. `accept()` returns
-# ENFILE, esp_http_server logs "error accepting new connection", and every
-# subsequent connection is refused for as long as the sockets stay taken:
-# measured at 0 of 100 probes answered while the host still held its DHCP lease
-# and still had the panel's AP MAC in its ARP table (#188).
+# ENFILE, esp_http_server logs "error accepting new connection", and it does not
+# recover: `lru_purge_enable` recycles the server's connections only once the
+# server's own count reaches seven, which is a count the table can no longer let
+# it reach. Measured at 0 of 100 probes answered while the host still held its
+# DHCP lease and still had the panel's AP MAC in its ARP table (#188).
 #
-# 20 covers both of the panel's shapes with room left over. Setup mode is the
-# nine above plus the responder plus mDNS on two interfaces, so fourteen; a
-# connected panel gives back the responder and takes SNTP, Home Assistant's
-# WebSocket and a release check that may be running while somebody uploads an
-# image, which is about the same. Neither has to be counted exactly for the panel
-# to stay reachable, and that is the point of the margin.
+# 20 leaves the worst shape about eight spare. Setup mode is the ten plus the
+# responder; a connected panel gives the responder back and takes Home
+# Assistant's WebSocket and a release check that may be running while somebody
+# uploads an image. Neither has to be counted exactly for the panel to stay
+# reachable, and that is the point of the margin.
 #
 # The keep-alive that stops dropped clients from taking sockets with them is in
 # slate_api.c, next to the server they belong to.
@@ -130,10 +139,10 @@ CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 # order of magnitude is what would need checking, not this.
 #
 # The other is that LWIP_MAX_ACTIVE_TCP stays at 16 and is deliberately not
-# raised alongside. The users that made the table run out are UDP — the captive
-# responder, mDNS, SNTP — and they cost a socket each without touching a TCP
-# control block; the server's own seven connections and the handful of outbound
-# clients fit inside 16 with room.
+# raised alongside. Three of the sockets that emptied the table are not TCP
+# connections at all — the server's control pair is UDP, and so is the captive
+# responder — and the ones that are, the seven connections and the handful of
+# outbound clients, fit inside 16 with room.
 #
 # What the ten extra sockets cost, measured on the panel rather than added up:
 # the boot report's free internal heap moved from 250 255 B to 249 655 B, the
