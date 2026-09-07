@@ -493,8 +493,19 @@ about fifteen seconds have passed. Only then is a missing entity a real finding
 entity absent after that is a binding matching nothing in Home Assistant, which
 is almost always a typo in an entity id.
 
-Touching a tile is the one thing you cannot verify from here. Say so, and ask
-the operator to tap the light once.
+Touching a tile is the one thing you cannot verify from here, so ask the
+operator to do it — but **read the light's state and keep it before you ask**.
+Watching for "a change" without a recorded predecessor gives you a transition
+you cannot read a direction from, and the first one is the one that matters.
+Then re-read `/resources` while they touch it: a `power` that flips, or a
+`brightness` that lands on a new number, has already been through the whole path
+— touch, action bus, provider call, subscription, back into the panel's own
+store. Reading the panel rather than Home Assistant is what makes that a proof
+rather than a coincidence.
+
+Prefer a dimmable light for this if the operator has one. A 2×1 tile bound to a
+resource advertising `set_brightness` is a slider, and moving it exercises that
+action; a plain relay only ever produces `toggle`.
 
 ## 10. Report
 
