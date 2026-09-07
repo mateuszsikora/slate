@@ -23,25 +23,41 @@ esptool.py --chip esp32s3 write_flash \
   0x20000 slate-{{VERSION}}.bin
 ```
 
-On a panel that is **already running Slate**, only the application image is
-needed and no cable is:
+A panel that is **already running Slate** needs neither of those, and normally
+needs nothing at all: it checks once a day against the manifest published beside
+the installer page above, and what it finds waits in the editor's **Firmware
+updates** panel until somebody presses *Install*; *Check now* beside it is how a
+panel is shown this release today rather than at tomorrow's check. Nothing is
+downloaded by either, and a wall panel does not get to reboot itself in the
+middle of an evening. It verifies the SHA-256 the manifest names before it makes
+the image bootable, and the bootloader returns to the previous version on its
+own if the new one does not come back.
 
-```
-SLATE_TOKEN=<administrator session credential> tools/ota/upload.sh <address> slate-{{VERSION}}.bin
-```
+That *Install* button is the whole upgrade, and it needs neither this page nor a
+clone of the repository. Driving the same thing from a script — look at the
+channel now, wait for the offer to arrive, install it by name — is three
+endpoints, written out with their refusals in
+[`docs/API.md`](https://github.com/{{REPO}}/blob/v{{VERSION}}/docs/API.md#firmware-updates)
+at the tag this image was built from.
 
-That path keeps the dashboard, authentication settings, External API keys and
-WiFi credentials, which live outside the application partitions. A full flash
-keeps them too unless the flash is erased first — the browser installer offers
-that as a checkbox and says what it costs.
+`slate-{{VERSION}}.bin` on this page is for what that channel does not cover: a
+panel with no route to the internet, or a return to this version after a later
+one has replaced it on the installer page. It goes to the panel over
+[`POST /ota/upload`](https://github.com/{{REPO}}/blob/v{{VERSION}}/docs/API.md#post-otaupload),
+which has no manifest, no signature and no HTTPS behind it and is not meant to —
+it is a LAN mechanism between a desk and a wall, behind the same
+[administrator session credential](https://github.com/{{REPO}}/blob/v{{VERSION}}/docs/API.md#base-and-authentication)
+every other write on this panel needs. From a clone of that same tree,
+`SLATE_TOKEN=<that credential> tools/ota/upload.sh <address>
+slate-{{VERSION}}.bin` is the same request with the checks worth having around
+it: it refuses an image built for another chip before a megabyte goes over WiFi,
+and waits for the panel to come back and report the version it was sent.
 
-Neither command is how most panels will get this release. A panel already running
-Slate checks once a day against the manifest published beside the installer page
-above, and what it finds waits in the editor's **Firmware updates** panel until
-somebody presses *Install* — nothing is downloaded by the check, and a wall panel
-does not get to reboot itself in the middle of an evening. It verifies the
-SHA-256 the manifest names before it makes the image bootable, and the bootloader
-returns to the previous version on its own if the new one does not come back.
+Nothing here takes the dashboard, authentication settings, External API keys or
+WiFi credentials with it: they live outside the application partitions and
+survive every path above. Erasing the flash first is the one thing that does
+take them — the browser installer offers that as a checkbox and says what it
+costs.
 
 ## Verify
 
