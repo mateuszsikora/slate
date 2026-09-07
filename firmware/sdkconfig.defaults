@@ -139,10 +139,14 @@ CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 # order of magnitude is what would need checking, not this.
 #
 # The other is that LWIP_MAX_ACTIVE_TCP stays at 16 and is deliberately not
-# raised alongside. Three of the sockets that emptied the table are not TCP
-# connections at all — the server's control pair is UDP, and so is the captive
-# responder — and the ones that are, the seven connections and the handful of
-# outbound clients, fit inside 16 with room.
+# raised alongside. Four of the sockets that emptied the table are not active TCP
+# connections at all: the server's control pair and the captive responder are
+# UDP, and its listener draws on LWIP_MAX_LISTENING_TCP, which is a pool of its
+# own (MEMP_NUM_TCP_PCB_LISTEN, not MEMP_NUM_TCP_PCB). What is left — the seven
+# connections and the handful of outbound clients — fits inside 16 with room, and
+# the keep-alive named above lowers that pressure rather than raising it: an
+# expired keepalive aborts the connection with a reset rather than parking it in
+# TIME_WAIT, so the socket and the control block come back together.
 #
 # What the ten extra sockets cost, measured on the panel rather than added up:
 # the boot report's free internal heap moved from 250 255 B to 249 655 B, the
