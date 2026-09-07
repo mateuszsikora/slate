@@ -42,16 +42,16 @@ want to ask.
 | Input | Name it goes under | Where it comes from |
 |-------|--------------------|---------------------|
 | Serial port | — | detected, phase 1 |
-| WiFi SSID | — | confirmed with the operator, and visible to the panel in `GET /wifi/scan` |
-| WiFi passphrase | — | **ask.** It is not on the host in a form you should read |
-| Administrator PIN | — | ask, or generate 4–12 digits and report it in phase 10 |
+| WiFi SSID | `SSID` | ask; `GET /wifi/scan` is what the panel can see |
+| WiFi passphrase | `WIFI_PASS` | **ask.** It is not on the host in a form you should read |
+| Administrator PIN | `ADMIN_PIN` | ask, or generate 4–12 digits and report it in phase 10 |
 | Panel session credential | `SLATE_TOKEN` | `POST /session`, phase 5 |
-| Home Assistant URL | `HA_URL` | `GET /ha/discover` — which needs the phase 5 session — or ask. No trailing slash |
+| Home Assistant URL | `HA_URL` | `GET /ha/discover` (needs phase 5), or ask. No trailing slash |
 | Home Assistant token | `HA_TOKEN` | given, and see [Rules](#rules) about where it may live |
 | Which light, which sensor | — | phase 7 — **ask when more than one matches** |
 | Timezone | — | the host's, e.g. `readlink /etc/localtime`; confirm it |
 
-The three exported names are the ones every command below assumes, and
+Those six exported names are the ones every command below assumes, and
 `SLATE_TOKEN` is already the repository's convention in `CONFIGURATION.md` and
 `tools/ota/upload.sh`.
 
@@ -366,9 +366,11 @@ heredoc, so that a value containing a quote or a backslash produces valid JSON
 instead of `400 invalid_json`.
 
 `HA_URL` and `HA_TOKEN` are the operator's two Home Assistant inputs, exported
-under those names. A trailing slash on `HA_URL` is harmless here — the panel
-normalises it and `GET /ha` reads it back without one — but it matters in
-phase 7, where it would produce `//api/states`.
+under those names. A trailing slash on `HA_URL` is harmless to the panel's own
+connection, which strips it when it builds the WebSocket URI — but `GET /ha`
+reads back exactly what was sent, slash and all. Strip it yourself, especially
+when the URL came from `GET /ha` rather than from the operator, before phase 7
+turns it into `//api/states`.
 
 **Done when** this answers `204`, which the panel sends only after testing the
 credentials against the instance — existing working credentials survive a failed
@@ -439,11 +441,25 @@ worse outcome than a question.
 
 ## 8. Publish the dashboard
 
+**Find out what you would be replacing, before you write anything.** `PUT`
+replaces the document whole — it does not merge — so read what is there first:
+
+```bash
+curl -sS --config <(printf 'header = "Authorization: Bearer %s"\n' "$SLATE_TOKEN") \
+     http://192.168.1.42/api/v1/config -o current-dashboard.json -w '%{http_code}\n'
+```
+
+A `404 not_found` means the panel has no dashboard and this phase is a first
+publication. Anything else is a document somebody already has on their wall.
+Show the operator what is in it and ask before overwriting it, and keep that
+file either way — it is the only copy that exists.
+
 The grid is 4 columns × 3 rows below a fixed system bar, `pos` is
 `[column, row]` zero-based from the top left, and `size` is one of five
 rectangles. A `light` at 2×1 renders a brightness slider; a `sensor` at 2×1
 renders the value with an icon chosen from the entity's own device class. That
-is the dashboard the request above asks for:
+is the dashboard the request above asks for, and the commands below assume you
+have written it to `dashboard.json`:
 
 ```json
 {
@@ -469,13 +485,6 @@ is the dashboard the request above asks for:
   ]
 }
 ```
-
-**Read `GET /config` before you write one.** A `404 not_found` means the panel
-has no dashboard and this phase is a first publication. Anything else is a
-document somebody already has on their wall, and `PUT` replaces it whole — it
-does not merge. Show the operator what is there and ask before overwriting it,
-and keep the response you read as a backup either way, because it is the only
-copy that exists.
 
 `theme` must be an id the running firmware carries — `GET /info` lists them
 rather than leaving you to assume `midnight` exists. `settings.timezone` is an
