@@ -394,6 +394,11 @@ alone carries the entity ids and the attributes the filters below need. Skipping
 phase 6 because Home Assistant is already configured is normal; it does not
 leave you without a way to choose entities.
 
+Those two filters assume `jq`, which is the only tool this runbook needs that
+neither ESP-IDF nor macOS brings; check for it before relying on the commands as
+written, and reach for `python3 -c` if it is absent rather than treating its
+absence as a blocker.
+
 Only five Home Assistant domains can be bound at all — `light`, `cover`,
 `sensor`, `binary_sensor`, `scene` — so filtering by domain is not a
 convenience, it is the constraint. A `climate` entity reporting a temperature is
