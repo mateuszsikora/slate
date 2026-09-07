@@ -32,7 +32,8 @@ is required by the other, and nothing outside the local network is involved.
 - [Building a dashboard](#building-a-dashboard) · [Providers](#providers) ·
   [Updating](#updating) · [Security](#security)
 - [Configuration reference](docs/CONFIGURATION.md) ·
-  [Device API reference](docs/API.md) · [Design document](docs/DESIGN.md)
+  [Device API reference](docs/API.md) · [Design document](docs/DESIGN.md) ·
+  [Agent setup runbook](docs/agent-setup.md)
 
 ## Project status
 
@@ -77,9 +78,11 @@ board below.
 - **A Waveshare ESP32-S3-Touch-LCD-7 carrying the ESP32-S3-WROOM-1-N16R8
   module** — 16 MB of flash and 8 MB of PSRAM. The partition table in
   `firmware/partitions.csv` is drawn for 16 MB and does not fit a board with
-  8 MB; check the marking on the module before flashing, because the vendor
-  documentation for this board describes an N8R8 that at least some units are
-  not.
+  8 MB; check before flashing, because the vendor documentation for this board
+  describes an N8R8 that at least some units are not. The marking on the module
+  says which one you have, and so does `esptool.py --port <port> flash_id` with
+  the board plugged in — which is the check to use when nobody is looking at the
+  board.
 - **Power: about 1 A at 5 V**, from a supply and a cable that can actually
   deliver it. A thin cable on a long run browns out the backlight before
   anything reports an error. Mounting and power are the parts that are harder to
@@ -117,6 +120,18 @@ and the `.elf` and `.map` that a crash report from that image is read against.
 Building takes ESP-IDF and two asset generators, and is described in
 [Building from source](#building-from-source) at the end of this file. It is
 also the only path today, since nothing has been tagged yet.
+
+### By asking a coding agent
+
+Every step from here to a dashboard on the wall is an API call, so all of it can
+be handed to an agent instead: *the board is plugged into USB, here is the
+repository and a token for my Home Assistant, set me up a dashboard with a light
+and a temperature on it.*
+[`docs/agent-setup.md`](docs/agent-setup.md) is the runbook that request lands
+in — the phases in order, the condition that ends each one, what the agent must
+ask you rather than guess, and the two places it needs your permission before
+acting. Worth reading first if you intend to use it, because one of those places
+is your own machine's WiFi.
 
 ## First run
 
@@ -461,6 +476,9 @@ Anything that gets fitted here joins the list.
   — a question about using Slate rather than a defect in it: whether it works
   on your board, how to bind something, why the panel raised its access point
   again. Answers are best-effort, and the marked one stays findable.
+- [`docs/agent-setup.md`](docs/agent-setup.md) — this file's install and first
+  run as a runbook for a coding agent doing the whole setup for you, from the
+  cable to a published dashboard.
 - [`docs/agent-workflow.md`](docs/agent-workflow.md) — the same ground for a
   coding agent working the milestone backlog, and only for one: claiming issues,
   the `in-progress` label, milestone order.
