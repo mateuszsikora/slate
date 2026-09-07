@@ -99,6 +99,48 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_HTTPD_WS_SUPPORT=y
 CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 
+# --- Sockets (DESIGN.md §9.2, §9.4) ---
+# The default is 10, and setup mode wants every one of them before a browser has
+# opened its second connection: the HTTP server's listener, its control socket
+# and the seven connections HTTPD_DEFAULT_CONFIG() allows come to nine, the
+# captive DNS responder takes the tenth, and mDNS — which §4.3 requires on the
+# access point as well as the station — asks for more than there are.
+#
+# What that looks like on the panel is not a slow page. `accept()` returns
+# ENFILE, esp_http_server logs "error accepting new connection", and every
+# subsequent connection is refused for as long as the sockets stay taken:
+# measured at 0 of 100 probes answered while the host still held its DHCP lease
+# and still had the panel's AP MAC in its ARP table (#188).
+#
+# 20 covers both of the panel's shapes with room left over. Setup mode is the
+# nine above plus the responder plus mDNS on two interfaces, so fourteen; a
+# connected panel gives back the responder and takes SNTP, Home Assistant's
+# WebSocket and a release check that may be running while somebody uploads an
+# image, which is about the same. Neither has to be counted exactly for the panel
+# to stay reachable, and that is the point of the margin.
+#
+# The keep-alive that stops dropped clients from taking sockets with them is in
+# slate_api.c, next to the server they belong to.
+#
+# Two consequences the option's name does not give away. lwIP puts its
+# descriptors at the top of the range — LWIP_SOCKET_OFFSET is
+# `FD_SETSIZE - CONFIG_LWIP_MAX_SOCKETS` — so this moves the boundary from 54 to
+# 44 and it is everything that is *not* a socket, littlefs and the console
+# included, that has the smaller half. It is not close: raising this again by an
+# order of magnitude is what would need checking, not this.
+#
+# The other is that LWIP_MAX_ACTIVE_TCP stays at 16 and is deliberately not
+# raised alongside. The users that made the table run out are UDP — the captive
+# responder, mDNS, SNTP — and they cost a socket each without touching a TCP
+# control block; the server's own seven connections and the handful of outbound
+# clients fit inside 16 with room.
+#
+# What the ten extra sockets cost, measured on the panel rather than added up:
+# the boot report's free internal heap moved from 250 255 B to 249 655 B, the
+# station-up line from 78 775 B to 78 191 B and the APSTA line from 83 571 B to
+# 82 971 B. About 600 B, which §6.2's budget carries without noticing.
+CONFIG_LWIP_MAX_SOCKETS=20
+
 # --- Home Assistant WebSocket client (DESIGN.md §5.5, issue #16) ---
 # The manual fallback may point at an HTTPS Home Assistant URL. Verify public
 # certificates against the same compact common-roots bundle S-3 measured;

@@ -1158,6 +1158,27 @@ esp_err_t slate_api_init(void)
     config.lru_purge_enable = true;
     config.uri_match_fn = httpd_uri_match_wildcard;
 
+    /*
+     * A client of this server disappearing without closing its connection is not
+     * an edge case on this device, it is §9.3: "at the instant the station
+     * associates the access point moves and drops every client attached to it",
+     * the browser that submitted the form included. Nothing arrives from the
+     * other end after that — no FIN, no reset — so without this the socket stays
+     * ESTABLISHED for as long as the panel is powered.
+     *
+     * lru_purge_enable above recycles those, but only once the server's own seven
+     * are all taken, and only if accept() got that far: what #188 measured on the
+     * panel was accept() failing with ENFILE against a socket table other users
+     * had emptied, after which the setup page never loaded again. Keep-alive is
+     * the half of the answer that gives a socket back without waiting for the
+     * connection that needs it. ~25 s to notice: longer than a phone changing
+     * channel, shorter than somebody deciding the panel is broken.
+     */
+    config.keep_alive_enable = true;
+    config.keep_alive_idle = 10;
+    config.keep_alive_interval = 5;
+    config.keep_alive_count = 3;
+
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
         s_server = NULL;
