@@ -1100,24 +1100,49 @@ static size_t format_status_json(char *out, size_t out_size)
     }
 
     /*
-     * `direct` is read out of the store rather than stated here, which is what
-     * makes §5.4's distinction visible to a client: the provider is `degraded`
-     * while it can accept state with no action consumer attached and `online`
-     * while one is. Attaching therefore changes this frame, and that change is
-     * the acknowledgement §4.2 does not spell a frame for.
+     * Every registered provider, read out of the store rather than named here.
+     * That is what makes §5.4's distinction visible to a client — `direct` is
+     * `degraded` while it can accept state with no action consumer attached and
+     * `online` while one is, so attaching changes this frame, and that change is
+     * the acknowledgement §4.2 does not spell a frame for. It is also what keeps
+     * a third adapter from being invisible: this object listed two ids as
+     * literals while `shelly` was already serving bindings behind it.
      *
-     * `ha` keeps its stand-in until M3 registers the real one. §5.1 makes it a
-     * provider that is always present and `unconfigured` until it has
-     * credentials, so dropping the entry until its adapter exists would report
-     * something less true than this does.
+     * §5.1's guarantee is kept the other way round: `ha` is always present, so
+     * an unregistered one is emitted as `unconfigured` rather than dropped.
      */
+    char providers[SLATE_STATE_MAX_PROVIDERS * (SLATE_PROVIDER_ID_MAX + 24) + 2];
+    size_t used = 0;
+    bool present_ha = false;
+    for (size_t i = 0; i < slate_state_provider_count(); i++) {
+        slate_state_provider_info_t info;
+        if (slate_state_provider_at(i, &info) != ESP_OK) {
+            continue;
+        }
+        present_ha = present_ha || strcmp(info.id, "ha") == 0;
+        int written = snprintf(providers + used, sizeof(providers) - used, "%s\"%s\":\"%s\"",
+                               used == 0 ? "" : ",", info.id,
+                               slate_provider_status_str(info.status));
+        if (written <= 0 || (size_t) written >= sizeof(providers) - used) {
+            return 0;
+        }
+        used += (size_t) written;
+    }
+    if (!present_ha) {
+        int written = snprintf(providers + used, sizeof(providers) - used, "%s\"ha\":\"%s\"",
+                               used == 0 ? "" : ",",
+                               slate_provider_status_str(SLATE_PROVIDER_UNCONFIGURED));
+        if (written <= 0 || (size_t) written >= sizeof(providers) - used) {
+            return 0;
+        }
+        used += (size_t) written;
+    }
+
     int len = snprintf(out, out_size,
-                       "{\"type\":\"status\",\"providers\":{\"direct\":\"%s\","
-                       "\"ha\":\"%s\"},\"wifi\":%s,"
+                       "{\"type\":\"status\",\"providers\":{%s},\"wifi\":%s,"
                        "\"heap_free\":%u,\"lvgl_heap_free\":%s,\"lvgl_frag_pct\":%s}",
-                       slate_provider_status_str(slate_state_provider_status("direct")),
-                       slate_provider_status_str(slate_state_provider_status("ha")),
-                       wifi_value, (unsigned) esp_get_free_heap_size(), lvgl_free, lvgl_frag);
+                       providers, wifi_value, (unsigned) esp_get_free_heap_size(), lvgl_free,
+                       lvgl_frag);
     return len > 0 && (size_t) len < out_size ? (size_t) len : 0;
 }
 
