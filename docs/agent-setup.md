@@ -619,6 +619,11 @@ vocabulary either way.
 plausible `state` — a `power` of `on` or `off` for the light, a number and a
 unit for the sensor.
 
+Check both, and on the Shelly path read the status rather than glancing at it:
+`degraded` means some relay is not answering and names no name, `error` means
+none of them ever did — which is an address that reaches nothing, not a panel
+fault. Neither is a setup you should report as finished.
+
 Give it a few seconds before believing an empty answer. The `204` means the
 screen and the subscriptions were swapped; it does not mean the upstream has
 answered yet, and a `/resources` read in the same breath as the `PUT` can come

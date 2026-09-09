@@ -185,9 +185,19 @@ The three ids version 1 carries:
 `status` is `unconfigured`, `connecting`, `online`, `degraded`, `offline` or
 `error`. `degraded` means a provider can still serve part of its contract
 without staling its resources — the direct provider is `degraded` while it can
-accept state but has no WebSocket consumer attached to answer actions. `shelly`
-is `unconfigured` until a dashboard binds a device to it, because a panel whose
-dashboard names no Shelly has no Shelly integration to report on.
+accept state but has no WebSocket consumer attached to answer actions.
+
+`shelly` uses the vocabulary to say how many of its relays it is actually
+reaching, which is the question a dashboard of addresses raises:
+
+| `status` | Means |
+|----------|-------|
+| `unconfigured` | no dashboard binds a Shelly; there is no integration to report on |
+| `connecting` | bound, but no device has been asked yet |
+| `online` | every bound device answered the last time it was asked |
+| `degraded` | some did — the rest keep their last values |
+| `offline` | none answer now, though some have; the station or the relays went away |
+| `error` | nothing has ever answered. Usually an address that reaches no device |
 
 > `DESIGN.md` §4.1 also specifies a standalone `GET /providers` carrying the
 > same entries without the device health around them. This firmware does not

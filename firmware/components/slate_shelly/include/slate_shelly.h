@@ -35,9 +35,11 @@
  *
  * `switch:0` is a switch on both a Plus 2PM and a Shelly 1; which HTTP dialect
  * says so is discovered, not configured. `GET /shelly` answers on both and
- * carries `gen` only on the newer one, so the adapter probes once per host and
- * then uses `/rpc/Switch.*` or `/relay/N` accordingly. Nobody writing a
- * dashboard should have to know which generation is in which ceiling.
+ * carries `gen` only on the newer one, so the adapter probes a host and then
+ * uses `/rpc/Switch.*` or `/relay/N` accordingly, probing again whenever that
+ * host stops answering — a relay swapped for a newer model keeps the binding
+ * and changes the dialect. Nobody writing a dashboard should have to know which
+ * generation is in which ceiling.
  *
  * ## What it does not do
  *
@@ -86,13 +88,22 @@ esp_err_t slate_shelly_start(void);
 #ifdef SLATE_SHELLY_SELFTEST
 
 /**
- * @brief Exercise the id parser and both generation mappings against fixtures.
+ * @brief Exercise the id parser, both generation mappings, and the handover.
  *
- * Built only with `-DSLATE_SHELLY_SELFTEST=1`. These three functions are where
- * a Shelly's own vocabulary becomes §5.2's, and a mistake in them is a wrong
- * number on a wall rather than a crash — nothing else in the build would
- * notice. They are pure over their inputs, so this needs no device and no
- * network. ESP_FAIL if any case failed.
+ * Built only with `-DSLATE_SHELLY_SELFTEST=1`. It needs no device and no
+ * network, but it is **not** free of side effects and is not pure over its
+ * inputs: it takes the bind lock, drives four binding sets through
+ * `subscribe()` and the poller's adoption of them, publishes one snapshot the
+ * store is expected to refuse, and moves this provider's status. Call it after
+ * slate_state_init() and slate_shelly_init(), and before slate_shelly_start()
+ * so the poller is not competing for the tables. It restores the empty binding
+ * set it found. ESP_FAIL if any case failed.
+ *
+ * The parser and the two mappings are where a Shelly's own vocabulary becomes
+ * §5.2's, so a mistake in them is a wrong number on a wall rather than a crash
+ * — nothing else in the build would notice. The handover cases are here for the
+ * opposite reason: that code is what keeps a sweep off the UI task, and it has
+ * no observable surface at all until it fails.
  */
 esp_err_t slate_shelly_selftest(void);
 

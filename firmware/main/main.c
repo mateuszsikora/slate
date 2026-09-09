@@ -601,9 +601,10 @@ static void start_api(void)
      * binding should resolve to a provider with an honest status rather than to
      * §3.3's missing-provider placeholder — and starts its poller below, with
      * the other things that need the station. */
-    err = slate_shelly_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Shelly provider degraded: %s — continuing", esp_err_to_name(err));
+    esp_err_t shelly_err = slate_shelly_init();
+    if (shelly_err != ESP_OK) {
+        ESP_LOGE(TAG, "Shelly provider degraded: %s — continuing",
+                 esp_err_to_name(shelly_err));
     }
 
 #ifdef SLATE_HA_SELFTEST
@@ -615,7 +616,11 @@ static void start_api(void)
 #endif
 
 #ifdef SLATE_SHELLY_SELFTEST
-    slate_shelly_selftest();
+    /* It drives the real binding handover, so it needs the registration above
+     * to have happened — the same reason its neighbours are guarded. */
+    if (shelly_err == ESP_OK) {
+        slate_shelly_selftest();
+    }
 #endif
 
 #ifdef SLATE_WS_SELFTEST

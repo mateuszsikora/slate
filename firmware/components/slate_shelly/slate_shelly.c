@@ -22,6 +22,7 @@
 
 #include "slate_shelly.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -95,6 +96,10 @@ typedef struct {
     char host[HOST_MAX + 1];
     uint8_t generation; /**< 0 until `GET /shelly` has answered, then 1 or 2 */
     bool reachable;
+    /* Whether it has *ever* answered, which is a different question and decides
+     * a different status: a relay that answered and went quiet is a loss, while
+     * one that has never answered is usually an address nobody can reach. */
+    bool ever_reachable;
 } device_t;
 
 /*
@@ -152,6 +157,11 @@ static entry_t *s_pending_entries;
 static size_t s_pending_device_count;
 static size_t s_pending_entry_count;
 static bool s_pending_valid;
+
+/* Where the next sweep resumes, and whether every device has had one turn. Both
+ * belong to the poller and both reset when a new binding set is adopted. */
+static size_t s_cursor;
+static bool s_swept;
 
 static QueueHandle_t s_commands;
 static TaskHandle_t s_task;
@@ -422,6 +432,7 @@ static void poll_device(size_t device_index)
         goto unreachable;
     }
     device->reachable = true;
+    device->ever_reachable = true;
 
     for (size_t i = 0; i < s_entry_count; i++) {
         entry_t *entry = &s_entries[i];
@@ -524,6 +535,20 @@ static void run_command(const command_t *command)
 
 /* --- The one task --------------------------------------------------------- */
 
+/*
+ * A station and a binding set are not evidence that this provider is serving
+ * anything. Reporting `online` on the strength of those two alone made the
+ * worst configuration — every address wrong, nothing ever answered — look
+ * exactly like a working one, and `GET /resources` could not correct the
+ * impression, because a resource with no reading is one this adapter does not
+ * publish at all. §5.2's vocabulary already distinguishes these:
+ *
+ *   connecting   bound, network up, no device has had its first turn yet
+ *   online       every device answered the last time it was asked
+ *   degraded     some did — §5.2's "can still serve part of its contract"
+ *   offline      none do now, but some have; a loss, and it stales the tiles
+ *   error        none ever has, which is a person's problem to go and look at
+ */
 static void update_status(void)
 {
     slate_provider_status_t status;
@@ -531,8 +556,24 @@ static void update_status(void)
         status = SLATE_PROVIDER_UNCONFIGURED;
     } else if (!s_network_up) {
         status = SLATE_PROVIDER_OFFLINE;
+    } else if (!s_swept) {
+        status = SLATE_PROVIDER_CONNECTING;
     } else {
-        status = SLATE_PROVIDER_ONLINE;
+        size_t reachable = 0;
+        size_t ever = 0;
+        for (size_t i = 0; i < s_device_count; i++) {
+            reachable += s_devices[i].reachable ? 1 : 0;
+            ever += s_devices[i].ever_reachable ? 1 : 0;
+        }
+        if (reachable == s_device_count) {
+            status = SLATE_PROVIDER_ONLINE;
+        } else if (reachable > 0) {
+            status = SLATE_PROVIDER_DEGRADED;
+        } else if (ever > 0) {
+            status = SLATE_PROVIDER_OFFLINE;
+        } else {
+            status = SLATE_PROVIDER_ERROR;
+        }
     }
     slate_state_provider_set_status(SLATE_SHELLY_PROVIDER_ID, status);
 }
@@ -556,6 +597,49 @@ static bool adopt_pending(void)
     if (!pending) {
         return false;
     }
+
+    /*
+     * Carry across what this adapter already knows about hosts and resources
+     * the rebuild did not change. The tables arrive zeroed, and adopting them
+     * as-is threw that away — which was not merely wasteful, because
+     * `slate_state_bind()` deliberately carries `available` and the last value
+     * across a rebuild too ("Carry the last known value across the rebuild").
+     * A resource whose `ever_read` had just been reset publishes nothing when
+     * its device stops answering, so the store kept a carried `available: true`
+     * and the tile showed a live reading for an unplugged relay, permanently.
+     *
+     * The other two are cheaper but real: a rediscovered generation costs an
+     * extra `GET /shelly` per host on every republish, and a reset `s_swept`
+     * drops the provider to `connecting` for a whole sweep even when no Shelly
+     * binding moved.
+     */
+    bool new_device = false;
+    for (size_t d = 0; d < device_count; d++) {
+        const device_t *previous = NULL;
+        for (size_t o = 0; o < s_device_count; o++) {
+            if (strcmp(s_devices[o].host, devices[d].host) == 0) {
+                previous = &s_devices[o];
+                break;
+            }
+        }
+        if (previous == NULL) {
+            new_device = true;
+            continue;
+        }
+        devices[d].generation = previous->generation;
+        devices[d].reachable = previous->reachable;
+        devices[d].ever_reachable = previous->ever_reachable;
+    }
+    for (size_t e = 0; e < entry_count; e++) {
+        for (size_t o = 0; o < s_entry_count; o++) {
+            if (strcmp(s_entries[o].id, entries[e].id) == 0) {
+                entries[e].ever_read = s_entries[o].ever_read;
+                entries[e].last = s_entries[o].last;
+                break;
+            }
+        }
+    }
+
     free(s_devices);
     free(s_entries);
     s_devices = devices;
@@ -563,22 +647,42 @@ static bool adopt_pending(void)
     s_device_count = device_count;
     s_entry_count = entry_count;
     s_has_bindings = entry_count > 0;
+    s_cursor = 0;
+    if (new_device) {
+        /* Only a host nobody has asked yet makes the status a question again. */
+        s_swept = false;
+    }
     ESP_LOGI(TAG, "%u resources on %u devices", (unsigned)s_entry_count,
              (unsigned)s_device_count);
     update_status();
     return true;
 }
 
+/*
+ * The cursor is what makes abandoning a sweep safe. Restarting at the first
+ * device every time meant the last one was only ever read when nobody happened
+ * to be tapping — somebody adjusting six lights every couple of seconds would
+ * refresh device 0 on every pass and device 5 almost never, with the tiles at
+ * the end of the list frozen until the tapping stopped. Resuming where the
+ * previous pass stopped turns "read every device" into a promise the code
+ * keeps, rather than one a comment made.
+ */
 static void sweep(void)
 {
-    for (size_t i = 0; i < s_device_count; i++) {
+    if (s_device_count == 0) {
+        return;
+    }
+    for (size_t n = 0; n < s_device_count; n++) {
         /* A tap is waiting and §5.3 gives it three seconds. Finishing the sweep
-         * first would spend them on devices nobody is looking at; the ones
-         * skipped here are read on the next pass, five seconds later. */
+         * first would spend them on devices nobody is looking at. */
         if (uxQueueMessagesWaiting(s_commands) > 0) {
             break;
         }
-        poll_device(i);
+        poll_device(s_cursor % s_device_count);
+        s_cursor++;
+    }
+    if (s_cursor >= s_device_count) {
+        s_swept = true; /* every device has had at least one turn */
     }
 }
 
@@ -607,10 +711,13 @@ static void poller_task(void *arg)
             continue; /* drain the queue before spending time on a sweep */
         }
 
-        update_status();
         if (s_entry_count > 0 && s_network_up) {
             sweep();
         }
+        /* After the sweep, not before it: the status is a statement about what
+         * the devices just said, and reporting it first would always describe
+         * the previous pass. */
+        update_status();
         /* Measured from the end of the sweep, not from the last wake, so a busy
          * few seconds of tapping cannot starve the sweep or make it run back to
          * back once the tapping stops. */
@@ -851,6 +958,11 @@ esp_err_t slate_shelly_selftest(void)
         ESP_LOGI(TAG, "selftest: %-48s %s", name, passed_ ? "PASS" : "FAIL"); \
     } while (0)
 
+    /* The fixture values round-trip exactly through strtod today, so `==` would
+     * pass — but the first fixture value without an exact binary representation
+     * would fail for a reason that has nothing to do with this adapter. */
+#define NEAR(actual, expected) (fabs((actual) - (expected)) < 1e-9)
+
     char host[HOST_MAX + 1];
     role_t role;
     uint8_t index;
@@ -902,15 +1014,15 @@ esp_err_t slate_shelly_selftest(void)
     entry.index = 0;
     entry.role = ROLE_POWER;
     CHECK(read_gen2(&entry, gen2) && entry.last.sensor.numeric &&
-              entry.last.sensor.value == 3.2 &&
+              NEAR(entry.last.sensor.value, 3.2) &&
               entry.last.sensor.measurement == SLATE_MEASUREMENT_POWER,
           "Gen2 power carries watts and its measurement");
     entry.role = ROLE_VOLTAGE;
-    CHECK(read_gen2(&entry, gen2) && entry.last.sensor.value == 242.9 &&
+    CHECK(read_gen2(&entry, gen2) && NEAR(entry.last.sensor.value, 242.9) &&
               entry.last.sensor.category == SLATE_CATEGORY_POWER,
           "Gen2 voltage carries volts and a category, not a measurement");
     entry.role = ROLE_TEMPERATURE;
-    CHECK(read_gen2(&entry, gen2) && entry.last.sensor.value == 41.6 &&
+    CHECK(read_gen2(&entry, gen2) && NEAR(entry.last.sensor.value, 41.6) &&
               entry.last.sensor.measurement == SLATE_MEASUREMENT_TEMPERATURE,
           "Gen2 temperature is the channel's own tC");
     entry.index = 3;
@@ -928,7 +1040,7 @@ esp_err_t slate_shelly_selftest(void)
     CHECK(read_gen1(&entry, gen1) && entry.last.light.on, "Gen1 relay reads on");
     entry.role = ROLE_POWER;
     CHECK(read_gen1(&entry, gen1) && entry.last.sensor.numeric &&
-              entry.last.sensor.value == 0.0,
+              NEAR(entry.last.sensor.value, 0.0),
           "Gen1 meter reads zero watts as a value, not as absent");
     entry.role = ROLE_VOLTAGE;
     CHECK(!read_gen1(&entry, gen1), "Gen1 measures no voltage");
@@ -939,16 +1051,78 @@ esp_err_t slate_shelly_selftest(void)
     CHECK(!read_gen1(&entry, gen1), "a second relay a one-channel device does not have");
     cJSON_Delete(gen1);
 
-    /* §5.2 has no "no value": a sensor that has never been read has nothing
-     * publishable, and publishing the zeroed struct would be refused on every
-     * sweep. This is the invariant publish_entry() rests on. */
+    /*
+     * The invariant `publish_entry()`'s early return rests on, asked of the
+     * store rather than of the zeroed struct. `state_is_valid()` runs before
+     * the binding lookup, so the refusal does not depend on anything being
+     * bound — and this fails if somebody removes the `ever_read` guard, which
+     * is the regression worth catching.
+     */
     entry_t never = {0};
-    never.role = ROLE_POWER;
-    slate_snapshot_t empty = {.resource = "x", .kind = SLATE_KIND_SENSOR,
-                              .available = false, .state = never.last};
-    CHECK(!empty.state.sensor.numeric && empty.state.sensor.text[0] == '\0',
-          "a never-read sensor holds nothing §5.2 would accept");
+    const slate_snapshot_t empty = {.resource = "never-read",
+                                    .kind = SLATE_KIND_SENSOR,
+                                    .available = false,
+                                    .state = never.last};
+    CHECK(slate_state_publish(SLATE_SHELLY_PROVIDER_ID, &empty) == ESP_ERR_INVALID_ARG,
+          "the store refuses a never-read sensor, so publish_entry skips it");
 
+    /*
+     * The handover, which is the newest code here and the one that fixes the
+     * worst bug. It needs no network and no device: `subscribe()` runs on the
+     * caller's task by design, and at this point in startup `s_commands` is
+     * still NULL, so the wake-up poke is a no-op rather than a queue write.
+     */
+    static const char *const THREE[] = {"192.0.2.11/switch:0", "192.0.2.11/power:0",
+                                        "192.0.2.12/switch:0"};
+    CHECK(subscribe(NULL, THREE, 3) == ESP_OK && adopt_pending() && s_entry_count == 3 &&
+              s_device_count == 2,
+          "three resources on two hosts, deduplicated by host");
+    /* Guarded rather than trusting the check above: CHECK does not short-circuit
+     * between cases, so an allocation failure there would crash here instead of
+     * reporting a failure. */
+    CHECK(s_entries != NULL && s_entry_count == 3 && s_entries[0].device == 0 &&
+              s_entries[1].device == 0 && s_entries[2].device == 1,
+          "each entry points at the device its host created");
+    CHECK(!adopt_pending(), "a second adopt with nothing pending is a no-op");
+
+    CHECK(subscribe(NULL, THREE, 1) == ESP_OK && subscribe(NULL, THREE, 2) == ESP_OK &&
+              adopt_pending() && s_entry_count == 2 && s_device_count == 1,
+          "a set the poller never adopted is replaced, not queued behind it");
+
+    static const char *const JUNK[] = {"nonsense", "192.0.2.11/switch:0"};
+    CHECK(subscribe(NULL, JUNK, 2) == ESP_OK && adopt_pending() && s_entry_count == 1,
+          "an unparseable id is dropped and the rest of the set survives");
+
+    /*
+     * The carry-over, which is the one the store cannot correct for us:
+     * `slate_state_bind()` keeps `available` across a rebuild, so an entry whose
+     * `ever_read` was reset publishes nothing when its device goes quiet and the
+     * tile keeps a live reading for an unplugged relay.
+     */
+    CHECK(subscribe(NULL, THREE, 3) == ESP_OK && adopt_pending() && s_device_count == 2,
+          "a set to learn something about");
+    s_devices[0].generation = 2;
+    s_devices[0].reachable = true;
+    s_devices[0].ever_reachable = true;
+    s_entries[0].ever_read = true;
+    s_entries[0].last.light.on = true;
+    s_swept = true;
+    CHECK(subscribe(NULL, THREE, 3) == ESP_OK && adopt_pending() &&
+              s_devices[0].generation == 2 && s_devices[0].reachable &&
+              s_devices[0].ever_reachable && s_entries[0].ever_read &&
+              s_entries[0].last.light.on,
+          "republishing the same set keeps what was learned about its hosts");
+    CHECK(s_swept, "and does not drop the provider back to connecting");
+
+    static const char *const ELSEWHERE[] = {"192.0.2.13/switch:0"};
+    CHECK(subscribe(NULL, ELSEWHERE, 1) == ESP_OK && adopt_pending() && !s_swept,
+          "a host nobody has asked yet does make the status a question again");
+
+    CHECK(subscribe(NULL, NULL, 0) == ESP_OK && adopt_pending() && s_entry_count == 0 &&
+              s_device_count == 0 && s_devices == NULL && s_entries == NULL,
+          "count zero releases the tables, per §5.1's unsubscribe");
+
+#undef NEAR
 #undef CHECK
     ESP_LOGI(TAG, "selftest: %d failure(s)", failures);
     return failures == 0 ? ESP_OK : ESP_FAIL;
