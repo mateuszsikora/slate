@@ -272,6 +272,7 @@ A binding is always a provider and a resource:
 {"provider": "direct", "resource": "living-room"}
 {"provider": "ha", "resource": "light.living_room"}
 {"provider": "shelly", "resource": "192.168.1.51/switch:0"}
+{"provider": "onkyo", "resource": "192.168.1.60/main"}
 ```
 
 Both are opaque strings and are compared as strings. `light.living_room` means
@@ -437,6 +438,38 @@ choice is not the one you want, or when the entity's class is not in the table:
  "binding": {"provider": "ha", "resource": "binary_sensor.cellar_hatch"},
  "label": "Cellar hatch", "icon": "garage"}
 ```
+
+### Which Onkyo roles can be bound
+
+Like `shelly`, the `onkyo` provider has no configuration of its own — the
+binding is how the panel learns a receiver exists. The grammar is `<host>/<role>`:
+
+```json
+{"id": "t1", "type": "light", "pos": [0, 0], "size": [2, 2],
+ "binding": {"provider": "onkyo", "resource": "192.168.1.60/main"},
+ "label": "Onkyo", "icon": "volume-high"}
+```
+
+| `role` | Component type | Is |
+|--------|----------------|----|
+| `main` | `light` | the receiver: on/off, and volume as brightness |
+| `input` | `sensor` | the selected input, by name |
+| `input:<code>` | `scene` | selects that input |
+| `mute` | `scene` | toggles mute |
+
+A receiver on a `light` tile is deliberate: the panel has four component types
+and none of them is an amplifier, and `light` is the one that renders a power
+state and one continuous level. Give it 2×2 and the slider is the volume
+control; give it `icon: volume-high` so the tile does not look like a lamp.
+
+`<code>` is the receiver's own two-hex-digit eISCP selector rather than a name —
+`2b` NET, `24` FM, `23` CD, `2e` Bluetooth, `20` TV/Tape — which is the same
+list its remote and its manual use. Five of them fit a 4×1 `scene` bar, which is
+the input selector a wall panel wants.
+
+A receiver that has not answered yet publishes nothing, so its tiles show the
+`provider:resource` placeholder until the first frame arrives; one that goes
+away renders stale with its last values.
 
 ## Themes
 

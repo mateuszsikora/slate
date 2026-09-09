@@ -16,6 +16,7 @@ where the two disagree. The document these endpoints carry is
 - [WebSocket](#websocket)
 - [The direct provider](#the-direct-provider)
 - [The Shelly provider](#the-shelly-provider)
+- [The Onkyo provider](#the-onkyo-provider)
 - [What is deliberately absent](#what-is-deliberately-absent)
 
 ## Base and authentication
@@ -165,7 +166,8 @@ WebSocket:
 {"providers": [
   {"id": "direct", "status": "degraded", "resource_count": 2},
   {"id": "ha", "status": "unconfigured", "resource_count": 0},
-  {"id": "shelly", "status": "online", "resource_count": 8}
+  {"id": "shelly", "status": "online", "resource_count": 8},
+  {"id": "onkyo", "status": "online", "resource_count": 4}
 ]}
 ```
 
@@ -174,13 +176,14 @@ rather than a fixed set — an adapter a later firmware adds appears here withou
 a change to this contract. `direct` and `ha` are always present, `ha` as
 `unconfigured` until it has credentials.
 
-The three ids version 1 carries:
+The four ids version 1 carries:
 
 | `id` | What it is |
 |------|------------|
 | `direct` | published to over `POST /direct/state`; needs a process outside the panel |
 | `ha` | one connection the panel opens to Home Assistant |
 | `shelly` | the panel polling Shelly relays on the LAN by itself; needs nothing else running |
+| `onkyo` | the panel holding a socket open to an eISCP receiver, which pushes its own changes |
 
 `status` is `unconfigured`, `connecting`, `online`, `degraded`, `offline` or
 `error`. `degraded` means a provider can still serve part of its contract
@@ -198,6 +201,11 @@ reaching, which is the question a dashboard of addresses raises:
 | `degraded` | some did — the rest keep their last values |
 | `offline` | none answer now, though some have; the station or the relays went away |
 | `error` | nothing has ever answered. Usually an address that reaches no device |
+
+`onkyo` uses the same five for the same reasons, reading them off its sockets:
+`connecting` while no receiver has answered yet, `online` when every bound one
+is connected and has, `degraded` when some are, `offline` when none are now
+though some have been.
 
 > `DESIGN.md` §4.1 also specifies a standalone `GET /providers` carrying the
 > same entries without the device health around them. This firmware does not
@@ -276,7 +284,8 @@ must not dim tiles fed by a script.
               "sta_ssid": "home", "ipv4": {"mode": "dhcp"}, "last_error": null},
   "providers": [{"id": "direct", "status": "degraded", "resource_count": 0},
                 {"id": "ha", "status": "unconfigured", "resource_count": 0},
-                {"id": "shelly", "status": "unconfigured", "resource_count": 0}],
+                {"id": "shelly", "status": "unconfigured", "resource_count": 0},
+                {"id": "onkyo", "status": "unconfigured", "resource_count": 0}],
   "rssi": -54, "uptime_s": 120, "heap_free": 294631,
   "lvgl_heap_free": null, "lvgl_heap_total": null, "lvgl_frag_pct": null,
   "reset_reason": "power_on", "reboot_count": 3,
@@ -546,7 +555,7 @@ Device → client:
 
 ```json
 {"type": "status",   "providers": {"direct": "online", "ha": "unconfigured",
-                                   "shelly": "online"},
+                                   "shelly": "online", "onkyo": "online"},
                      "wifi": -54, "heap_free": 142000,
                      "lvgl_heap_free": 2088632, "lvgl_frag_pct": 1}
 {"type": "log",      "level": "warn", "msg": "resource direct:living-room unavailable"}
@@ -696,6 +705,46 @@ does not blank the rest of the page.
 There is no authentication in this path. Shelly devices ship open on a LAN, and
 a panel that reaches one is a panel already on the same network as the relay it
 is switching.
+
+## The Onkyo provider
+
+`onkyo` drives an Onkyo or Integra receiver over eISCP, and it is the one
+provider the panel does not have to ask. The receiver pushes its own changes —
+somebody turning the volume knob on the front panel produces a frame — so a tile
+is current without polling for it.
+
+Configured the same way as `shelly`: the binding carries the address.
+
+```json
+{"id": "t1", "type": "light", "pos": [0, 0], "size": [2, 2],
+ "binding": {"provider": "onkyo", "resource": "192.168.1.60/main"},
+ "label": "Onkyo", "icon": "volume-high"}
+```
+
+| `role` | `kind` | Is |
+|--------|--------|----|
+| `main` | `light` | the receiver. `power` is its power; `brightness` is the volume. `toggle`, `set_power`, `set_brightness` |
+| `input` | `sensor` | the selected input, by name — `Net`, `FM`, `CD` |
+| `input:<code>` | `scene` | `activate` selects that input, powering the receiver on if needed |
+| `mute` | `scene` | `activate` toggles mute |
+
+`<code>` is eISCP's own two-hex-digit selector, not a name: `2b` is NET, `24` is
+FM, `23` is CD, `2e` is Bluetooth, `20` is TV/Tape. A receiver's own remote and
+manual use the same list, and the panel does not keep a vocabulary it does not
+own in step with the vendor's.
+
+**Volume is the percentage, one for one.** A TX-8270 reports `MVL56` — 86 — while
+its own `NRI` claims `volmax="82"`, so neither number is reliably the scale. The
+panel sends the percentage as the receiver's own volume value and lets the
+receiver clamp what it cannot do.
+
+Nothing is published for a receiver that has not answered yet, so its tiles keep
+the placeholder naming `provider:resource` until the first frame arrives — the
+same rule `shelly` follows, for the same reason. A receiver that goes away is
+published unavailable with its last values and renders stale.
+
+There is no authentication in eISCP, and none here. A receiver on the LAN
+answers whoever connects to it, which is equally true of its remote control.
 
 ## What is deliberately absent
 

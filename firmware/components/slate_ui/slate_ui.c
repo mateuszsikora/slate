@@ -493,6 +493,9 @@ static const char *provider_display_name(const slate_config_bar_item_t *item)
     if (strcmp(item->provider, "shelly") == 0) {
         return "Shelly";
     }
+    if (strcmp(item->provider, "onkyo") == 0) {
+        return "Onkyo";
+    }
     return item->provider;
 }
 
