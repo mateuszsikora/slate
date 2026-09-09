@@ -33,6 +33,7 @@
 #include "slate_config_api.h"
 #include "slate_control_api.h"
 #include "slate_direct.h"
+#include "slate_shelly.h"
 #include "slate_display.h"
 #include "slate_editor.h"
 #include "slate_ha.h"
@@ -498,6 +499,13 @@ static void start_network(void)
                  esp_err_to_name(err));
     }
 
+    /* Same station, same reason. The Shelly poller only ever talks to the LAN,
+     * so a router outage is the whole of its transport going away. */
+    err = slate_shelly_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Shelly poller unavailable: %s — continuing", esp_err_to_name(err));
+    }
+
     /*
      * §4.3's `slate-<mac6>.local`, before the adapter below queries the
      * responder it starts. Here rather than in start_api() because mDNS needs
@@ -586,6 +594,16 @@ static void start_api(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Home Assistant provider degraded: %s — continuing",
                  esp_err_to_name(err));
+    }
+
+    /* The first adapter that reaches a device without anything in the middle.
+     * It registers here for the same reason the two above do — a `shelly`
+     * binding should resolve to a provider with an honest status rather than to
+     * §3.3's missing-provider placeholder — and starts its poller below, with
+     * the other things that need the station. */
+    err = slate_shelly_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Shelly provider degraded: %s — continuing", esp_err_to_name(err));
     }
 
 #ifdef SLATE_HA_SELFTEST

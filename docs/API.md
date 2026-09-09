@@ -15,6 +15,7 @@ where the two disagree. The document these endpoints carry is
 - [Endpoints](#endpoints)
 - [WebSocket](#websocket)
 - [The direct provider](#the-direct-provider)
+- [The Shelly provider](#the-shelly-provider)
 - [What is deliberately absent](#what-is-deliberately-absent)
 
 ## Base and authentication
@@ -163,14 +164,30 @@ WebSocket:
 ```json
 {"providers": [
   {"id": "direct", "status": "degraded", "resource_count": 2},
-  {"id": "ha", "status": "unconfigured", "resource_count": 0}
+  {"id": "ha", "status": "unconfigured", "resource_count": 0},
+  {"id": "shelly", "status": "online", "resource_count": 8}
 ]}
 ```
+
+The list is every provider this firmware registered, in registration order,
+rather than a fixed set — an adapter a later firmware adds appears here without
+a change to this contract. `direct` and `ha` are always present, `ha` as
+`unconfigured` until it has credentials.
+
+The three ids version 1 carries:
+
+| `id` | What it is |
+|------|------------|
+| `direct` | published to over `POST /direct/state`; needs a process outside the panel |
+| `ha` | one connection the panel opens to Home Assistant |
+| `shelly` | the panel polling Shelly relays on the LAN by itself; needs nothing else running |
 
 `status` is `unconfigured`, `connecting`, `online`, `degraded`, `offline` or
 `error`. `degraded` means a provider can still serve part of its contract
 without staling its resources — the direct provider is `degraded` while it can
-accept state but has no WebSocket consumer attached to answer actions.
+accept state but has no WebSocket consumer attached to answer actions. `shelly`
+is `unconfigured` until a dashboard binds a device to it, because a panel whose
+dashboard names no Shelly has no Shelly integration to report on.
 
 > `DESIGN.md` §4.1 also specifies a standalone `GET /providers` carrying the
 > same entries without the device health around them. This firmware does not
@@ -179,8 +196,9 @@ accept state but has no WebSocket consumer attached to answer actions.
 
 `GET /resources?provider=<id>` returns `{"resources": [ … ]}` in the normalized
 vocabulary below. It is the bounded runtime store: Home Assistant contains only
-entities referenced by the active dashboard, and `direct` contains only bound
-resources published since boot. The editor obtains the full HA picker catalog
+entities referenced by the active dashboard, `direct` contains only bound
+resources published since boot, and `shelly` contains what the poller last read
+from the devices the dashboard names. The editor obtains the full HA picker catalog
 through `/ha/catalog`, assembles it in browser memory once, shares the cache
 between tile pickers and refreshes it in the background. Missing, unknown and
 unconfigured providers answer `400 provider_required`, `404 provider_not_found`
@@ -247,7 +265,8 @@ must not dim tiles fed by a script.
   "network": {"mode": "sta", "ssid": "home", "ip": "192.168.1.42",
               "sta_ssid": "home", "ipv4": {"mode": "dhcp"}, "last_error": null},
   "providers": [{"id": "direct", "status": "degraded", "resource_count": 0},
-                {"id": "ha", "status": "unconfigured", "resource_count": 0}],
+                {"id": "ha", "status": "unconfigured", "resource_count": 0},
+                {"id": "shelly", "status": "unconfigured", "resource_count": 0}],
   "rssi": -54, "uptime_s": 120, "heap_free": 294631,
   "lvgl_heap_free": null, "lvgl_heap_total": null, "lvgl_frag_pct": null,
   "reset_reason": "power_on", "reboot_count": 3,
@@ -516,7 +535,8 @@ Nothing else is accepted before `auth_ok`.
 Device → client:
 
 ```json
-{"type": "status",   "providers": {"direct": "online", "ha": "unconfigured"},
+{"type": "status",   "providers": {"direct": "online", "ha": "unconfigured",
+                                   "shelly": "online"},
                      "wifi": -54, "heap_free": 142000,
                      "lvgl_heap_free": 2088632, "lvgl_frag_pct": 1}
 {"type": "log",      "level": "warn", "msg": "resource direct:living-room unavailable"}
@@ -604,6 +624,59 @@ making the panel wait out the timeout.
 `tools/direct/agent.py` is a complete consumer in the standard library alone:
 attach, receive, apply, answer, publish. Run it against a panel with one bound
 light and every tap on that tile round-trips through it.
+
+## The Shelly provider
+
+`shelly` is the panel reaching devices itself. There is no endpoint on this
+page for it, and that is the design rather than an omission: its configuration
+is the set of resource ids the active dashboard binds, so publishing a
+dashboard is the whole of setting it up.
+
+```json
+{"id": "t1", "type": "light", "pos": [0, 0], "size": [1, 1],
+ "binding": {"provider": "shelly", "resource": "192.168.1.51/switch:0"}}
+```
+
+The grammar is `<host>/<role>:<index>`. `host` is an address or an mDNS name and
+is used verbatim; `role` is one of:
+
+| `role` | `kind` | Reads |
+|--------|--------|-------|
+| `switch` | `light` | the relay. `toggle` and `set_power` |
+| `power` | `sensor` | instantaneous draw in W |
+| `voltage` | `sensor` | mains in V |
+| `temperature` | `sensor` | the device's own, in °C |
+
+`index` is the channel: `switch:0` and `switch:1` are the two sides of a
+Plus 2PM, and a single-channel relay has only `:0`.
+
+Both Shelly generations answer to the same ids. `GET /shelly` on the device
+carries `gen` only on the newer ones, so the panel probes once per host and
+picks `/rpc/Switch.*` or `/relay/N` itself — a dashboard never says which
+generation it is talking to. A role the device does not measure, such as
+`voltage` on an unmetered relay, reads as unavailable rather than as zero.
+
+Reading it back is `GET /resources?provider=shelly`:
+
+```json
+{"resources": [
+  {"provider": "shelly", "resource": "192.168.1.51/switch:0", "kind": "light",
+   "available": true, "state": {"power": "on"},
+   "capabilities": {"toggle": true, "set_power": true}},
+  {"provider": "shelly", "resource": "192.168.1.51/power:0", "kind": "sensor",
+   "available": true,
+   "state": {"value": 3.2, "unit": "W", "measurement": "power"}}
+]}
+```
+
+Devices are polled every five seconds, and a tap re-reads its own device at once
+rather than waiting for the next sweep. A device that stops answering marks its
+own resources unavailable and keeps their last values, so one unplugged relay
+does not blank the rest of the page.
+
+There is no authentication in this path. Shelly devices ship open on a LAN, and
+a panel that reaches one is a panel already on the same network as the relay it
+is switching.
 
 ## What is deliberately absent
 

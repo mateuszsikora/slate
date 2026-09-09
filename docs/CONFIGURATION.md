@@ -271,6 +271,7 @@ A binding is always a provider and a resource:
 ```json
 {"provider": "direct", "resource": "living-room"}
 {"provider": "ha", "resource": "light.living_room"}
+{"provider": "shelly", "resource": "192.168.1.51/switch:0"}
 ```
 
 Both are opaque strings and are compared as strings. `light.living_room` means
@@ -278,6 +279,37 @@ something to the Home Assistant adapter; `living-room` may name the same lamp in
 the direct provider. Firmware never infers a provider from punctuation or from
 the component type. Provider ids are at most 15 bytes and resource ids at most
 63, and one document may reference at most 256 distinct pairs.
+
+### Which Shelly devices can be bound
+
+The `shelly` provider has no configuration of its own — a binding is how the
+panel learns a device exists, so the document below is the whole setup. The
+grammar is `<host>/<role>:<index>`:
+
+```json
+{"id": "t1", "type": "light", "pos": [0, 0], "size": [1, 1],
+ "binding": {"provider": "shelly", "resource": "192.168.1.51/switch:0"},
+ "label": "Kitchen", "icon": "ceiling-light"}
+```
+
+| `role` | Component type | Reads |
+|--------|----------------|-------|
+| `switch` | `light` | the relay; a tile that toggles |
+| `power` | `sensor` | instantaneous draw, W |
+| `voltage` | `sensor` | mains, V |
+| `temperature` | `sensor` | the device's own, °C |
+
+`host` is an address or an mDNS name — `shelly1-abcdef123456.local/switch:0` is
+the same binding written so a DHCP lease can move without breaking it. `index`
+is the channel, so a Plus 2PM is `switch:0` and `switch:1` while a single
+relay has only `:0`. Both Shelly generations use these ids; the panel discovers
+which dialect a host speaks and a dashboard never says.
+
+A relay advertises `toggle` and `set_power` and nothing else, so a `switch`
+bound to a 2×1 `light` tile renders without a brightness slider — the control
+is hidden rather than shown inert, as it is for any resource that does not
+advertise it. A role the device does not measure, such as `voltage` on an
+unmetered relay, renders a dash rather than a zero.
 
 The same pair may feed several tiles, as long as every known component type
 using it agrees about what kind of thing it is. Binding `direct:living-room` as

@@ -7,6 +7,16 @@ dashboard. It exists so that a request like this one is enough:
 > is a token for my Home Assistant. Set me up a dashboard with a light and a
 > temperature on it.
 
+Or one with no automation system in it at all, which takes the same route as far
+as phase 5 and then a shorter one:
+
+> The panel is plugged in. I have a couple of Shelly relays on the network. Put
+> the lights on it.
+
+Both end in a panel that needs nothing else running. The difference is only
+where the state comes from: Home Assistant is a connection the panel opens
+outward, and `shelly` is the panel reaching the relays itself.
+
 This is not [`agent-workflow.md`](agent-workflow.md), which is about working the
 issue backlog, and it is not [`CONTRIBUTING.md`](../CONTRIBUTING.md), which is
 about sending a change. Nothing here modifies the repository. If you are a
@@ -26,7 +36,8 @@ repeating them.
   name](#3-learn-the-panels-name) · [4. Put it on the
   network](#4-put-it-on-the-network) · [5. Open a session](#5-open-a-session)
 - [6. Connect Home Assistant](#6-connect-home-assistant) · [7. Choose the
-  entities](#7-choose-the-entities) · [8. Publish the
+  entities](#7-choose-the-entities) · [6b. Or: Shelly, with no Home
+  Assistant](#6b-or-shelly-with-no-home-assistant) · [8. Publish the
   dashboard](#8-publish-the-dashboard) · [9. Verify](#9-verify) ·
   [10. Report](#10-report)
 - [What not to do](#what-not-to-do)
@@ -48,6 +59,7 @@ want to ask.
 | Panel session credential | `SLATE_TOKEN` | `POST /session`, phase 5 |
 | Home Assistant URL | `HA_URL` | `GET /ha/discover` (needs phase 5), or ask. No trailing slash |
 | Home Assistant token | `HA_TOKEN` | given, and see [Rules](#rules) about where it may live |
+| Shelly addresses | — | phase 6b, if there is no Home Assistant. Ask, or find them on the LAN |
 | Which light, which sensor | — | phase 7 — **ask when more than one matches** |
 | Timezone | — | the host's, e.g. `readlink /etc/localtime`; confirm it |
 
@@ -439,6 +451,57 @@ If either returns none, say which one and stop: a dashboard bound to an entity
 that does not exist renders a placeholder naming `provider:resource`, which is a
 worse outcome than a question.
 
+## 6b. Or: Shelly, with no Home Assistant
+
+**This section replaces phases 6 and 7.** Take it when the operator has Shelly
+relays and no automation system, and skip it entirely otherwise. Everything
+before phase 6 and everything from phase 8 is the same either way.
+
+There is nothing to configure. The `shelly` provider's device list *is* the set
+of resource ids the dashboard binds, so this phase is only about finding the
+addresses and confirming what is behind them.
+
+If the operator did not give you addresses, the devices announce themselves over
+mDNS, and the host you are running on can ask:
+
+```bash
+dns-sd -B _http._tcp local.        # macOS; look for shelly*
+avahi-browse -rt _http._tcp        # Linux
+```
+
+Then confirm each one is what you think it is. `GET /shelly` answers on every
+generation and is the same probe the panel makes:
+
+```bash
+curl -sS http://192.168.1.51/shelly
+```
+
+A `"gen": 2` field means a newer device (`{"model":"SNSW-102P16EU","gen":2,…}`);
+its absence means a Gen1 (`{"type":"SHSW-1",…}`). **You do not need to record
+which** — the panel probes this itself and both generations bind through the
+same ids. What the answer is for is `num_outputs` or the model: it tells you
+whether a device has `switch:1` as well as `switch:0`.
+
+Check `auth` / `auth_en` while you are there. This provider sends no
+credentials, so a device reporting authentication as enabled cannot be bound;
+say so rather than binding it and reporting a dash in phase 9.
+
+Bindings are `<host>/<role>:<index>`, with `role` one of `switch` (a `light`
+tile), `power`, `voltage` or `temperature` (`sensor` tiles) —
+[`CONFIGURATION.md`](CONFIGURATION.md#which-shelly-devices-can-be-bound) is the
+table. A relay advertises `toggle` and `set_power` only, so a `light` tile bound
+to one has no brightness slider at any size.
+
+**Prefer an address over an mDNS name only if the operator has a DHCP
+reservation for it.** The address is inside the binding, so a lease that moves
+breaks the tile; `shelly1-abcdef123456.local/switch:0` survives that and is the
+better default on a network you do not control. Mention the reservation in
+phase 10 either way — it is the one piece of after-care this path has.
+
+**Done when** you have one `<host>/<role>:<index>` string per requested tile,
+and every host answered `GET /shelly` without authentication. A host that did
+not answer is not a tile to publish and hope about: say which one.
+
 ## 8. Publish the dashboard
 
 **Find out what you would be replacing, before you write anything.** `PUT`
@@ -490,6 +553,22 @@ have written it to `dashboard.json`:
 }
 ```
 
+On the phase 6b path the document is the same one with different bindings —
+nothing else about it changes, which is the point of the provider boundary:
+
+```json
+{"id": "light-1", "type": "light", "pos": [0, 0], "size": [1, 1],
+ "binding": {"provider": "shelly", "resource": "192.168.1.51/switch:0"},
+ "label": "Kitchen", "icon": "ceiling-light"},
+{"id": "power-1", "type": "sensor", "pos": [1, 0], "size": [2, 1],
+ "binding": {"provider": "shelly", "resource": "192.168.1.51/power:0"},
+ "label": "Kitchen"}
+```
+
+Size that light `1x1` or give it a 2×1 knowing the slider will not be there: a
+Shelly relay advertises `toggle` and `set_power` and no brightness, and an
+unadvertised control is hidden rather than drawn inert.
+
 `theme` must be an id the running firmware carries — `GET /info` lists them
 rather than leaving you to assume `midnight` exists. `settings.timezone` is an
 IANA name and the clock is meaningless without it.
@@ -531,19 +610,26 @@ printf 'header = "Authorization: Bearer %s"\n' "$SLATE_TOKEN" |
 curl -sS --config - 'http://192.168.1.42/api/v1/resources?provider=ha'
 ```
 
-**Done when** `/status` reports the `ha` provider as `online`, and `/resources`
-returns a snapshot for each bound entity with `available: true` and a plausible
-`state` — a `power` of `on` or `off` for the light, a number and a unit for the
-sensor.
+Read `provider=shelly` instead on the phase 6b path — the query takes whichever
+provider the dashboard binds, and the answer is in the same normalized
+vocabulary either way.
+
+**Done when** `/status` reports the provider you bound as `online`, and
+`/resources` returns a snapshot for each binding with `available: true` and a
+plausible `state` — a `power` of `on` or `off` for the light, a number and a
+unit for the sensor.
 
 Give it a few seconds before believing an empty answer. The `204` means the
-screen and the subscriptions were swapped; it does not mean Home Assistant has
+screen and the subscriptions were swapped; it does not mean the upstream has
 answered yet, and a `/resources` read in the same breath as the `PUT` can come
 back short. Poll rather than diagnose: re-read until both resources appear or
-about fifteen seconds have passed. Only then is a missing entity a real finding
-— the panel subscribes solely to what the active dashboard references, so an
-entity absent after that is a binding matching nothing in Home Assistant, which
-is almost always a typo in an entity id.
+about fifteen seconds have passed — a Shelly sweep is every five, plus one probe
+per host the first time. Only then is a missing resource a real finding — the
+panel subscribes solely to what the active dashboard references, so an entity
+absent after that is a binding matching nothing in Home Assistant, which is
+almost always a typo in an entity id. On the Shelly path an `available: false`
+that never clears is the other shape of the same mistake: a host that does not
+answer, or a role that device does not measure.
 
 Touching a tile is the one thing you cannot verify from here, so ask the
 operator to do it — but **read the light's state and keep it before you ask**.
@@ -569,6 +655,9 @@ Give the operator, in one message:
   the only way past a forgotten one is a factory reset that also takes the WiFi
   credentials and the dashboard;
 - which entities you bound, and what you had to choose between;
+- on the phase 6b path, **that the addresses are inside the bindings** — a DHCP
+  reservation for each Shelly, or an mDNS name in the binding, is what stops a
+  lease renewal from emptying a tile months later;
 - what you could not verify, plainly: the tap, and anything you skipped.
 
 Mention that the cable is done with — from here updates travel over WiFi, and

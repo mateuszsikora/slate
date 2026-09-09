@@ -43,7 +43,7 @@ Second consequence: anything not anticipated cannot be built. This is intentiona
 
 ### ADR-3: Integrations are providers behind a neutral core
 
-The UI runtime does not know Home Assistant, MQTT or any other automation protocol. It consumes normalized resource state and emits semantic actions through a narrow provider interface. The bundled `direct` provider and the Home Assistant provider implement that interface.
+The UI runtime does not know Home Assistant, MQTT or any other automation protocol. It consumes normalized resource state and emits semantic actions through a narrow provider interface. The bundled `direct` provider, the Home Assistant provider and the Shelly provider implement that interface.
 
 Consequence: a component asks to `toggle` a light; it never constructs a Home Assistant `call_service` frame. Adding another system means writing an adapter, not forking the component library or the configuration parser. Home Assistant is the first production integration, not a runtime dependency.
 
@@ -84,19 +84,22 @@ Consequence: no asset versioning, cache invalidation or flash management. New ic
 │ State Store     normalized resources     │
 │ Action Bus      semantic actions/results │
 │ Providers       direct / Home Assistant  │
+│                 / Shelly                 │
 │ Config Store    NVS + LittleFS           │
 │ HAL             LCD, touch, backlight    │
-└───────┬──────────────────────────┬───────┘
-        │ device API               │ HA WebSocket API
-        │ (device token)           │ (long-lived token)
-        ▼                          ▼
-┌──────────────────┐      ┌──────────────────┐
-│ script / Node-RED│      │ Home Assistant   │
-│ direct provider  │      │ HA provider      │
-└──────────────────┘      └──────────────────┘
+└──────┬─────────────────┬─────────────┬───┘
+       │ device API      │ HA WS API   │ HTTP on the LAN
+       │ (device token)  │ (LL token)  │ (no credential)
+       ▼                 ▼             ▼
+┌────────────────┐ ┌─────────────┐ ┌─────────────┐
+│script/Node-RED │ │Home Assistant│ │Shelly relays│
+│direct provider │ │ HA provider  │ │Shelly prov. │
+└────────────────┘ └─────────────┘ └─────────────┘
 ```
 
 The direct provider is the smallest useful interoperability path: a script or Node-RED flow publishes normalized state over HTTP and receives semantic actions over the device WebSocket. It needs no broker, cloud service or companion process. Home Assistant uses an in-firmware adapter because its compressed subscriptions and service calls are valuable enough to support directly.
+
+The two arrows above point in opposite directions and the third points outward: `direct` is pushed to, `ha` is a connection the panel opens to one system that owns the house, and `shelly` (§5.9) is the panel reaching individual devices itself. Only the third makes a panel standalone — with nothing else on the network running, the tiles still carry values and still answer a tap.
 
 ## 3. Configuration format
 
@@ -553,7 +556,7 @@ While the setup access point is up, the setup page and the endpoints it needs �
 
 ### 5.1 Provider boundary
 
-A provider is the adapter between one upstream system and the runtime. Version 1 has two provider ids: `direct`, which is always present, and `ha`, which is present but `unconfigured` until it has credentials. The common core knows only five operations:
+A provider is the adapter between one upstream system and the runtime. Version 1 has three provider ids: `direct`, which is always present; `ha`, which is present but `unconfigured` until it has credentials; and `shelly` (§5.9), which is present and `unconfigured` until a dashboard binds a device to it. The common core knows only five operations:
 
 1. report lifecycle status;
 2. accept the set of resource ids referenced by the active configuration;
@@ -746,6 +749,29 @@ The HA provider maps semantic actions to service calls. For example, light `togg
 ```
 
 `set_brightness` becomes `light.turn_on` with `brightness_pct`; cover actions and scene `activate` map similarly. HA result ids remain inside the adapter. A failed result is passed to the common action bus, while confirmation comes from the normalized state update produced by the subscription. A read-only HA account returns `home_assistant_error` with message `Unauthorized`, not the `unauthorized` code, so the adapter must preserve that distinction when reporting the useful failure.
+
+### 5.9 Shelly provider
+
+The first adapter that reaches a device by itself. `direct` waits to be pushed to and `ha` needs an automation system in the middle; `shelly` polls relays over HTTP on the LAN, which makes a panel with no companion process anywhere show live state and answer a tap. That is the property it exists for: a dashboard fed by `direct` goes to dashes the moment its feeder stops, and a wall panel that depends on a laptop being awake is not one.
+
+**Its configuration is the binding set.** §5.1's second core operation already hands a provider the resource ids the active dashboard references, so this adapter spends §3.3's "resource ids are opaque outside their provider" on carrying the address:
+
+```json
+{"provider": "shelly", "resource": "192.168.1.51/switch:0"}
+{"provider": "shelly", "resource": "shelly1-abcdef123456.local/switch:0"}
+```
+
+The grammar is `<host>/<role>:<index>`, where `role` is `switch`, `power`, `voltage` or `temperature`. There is no `POST /shelly`, no NVS entry and no picker to fill in before the first tile works, and a dashboard exported to another panel takes its devices with it. What it costs is DHCP: a lease that moves breaks a binding, and the answer is a reservation or the mDNS name above. The alternative was a second copy of the device list that has to be kept in step with the one already in the document, which is the failure this avoids rather than a cost it pays.
+
+**Generations are discovered, not configured.** `switch:0` is a switch on a Plus 2PM and on a Shelly 1; `GET /shelly` answers on both and carries `gen` only on the newer one, so the adapter probes once per host and then uses `/rpc/Switch.*` or `/relay/N`. Nobody writing a dashboard should have to know which generation is in which ceiling. A role the device cannot answer — `voltage` on an unmetered relay — is published unavailable rather than as zero.
+
+**One task owns everything with a socket in it.** §6.1 keeps LVGL on a single task, so a poller blocking on a relay that takes 267 ms to answer cannot hold up a frame. The action bus's dispatch callback does not make the HTTP call either: it queues the command and returns, which is what §5.3 means by "returning ESP_OK only acknowledges that the adapter took responsibility for reporting a later result". The command is carried out on the poller, which then re-reads that device rather than waiting out the interval — §5.3 makes the snapshot, not the acknowledgement, the thing that clears a tile.
+
+`toggle` is one request in both dialects (`Switch.Toggle`, `/relay/N?turn=toggle`) rather than a read followed by an inverted write, which cannot race a reading taken between the two.
+
+**What it deliberately does not have.** No authentication: these devices ship open on a LAN, and a password-protected one needs credential storage, which is §4.3's problem and not this adapter's until such a device exists. No discovery catalog for the editor's picker — `GET /resources` returns the bound set, and mDNS discovery is the natural next step rather than a prerequisite. No shared polling service either: a second HTTP-polled provider would be the first evidence of what two such adapters have in common, and there is one.
+
+The cost is the argument for the provider boundary. `libslate_shelly.a` measures **3 365 B**, of which 118 B is internal SRAM, against 20 556 B for the Home Assistant adapter — because `esp_http_client` is already linked for the release channel and cJSON for the configuration parser. An integration is cheap once its transport is in the image; a new transport is the expensive thing.
 
 ## 6. Firmware
 
