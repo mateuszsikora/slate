@@ -645,7 +645,7 @@ is used verbatim; `role` is one of:
 | `switch` | `light` | the relay. `toggle` and `set_power` |
 | `power` | `sensor` | instantaneous draw in W |
 | `voltage` | `sensor` | mains in V |
-| `temperature` | `sensor` | the device's own, in °C |
+| `temperature` | `sensor` | that channel's, in °C — on a single-board relay it is the device's |
 
 `index` is the channel: `switch:0` and `switch:1` are the two sides of a
 Plus 2PM, and a single-channel relay has only `:0`.
@@ -653,8 +653,17 @@ Plus 2PM, and a single-channel relay has only `:0`.
 Both Shelly generations answer to the same ids. `GET /shelly` on the device
 carries `gen` only on the newer ones, so the panel probes once per host and
 picks `/rpc/Switch.*` or `/relay/N` itself — a dashboard never says which
-generation it is talking to. A role the device does not measure, such as
-`voltage` on an unmetered relay, reads as unavailable rather than as zero.
+generation it is talking to. The probe is repeated after a device stops
+answering, so a relay swapped for a different model at the same address is
+picked up rather than driven with the old dialect.
+
+A role the device does not measure — `voltage` on an unmetered relay — never
+produces a value, so its tile keeps the placeholder naming `provider:resource`
+rather than showing a zero. That is the same rendering as a binding whose host
+does not answer at all, and for the same reason: a normalized snapshot has no
+spelling for "no value", so a resource with no reading is one the provider does
+not publish. A resource that *has* been read and then goes unreachable is
+published unavailable with its last value, and renders stale.
 
 Reading it back is `GET /resources?provider=shelly`:
 

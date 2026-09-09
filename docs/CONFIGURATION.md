@@ -308,8 +308,13 @@ which dialect a host speaks and a dashboard never says.
 A relay advertises `toggle` and `set_power` and nothing else, so a `switch`
 bound to a 2×1 `light` tile renders without a brightness slider — the control
 is hidden rather than shown inert, as it is for any resource that does not
-advertise it. A role the device does not measure, such as `voltage` on an
-unmetered relay, renders a dash rather than a zero.
+advertise it.
+
+A role the device does not measure, such as `voltage` on an unmetered relay,
+never produces a value at all, so its tile keeps the placeholder naming
+`provider:resource` — the same thing a binding shows when its host does not
+answer. It is not a dash: a dash is a resource that *had* a value and lost it,
+which is what a device that stops answering after a good reading renders.
 
 The same pair may feed several tiles, as long as every known component type
 using it agrees about what kind of thing it is. Binding `direct:living-room` as

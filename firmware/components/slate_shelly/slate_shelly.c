@@ -1,13 +1,23 @@
 /*
  * Slate — the Shelly integration provider. See include/slate_shelly.h.
  *
- * One task owns everything with a socket in it. §6.1 keeps LVGL on a single
- * task and has every provider post normalized work to it through the store, so
- * a poller that blocks for 267 ms on a relay that is thinking about it cannot
- * hold up a frame. The action bus's dispatch callback therefore does not make
- * the HTTP call either — it queues the command and returns, which is exactly
- * what §5.3 means by "returning ESP_OK only acknowledges that the adapter took
- * responsibility for reporting a later result".
+ * One task owns everything with a socket in it, and it owns the device tables
+ * outright: nothing else reads or writes them, so there is no lock to take
+ * across an HTTP call and no way for a rebuild to end up waiting on one.
+ *
+ * That is not a stylistic preference. §5.1 calls `subscribe()` on the binding
+ * task, which is the LVGL task (§6.4), and both tasks run at priority 4 — so a
+ * mutex this poller held across a sweep of unreachable relays would freeze the
+ * screen and the touch panel for as long as the timeouts lasted. `slate_ha`
+ * avoids the same trap by doing only short bookkeeping in its `subscribe()` and
+ * handing the network work to its own task; this does the equivalent, with the
+ * new tables built on the caller's stack and swapped in through a lock that is
+ * never held for more than a few instructions.
+ *
+ * The action bus's dispatch callback does not make the HTTP call either — it
+ * queues the command and returns, which is what §5.3 means by "returning
+ * ESP_OK only acknowledges that the adapter took responsibility for reporting a
+ * later result".
  */
 
 #include "slate_shelly.h"
@@ -20,6 +30,7 @@
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -31,10 +42,27 @@
 
 static const char *TAG = "slate_shelly";
 
-#define TASK_STACK        6144
-#define TASK_PRIORITY     4
-#define POLL_INTERVAL_MS  5000
-#define HTTP_TIMEOUT_MS   4000
+#define TASK_STACK       6144
+#define TASK_PRIORITY    4
+#define POLL_INTERVAL_MS 5000
+
+/*
+ * Two timeouts, because they answer to different deadlines. A sweep is only
+ * racing the next sweep, but a command is racing §5.3's three-second revert:
+ * the tile gives up at 3 s, and an adapter that took longer than that to fail
+ * would have its `slate_action_result` discarded as late (`slate_action.c`) and
+ * leave the relay switching after the UI already said it had not.
+ *
+ * The bound this actually buys, stated honestly: a command can still be delayed
+ * by one in-flight sweep request before its own begins. With both at 2 s, a tap
+ * on a *reachable* relay lands inside 3 s even if another device is timing out —
+ * the sweep is also abandoned as soon as a command arrives, so it is one request
+ * of delay and not one per device. Two unreachable devices in a row can exceed
+ * the deadline, and in that case the action has genuinely failed and reverting
+ * the tile is the correct outcome rather than a wrong one.
+ */
+#define POLL_HTTP_TIMEOUT_MS    2000
+#define COMMAND_HTTP_TIMEOUT_MS 2000
 
 /*
  * 1031 B is the largest real payload measured on a Plus 2PM answering
@@ -43,8 +71,15 @@ static const char *TAG = "slate_shelly";
  * a body that does not fit is a device this adapter does not understand, and
  * truncating JSON produces a parse failure instead of a wrong reading.
  */
-#define BODY_MAX          4096
-#define HOST_MAX          47
+#define BODY_MAX 4096
+
+/*
+ * A host long enough to fit in a binding parses here. `slate_state_bind()`
+ * accepts a resource id of SLATE_RESOURCE_ID_MAX, so any smaller ceiling would
+ * reject an id the store had already accepted, and the only trace would be one
+ * log line and a tile that never fills in.
+ */
+#define HOST_MAX          SLATE_RESOURCE_ID_MAX
 #define COMMAND_QUEUE_LEN 8
 
 /* --- The binding set, parsed ---------------------------------------------- */
@@ -53,7 +88,7 @@ typedef enum {
     ROLE_SWITCH = 0,   /**< the relay itself, published as a `light` */
     ROLE_POWER,        /**< instantaneous draw, W */
     ROLE_VOLTAGE,      /**< mains, V */
-    ROLE_TEMPERATURE,  /**< the device's own, °C */
+    ROLE_TEMPERATURE,  /**< the channel's own, °C */
 } role_t;
 
 typedef struct {
@@ -63,43 +98,65 @@ typedef struct {
 } device_t;
 
 /*
- * `last` is why an unreachable device does not blank its own tiles. §5.2: "an
- * unavailable resource keeps its last values and renders stale", and a snapshot
- * replaces the previous one in full — so publishing `available: false` with a
- * zeroed state would be publishing that the light is off, which is a different
- * and untrue claim. The adapter carries the last reading forward instead.
+ * `ever_read` is load-bearing rather than bookkeeping. §5.2's snapshot has no
+ * "no value" state — a sensor must carry a finite number or a non-empty word,
+ * and `slate_state.c` refuses anything else — so a resource that has never been
+ * read has nothing publishable to say. Publishing the zeroed struct would be
+ * refused with `invalid_state` on every sweep, five seconds apart, for as long
+ * as the binding existed. Not publishing at all leaves §3.3's placeholder
+ * naming `provider:resource` on the tile, which is the accurate thing: this
+ * binding has never produced a value.
+ *
+ * Once one has arrived, `last` is what an unavailable publication carries, so
+ * §5.2's "an unavailable resource keeps its last values and renders stale"
+ * holds — a complete snapshot replaces the previous one, and sending a zeroed
+ * state with `available: false` would be claiming the light is off rather than
+ * unknown.
  */
 typedef struct {
     char id[SLATE_RESOURCE_ID_MAX + 1];
     uint16_t device;
     role_t role;
     uint8_t index;
+    bool ever_read;
     slate_state_value_t last;
 } entry_t;
 
-/*
- * One queue carries both things the task can be asked to do. An empty
- * `resource` is a rebuild asking for a sweep now rather than at the end of the
- * current interval — a dashboard that was just pushed should not show dashes
- * for five seconds to save a second queue.
- */
+typedef enum {
+    CMD_SWEEP = 0, /**< a rebuild asking for a sweep now; carries nothing */
+    CMD_ACTION,
+} command_kind_t;
+
 typedef struct {
+    command_kind_t kind;
     char resource[SLATE_RESOURCE_ID_MAX + 1];
     uint32_t action_id;
     bool toggle;
     bool power;
 } command_t;
 
-static SemaphoreHandle_t s_lock;
-static StaticSemaphore_t s_lock_storage;
+/* Owned by the poller task alone. No lock guards these, because nothing else
+ * touches them. */
 static device_t *s_devices;
 static entry_t *s_entries;
 static size_t s_device_count;
 static size_t s_entry_count;
 static char *s_body;
+
+/* The handover. `s_bind_lock` is held for pointer moves and nothing else — in
+ * particular never across an HTTP call, which is the whole point of it. */
+static SemaphoreHandle_t s_bind_lock;
+static StaticSemaphore_t s_bind_lock_storage;
+static device_t *s_pending_devices;
+static entry_t *s_pending_entries;
+static size_t s_pending_device_count;
+static size_t s_pending_entry_count;
+static bool s_pending_valid;
+
 static QueueHandle_t s_commands;
 static TaskHandle_t s_task;
 static volatile bool s_network_up;
+static volatile bool s_has_bindings;
 static bool s_initialized;
 
 /* --- Resource ids --------------------------------------------------------- */
@@ -161,7 +218,7 @@ static bool parse_resource(const char *id, char *host, role_t *role, uint8_t *in
 /* --- HTTP ----------------------------------------------------------------- */
 
 /** @brief GET one JSON document into the shared body buffer. Caller owns *out. */
-static esp_err_t fetch_json(const char *host, const char *path, cJSON **out)
+static esp_err_t fetch_json(const char *host, const char *path, int timeout_ms, cJSON **out)
 {
     char url[HOST_MAX + 64];
     int written = snprintf(url, sizeof(url), "http://%s%s", host, path);
@@ -172,7 +229,7 @@ static esp_err_t fetch_json(const char *host, const char *path, cJSON **out)
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_GET,
-        .timeout_ms = HTTP_TIMEOUT_MS,
+        .timeout_ms = timeout_ms,
         .disable_auto_redirect = true,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
@@ -208,14 +265,18 @@ static esp_err_t fetch_json(const char *host, const char *path, cJSON **out)
 /*
  * `GET /shelly` is the one route both generations answer, and `gen` appears
  * only on the newer one — a Plus 2PM reports `"gen": 2`, an SHSW-1 reports its
- * `type` and no such field. That is the whole discrimination, and it is done
- * once per host rather than per sweep.
+ * `type` and no such field. That is the whole discrimination.
+ *
+ * It is repeated whenever a device has gone unreachable, because "the same
+ * address" and "the same device" are not the same claim: a relay replaced with
+ * a newer model keeps the binding and changes the dialect, and a generation
+ * cached for the lifetime of a configuration would answer for the old one until
+ * somebody happened to republish the dashboard.
  */
 static void probe_generation(device_t *device)
 {
     cJSON *doc = NULL;
-    if (fetch_json(device->host, "/shelly", &doc) != ESP_OK) {
-        device->reachable = false;
+    if (fetch_json(device->host, "/shelly", POLL_HTTP_TIMEOUT_MS, &doc) != ESP_OK) {
         return;
     }
     const cJSON *gen = cJSON_GetObjectItemCaseSensitive(doc, "gen");
@@ -228,6 +289,9 @@ static void probe_generation(device_t *device)
 
 static void publish_entry(entry_t *entry, bool available)
 {
+    if (!entry->ever_read) {
+        return; /* nothing §5.2 would accept, and nothing true to say */
+    }
     slate_snapshot_t snapshot = {
         .resource = entry->id,
         .kind = entry->role == ROLE_SWITCH ? SLATE_KIND_LIGHT : SLATE_KIND_SENSOR,
@@ -333,8 +397,8 @@ static bool read_gen1(entry_t *entry, const cJSON *doc)
                     SLATE_CATEGORY_POWER);
         return true;
     }
-    /* A Gen1 Shelly 1 measures neither of these. A role it cannot answer is a
-     * binding this adapter reports as unavailable rather than as zero. */
+    /* A Gen1 relay measures neither of these, so these bindings never produce a
+     * value and their tiles keep §3.3's placeholder. */
     case ROLE_VOLTAGE:
     case ROLE_TEMPERATURE:
         return false;
@@ -354,7 +418,7 @@ static void poll_device(size_t device_index)
 
     cJSON *doc = NULL;
     const char *path = device->generation >= 2 ? "/rpc/Shelly.GetStatus" : "/status";
-    if (fetch_json(device->host, path, &doc) != ESP_OK) {
+    if (fetch_json(device->host, path, POLL_HTTP_TIMEOUT_MS, &doc) != ESP_OK) {
         goto unreachable;
     }
     device->reachable = true;
@@ -365,6 +429,9 @@ static void poll_device(size_t device_index)
             continue;
         }
         bool read = device->generation >= 2 ? read_gen2(entry, doc) : read_gen1(entry, doc);
+        if (read) {
+            entry->ever_read = true;
+        }
         /* A field this device does not carry — a `voltage` binding on a Shelly
          * 1 — stales exactly like a field that vanished from an otherwise
          * healthy answer, because from the tile's side they are the same fact:
@@ -379,6 +446,7 @@ unreachable:
         ESP_LOGW(TAG, "%s stopped answering", device->host);
     }
     device->reachable = false;
+    device->generation = 0; /* re-probe: the next answer may be a different device */
     for (size_t i = 0; i < s_entry_count; i++) {
         if (s_entries[i].device == device_index) {
             publish_entry(&s_entries[i], false);
@@ -404,11 +472,9 @@ static void run_command(const command_t *command)
         return;
     }
 
-    uint8_t generation = 0;
     size_t device_index = SIZE_MAX;
     for (size_t i = 0; i < s_device_count; i++) {
         if (strcmp(s_devices[i].host, host) == 0) {
-            generation = s_devices[i].generation;
             device_index = i;
             break;
         }
@@ -417,10 +483,9 @@ static void run_command(const command_t *command)
         slate_action_result(SLATE_SHELLY_PROVIDER_ID, command->action_id, false, "not_bound");
         return;
     }
-    if (generation == 0) {
+    if (s_devices[device_index].generation == 0) {
         probe_generation(&s_devices[device_index]);
-        generation = s_devices[device_index].generation;
-        if (generation == 0) {
+        if (s_devices[device_index].generation == 0) {
             slate_action_result(SLATE_SHELLY_PROVIDER_ID, command->action_id, false,
                                 "unreachable");
             return;
@@ -428,7 +493,7 @@ static void run_command(const command_t *command)
     }
 
     char path[64];
-    if (generation >= 2) {
+    if (s_devices[device_index].generation >= 2) {
         if (command->toggle) {
             snprintf(path, sizeof(path), "/rpc/Switch.Toggle?id=%u", index);
         } else {
@@ -441,7 +506,7 @@ static void run_command(const command_t *command)
     }
 
     cJSON *doc = NULL;
-    esp_err_t err = fetch_json(host, path, &doc);
+    esp_err_t err = fetch_json(host, path, COMMAND_HTTP_TIMEOUT_MS, &doc);
     if (doc != NULL) {
         cJSON_Delete(doc);
     }
@@ -472,63 +537,112 @@ static void update_status(void)
     slate_state_provider_set_status(SLATE_SHELLY_PROVIDER_ID, status);
 }
 
+/** @brief Take ownership of a binding set `subscribe()` left, if there is one. */
+static bool adopt_pending(void)
+{
+    xSemaphoreTake(s_bind_lock, portMAX_DELAY);
+    bool pending = s_pending_valid;
+    device_t *devices = s_pending_devices;
+    entry_t *entries = s_pending_entries;
+    size_t device_count = s_pending_device_count;
+    size_t entry_count = s_pending_entry_count;
+    s_pending_valid = false;
+    s_pending_devices = NULL;
+    s_pending_entries = NULL;
+    s_pending_device_count = 0;
+    s_pending_entry_count = 0;
+    xSemaphoreGive(s_bind_lock);
+
+    if (!pending) {
+        return false;
+    }
+    free(s_devices);
+    free(s_entries);
+    s_devices = devices;
+    s_entries = entries;
+    s_device_count = device_count;
+    s_entry_count = entry_count;
+    s_has_bindings = entry_count > 0;
+    ESP_LOGI(TAG, "%u resources on %u devices", (unsigned)s_entry_count,
+             (unsigned)s_device_count);
+    update_status();
+    return true;
+}
+
+static void sweep(void)
+{
+    for (size_t i = 0; i < s_device_count; i++) {
+        /* A tap is waiting and §5.3 gives it three seconds. Finishing the sweep
+         * first would spend them on devices nobody is looking at; the ones
+         * skipped here are read on the next pass, five seconds later. */
+        if (uxQueueMessagesWaiting(s_commands) > 0) {
+            break;
+        }
+        poll_device(i);
+    }
+}
+
 static void poller_task(void *arg)
 {
     (void)arg;
+    int64_t next_sweep_us = 0;
     for (;;) {
-        command_t command;
-        TickType_t wait = pdMS_TO_TICKS(POLL_INTERVAL_MS);
-        bool have_command = xQueueReceive(s_commands, &command, wait) == pdTRUE;
-
-        bool is_action = have_command && command.resource[0] != '\0';
-
-        xSemaphoreTake(s_lock, portMAX_DELAY);
-        update_status();
-        if (s_entry_count == 0 || !s_network_up) {
-            if (is_action) {
-                slate_action_result(SLATE_SHELLY_PROVIDER_ID, command.action_id, false, "offline");
-            }
-        } else if (is_action) {
-            run_command(&command);
-        } else {
-            for (size_t i = 0; i < s_device_count; i++) {
-                poll_device(i);
-            }
+        if (adopt_pending()) {
+            next_sweep_us = 0; /* a fresh dashboard should not wait out an interval */
         }
-        xSemaphoreGive(s_lock);
+
+        int64_t remaining_us = next_sweep_us - esp_timer_get_time();
+        TickType_t wait = remaining_us <= 0 ? 0 : pdMS_TO_TICKS(remaining_us / 1000);
+
+        command_t command;
+        if (xQueueReceive(s_commands, &command, wait) == pdTRUE) {
+            if (command.kind == CMD_ACTION) {
+                if (s_network_up && s_entry_count > 0) {
+                    run_command(&command);
+                } else {
+                    slate_action_result(SLATE_SHELLY_PROVIDER_ID, command.action_id, false,
+                                        "offline");
+                }
+            }
+            continue; /* drain the queue before spending time on a sweep */
+        }
+
+        update_status();
+        if (s_entry_count > 0 && s_network_up) {
+            sweep();
+        }
+        /* Measured from the end of the sweep, not from the last wake, so a busy
+         * few seconds of tapping cannot starve the sweep or make it run back to
+         * back once the tapping stops. */
+        next_sweep_us = esp_timer_get_time() + (int64_t)POLL_INTERVAL_MS * 1000;
     }
 }
 
 /* --- Provider callbacks --------------------------------------------------- */
 
 /*
- * §5.1's second operation, and this adapter's entire configuration. The tables
- * are rebuilt whole rather than diffed: a rebuild is rare, the sets are small,
- * and a diff would have to decide what a host losing its last resource means
- * about a probe already in flight.
+ * §5.1's second operation, and this adapter's entire configuration.
+ *
+ * This runs on the LVGL task (§6.4). Everything expensive about it — parsing
+ * and allocation — happens before the lock, and the lock itself covers five
+ * pointer moves. The tables are rebuilt whole rather than diffed: a rebuild is
+ * rare, the sets are small, and a diff would have to decide what a host losing
+ * its last resource means about a probe already in flight.
  */
 static esp_err_t subscribe(void *ctx, const char *const *resources, size_t count)
 {
     (void)ctx;
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-
-    free(s_entries);
-    free(s_devices);
-    s_entries = NULL;
-    s_devices = NULL;
-    s_entry_count = 0;
-    s_device_count = 0;
+    device_t *devices = NULL;
+    entry_t *entries = NULL;
+    size_t device_count = 0;
+    size_t entry_count = 0;
 
     if (count > 0) {
-        s_entries = heap_caps_calloc(count, sizeof(entry_t), MALLOC_CAP_SPIRAM);
-        s_devices = heap_caps_calloc(count, sizeof(device_t), MALLOC_CAP_SPIRAM);
-        if (s_entries == NULL || s_devices == NULL) {
-            free(s_entries);
-            free(s_devices);
-            s_entries = NULL;
-            s_devices = NULL;
-            update_status();
-            xSemaphoreGive(s_lock);
+        entries = heap_caps_calloc(count, sizeof(entry_t), MALLOC_CAP_SPIRAM);
+        devices = heap_caps_calloc(count, sizeof(device_t), MALLOC_CAP_SPIRAM);
+        if (entries == NULL || devices == NULL) {
+            free(entries);
+            free(devices);
             return ESP_ERR_NO_MEM;
         }
     }
@@ -544,31 +658,41 @@ static esp_err_t subscribe(void *ctx, const char *const *resources, size_t count
             continue;
         }
         size_t device = SIZE_MAX;
-        for (size_t d = 0; d < s_device_count; d++) {
-            if (strcmp(s_devices[d].host, host) == 0) {
+        for (size_t d = 0; d < device_count; d++) {
+            if (strcmp(devices[d].host, host) == 0) {
                 device = d;
                 break;
             }
         }
         if (device == SIZE_MAX) {
-            device = s_device_count++;
-            snprintf(s_devices[device].host, sizeof(s_devices[device].host), "%s", host);
+            device = device_count++;
+            snprintf(devices[device].host, sizeof(devices[device].host), "%s", host);
         }
-        entry_t *entry = &s_entries[s_entry_count++];
+        entry_t *entry = &entries[entry_count++];
         snprintf(entry->id, sizeof(entry->id), "%s", resources[i]);
         entry->device = (uint16_t)device;
         entry->role = role;
         entry->index = index;
     }
 
-    ESP_LOGI(TAG, "%u resources on %u devices", (unsigned)s_entry_count,
-             (unsigned)s_device_count);
-    update_status();
-    xSemaphoreGive(s_lock);
+    xSemaphoreTake(s_bind_lock, portMAX_DELAY);
+    /* A set the poller never got to is replaced rather than queued: only the
+     * newest configuration is the configuration. */
+    free(s_pending_devices);
+    free(s_pending_entries);
+    s_pending_devices = devices;
+    s_pending_entries = entries;
+    s_pending_device_count = device_count;
+    s_pending_entry_count = entry_count;
+    s_pending_valid = true;
+    xSemaphoreGive(s_bind_lock);
 
+    /* Best effort, and correctness does not depend on it: the poller adopts the
+     * set at the top of its next pass regardless. This only decides whether
+     * that happens now or up to one interval from now. */
     if (s_commands != NULL) {
-        const command_t sweep = {0};
-        xQueueSend(s_commands, &sweep, 0);
+        const command_t poke = {.kind = CMD_SWEEP};
+        xQueueSend(s_commands, &poke, 0);
     }
     return ESP_OK;
 }
@@ -576,18 +700,27 @@ static esp_err_t subscribe(void *ctx, const char *const *resources, size_t count
 static esp_err_t dispatch(void *ctx, uint32_t id, const slate_action_request_t *request)
 {
     (void)ctx;
+    /* The provider registers in init() and the queue is created in start(), so
+     * a panel whose poller failed to start has a clickable tile and no consumer
+     * behind it. Refusing here turns that into §5.3's immediate revert instead
+     * of a FreeRTOS assertion on the first tap. */
+    if (s_commands == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (request->action != SLATE_ACTION_TOGGLE && request->action != SLATE_ACTION_SET_POWER) {
         return ESP_ERR_INVALID_ARG;
     }
-    command_t command = {
-        .action_id = id,
-        .toggle = request->action == SLATE_ACTION_TOGGLE,
-        .power = request->value_type == SLATE_ACTION_VALUE_BOOL && request->value.boolean,
-    };
     if (request->action == SLATE_ACTION_SET_POWER &&
         request->value_type != SLATE_ACTION_VALUE_BOOL) {
         return ESP_ERR_INVALID_ARG;
     }
+
+    command_t command = {
+        .kind = CMD_ACTION,
+        .action_id = id,
+        .toggle = request->action == SLATE_ACTION_TOGGLE,
+        .power = request->value_type == SLATE_ACTION_VALUE_BOOL && request->value.boolean,
+    };
     snprintf(command.resource, sizeof(command.resource), "%s", request->resource);
 
     /* Never block the bus: the queue is short on purpose, and a full one is a
@@ -614,7 +747,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     /* A loss stales this provider's resources at once rather than at the end of
      * the current interval; the recovery is left to the task, which is the one
      * that knows whether anything is bound to come back online for. */
-    if (!s_network_up && s_entry_count > 0) {
+    if (!s_network_up && s_has_bindings) {
         slate_state_provider_set_status(SLATE_SHELLY_PROVIDER_ID, SLATE_PROVIDER_OFFLINE);
     }
 }
@@ -626,8 +759,8 @@ esp_err_t slate_shelly_init(void)
     if (s_initialized) {
         return ESP_ERR_INVALID_STATE;
     }
-    s_lock = xSemaphoreCreateMutexStatic(&s_lock_storage);
-    if (s_lock == NULL) {
+    s_bind_lock = xSemaphoreCreateMutexStatic(&s_bind_lock_storage);
+    if (s_bind_lock == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
@@ -686,8 +819,139 @@ esp_err_t slate_shelly_start(void)
 
     if (xTaskCreate(poller_task, "slate_shelly", TASK_STACK, NULL, TASK_PRIORITY, &s_task) !=
         pdPASS) {
+        /* Unwind everything, and `s_commands` above all: a queue left behind
+         * with no task to drain it would let dispatch() accept taps and answer
+         * none of them, which §5.3 makes worse than refusing them outright. */
+        esp_event_handler_unregister(SLATE_WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event);
+        vQueueDelete(s_commands);
+        s_commands = NULL;
+        free(s_body);
+        s_body = NULL;
         s_task = NULL;
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
 }
+
+#ifdef SLATE_SHELLY_SELFTEST
+
+/*
+ * The three pure functions in this component, against fixture data. They are
+ * where a Shelly's own vocabulary becomes §5.2's, so a mistake here is a wrong
+ * reading on a wall rather than a crash, and nothing else in the build would
+ * notice it.
+ */
+esp_err_t slate_shelly_selftest(void)
+{
+    int failures = 0;
+#define CHECK(condition, name)                                                \
+    do {                                                                      \
+        bool passed_ = (condition);                                           \
+        failures += !passed_;                                                 \
+        ESP_LOGI(TAG, "selftest: %-48s %s", name, passed_ ? "PASS" : "FAIL"); \
+    } while (0)
+
+    char host[HOST_MAX + 1];
+    role_t role;
+    uint8_t index;
+
+    CHECK(parse_resource("192.0.2.11/switch:0", host, &role, &index) &&
+              strcmp(host, "192.0.2.11") == 0 && role == ROLE_SWITCH && index == 0,
+          "an address, a switch and channel zero");
+    CHECK(parse_resource("192.0.2.11/switch:1", host, &role, &index) && index == 1,
+          "the second channel of a two-channel device");
+    CHECK(parse_resource("shelly1-abcdef123456.local/power:0", host, &role, &index) &&
+              strcmp(host, "shelly1-abcdef123456.local") == 0 && role == ROLE_POWER,
+          "an mDNS name and a power reading");
+    CHECK(parse_resource("h/voltage:0", host, &role, &index) && role == ROLE_VOLTAGE,
+          "voltage");
+    CHECK(parse_resource("h/temperature:9", host, &role, &index) &&
+              role == ROLE_TEMPERATURE && index == 9,
+          "temperature, and the highest channel a digit holds");
+
+    CHECK(!parse_resource("192.0.2.11", host, &role, &index), "no role at all");
+    CHECK(!parse_resource("192.0.2.11/switch", host, &role, &index), "no channel");
+    CHECK(!parse_resource("192.0.2.11/relay:0", host, &role, &index),
+          "a role this adapter does not have");
+    CHECK(!parse_resource("/switch:0", host, &role, &index), "an empty host");
+    CHECK(!parse_resource("192.0.2.11/:0", host, &role, &index), "an empty role");
+    CHECK(!parse_resource("192.0.2.11/switch:10", host, &role, &index),
+          "a two-digit channel, which no device in this family has");
+    CHECK(!parse_resource("192.0.2.11/switch:x", host, &role, &index), "a non-numeric channel");
+
+    /* A host that fits a binding must parse here, or the store would accept an
+     * id this adapter then silently drops. */
+    char longest[SLATE_RESOURCE_ID_MAX + 1];
+    size_t host_len = SLATE_RESOURCE_ID_MAX - strlen("/switch:0");
+    memset(longest, 'h', host_len);
+    snprintf(longest + host_len, sizeof(longest) - host_len, "/switch:0");
+    CHECK(parse_resource(longest, host, &role, &index) && strlen(host) == host_len,
+          "the longest host a 63-byte resource id can carry");
+
+    static const char GEN2[] =
+        "{\"switch:0\":{\"output\":true,\"apower\":3.2,\"voltage\":242.9,"
+        "\"temperature\":{\"tC\":41.6}},\"switch:1\":{\"output\":false,\"apower\":0}}";
+    cJSON *gen2 = cJSON_Parse(GEN2);
+    CHECK(gen2 != NULL, "the Gen2 fixture parses");
+
+    entry_t entry = {.device = 0, .index = 0};
+    entry.role = ROLE_SWITCH;
+    CHECK(read_gen2(&entry, gen2) && entry.last.light.on, "Gen2 switch:0 reads on");
+    entry.index = 1;
+    CHECK(read_gen2(&entry, gen2) && !entry.last.light.on, "Gen2 switch:1 reads off");
+    entry.index = 0;
+    entry.role = ROLE_POWER;
+    CHECK(read_gen2(&entry, gen2) && entry.last.sensor.numeric &&
+              entry.last.sensor.value == 3.2 &&
+              entry.last.sensor.measurement == SLATE_MEASUREMENT_POWER,
+          "Gen2 power carries watts and its measurement");
+    entry.role = ROLE_VOLTAGE;
+    CHECK(read_gen2(&entry, gen2) && entry.last.sensor.value == 242.9 &&
+              entry.last.sensor.category == SLATE_CATEGORY_POWER,
+          "Gen2 voltage carries volts and a category, not a measurement");
+    entry.role = ROLE_TEMPERATURE;
+    CHECK(read_gen2(&entry, gen2) && entry.last.sensor.value == 41.6 &&
+              entry.last.sensor.measurement == SLATE_MEASUREMENT_TEMPERATURE,
+          "Gen2 temperature is the channel's own tC");
+    entry.index = 3;
+    entry.role = ROLE_SWITCH;
+    CHECK(!read_gen2(&entry, gen2), "a channel the device does not have");
+    cJSON_Delete(gen2);
+
+    static const char GEN1[] =
+        "{\"relays\":[{\"ison\":true}],\"meters\":[{\"power\":0.00}]}";
+    cJSON *gen1 = cJSON_Parse(GEN1);
+    CHECK(gen1 != NULL, "the Gen1 fixture parses");
+
+    entry.index = 0;
+    entry.role = ROLE_SWITCH;
+    CHECK(read_gen1(&entry, gen1) && entry.last.light.on, "Gen1 relay reads on");
+    entry.role = ROLE_POWER;
+    CHECK(read_gen1(&entry, gen1) && entry.last.sensor.numeric &&
+              entry.last.sensor.value == 0.0,
+          "Gen1 meter reads zero watts as a value, not as absent");
+    entry.role = ROLE_VOLTAGE;
+    CHECK(!read_gen1(&entry, gen1), "Gen1 measures no voltage");
+    entry.role = ROLE_TEMPERATURE;
+    CHECK(!read_gen1(&entry, gen1), "Gen1 measures no temperature");
+    entry.index = 1;
+    entry.role = ROLE_SWITCH;
+    CHECK(!read_gen1(&entry, gen1), "a second relay a one-channel device does not have");
+    cJSON_Delete(gen1);
+
+    /* §5.2 has no "no value": a sensor that has never been read has nothing
+     * publishable, and publishing the zeroed struct would be refused on every
+     * sweep. This is the invariant publish_entry() rests on. */
+    entry_t never = {0};
+    never.role = ROLE_POWER;
+    slate_snapshot_t empty = {.resource = "x", .kind = SLATE_KIND_SENSOR,
+                              .available = false, .state = never.last};
+    CHECK(!empty.state.sensor.numeric && empty.state.sensor.text[0] == '\0',
+          "a never-read sensor holds nothing §5.2 would accept");
+
+#undef CHECK
+    ESP_LOGI(TAG, "selftest: %d failure(s)", failures);
+    return failures == 0 ? ESP_OK : ESP_FAIL;
+}
+
+#endif /* SLATE_SHELLY_SELFTEST */

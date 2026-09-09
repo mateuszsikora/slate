@@ -614,6 +614,10 @@ static void start_api(void)
     slate_direct_selftest();
 #endif
 
+#ifdef SLATE_SHELLY_SELFTEST
+    slate_shelly_selftest();
+#endif
+
 #ifdef SLATE_WS_SELFTEST
     if (ws_err == ESP_OK) {
         slate_ws_selftest();

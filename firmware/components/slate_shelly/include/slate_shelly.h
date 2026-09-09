@@ -83,6 +83,21 @@ esp_err_t slate_shelly_init(void);
  */
 esp_err_t slate_shelly_start(void);
 
+#ifdef SLATE_SHELLY_SELFTEST
+
+/**
+ * @brief Exercise the id parser and both generation mappings against fixtures.
+ *
+ * Built only with `-DSLATE_SHELLY_SELFTEST=1`. These three functions are where
+ * a Shelly's own vocabulary becomes §5.2's, and a mistake in them is a wrong
+ * number on a wall rather than a crash — nothing else in the build would
+ * notice. They are pure over their inputs, so this needs no device and no
+ * network. ESP_FAIL if any case failed.
+ */
+esp_err_t slate_shelly_selftest(void);
+
+#endif
+
 #ifdef __cplusplus
 }
 #endif

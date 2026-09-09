@@ -490,6 +490,9 @@ static const char *provider_display_name(const slate_config_bar_item_t *item)
     if (strcmp(item->provider, "direct") == 0) {
         return "Direct";
     }
+    if (strcmp(item->provider, "shelly") == 0) {
+        return "Shelly";
+    }
     return item->provider;
 }
 

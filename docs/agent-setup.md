@@ -627,9 +627,13 @@ about fifteen seconds have passed — a Shelly sweep is every five, plus one pro
 per host the first time. Only then is a missing resource a real finding — the
 panel subscribes solely to what the active dashboard references, so an entity
 absent after that is a binding matching nothing in Home Assistant, which is
-almost always a typo in an entity id. On the Shelly path an `available: false`
-that never clears is the other shape of the same mistake: a host that does not
-answer, or a role that device does not measure.
+almost always a typo in an entity id. On the Shelly path the same mistake has a
+different shape: a resource **missing entirely** from `/resources` after a
+minute is a host that never answered or a role that device does not measure —
+the panel publishes nothing for a reading it has never taken, so the tile keeps
+its `provider:resource` placeholder. A resource that is present with
+`available: false` is the healthier failure: it was read once and the device has
+since gone quiet.
 
 Touching a tile is the one thing you cannot verify from here, so ask the
 operator to do it — but **read the light's state and keep it before you ask**.
