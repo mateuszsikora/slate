@@ -24,9 +24,11 @@ and the firmware decides how it looks:
 That is the whole idea. A dashboard is a document like the one above, pushed to
 the panel over HTTP — from a drag-and-drop editor the panel itself serves, or
 from a file — so rearranging it costs a request rather than a build. State and
-actions come from providers: **Home Assistant**, over its WebSocket API, and
-**direct**, which is any script that can POST JSON and read a WebSocket. Neither
-is required by the other, and nothing outside the local network is involved.
+actions come from providers: **Home Assistant**, over its WebSocket API;
+**direct**, which is any script that can POST JSON and read a WebSocket; and
+**Shelly**, which the panel polls on the LAN by itself. None is required by the
+others, and nothing outside the local network is involved. With Shelly the panel
+needs nothing else running at all.
 
 - [What you need](#what-you-need) · [Install](#install) · [First run](#first-run)
 - [Building a dashboard](#building-a-dashboard) · [Providers](#providers) ·
@@ -263,6 +265,34 @@ script takes. The contract they implement is in
 One rule catches everybody once: answering an action is not confirming it. A
 `success: true` acknowledges delivery; what clears the tile's pending state is
 the next published snapshot showing the new value.
+
+### Shelly — nothing else running
+
+The one provider where the panel is the only thing that has to be switched on.
+It polls Shelly relays over HTTP on your network, so there is no broker, no
+automation system and no script on a laptop that has to stay awake.
+
+It has no settings. The binding carries the address, so publishing a dashboard
+is the whole of setting it up:
+
+```json
+{"id": "t1", "type": "light", "pos": [0, 0], "size": [1, 1],
+ "binding": {"provider": "shelly", "resource": "192.168.1.51/switch:0"},
+ "label": "Kitchen"}
+```
+
+The id is `<host>/<role>:<index>`. `switch` is the relay and gives a `light`
+tile; `power`, `voltage` and `temperature` are `sensor` tiles reading a metered
+device. `index` is the channel, so a two-channel Plus 2PM is `switch:0` and
+`switch:1`. Gen1 and Gen2 devices use the same ids — the panel works out which
+dialect a device speaks on its own.
+
+Because the address lives in the binding, give each relay a DHCP reservation, or
+write the mDNS name instead — `shelly1-abcdef123456.local/switch:0` — so a new
+lease cannot empty a tile. Devices with authentication enabled are not supported;
+these are relays on your own LAN, and the panel sends no credentials.
+
+Full reference: [`docs/API.md`](docs/API.md#the-shelly-provider).
 
 ## Updating
 

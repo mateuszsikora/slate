@@ -457,72 +457,74 @@ static cJSON *themes_json(void)
 }
 
 /**
- * How many bound resources the store holds for one provider, and its status.
+ * @brief Append one `{id, status, resource_count}` entry. False on allocation failure.
  *
  * §4.1 is explicit that a provider's `resource_count` is not the top-level one:
  * this is what the dashboard binds through that provider, while the number
- * beside it is the distinct resources the store holds in total. An id nothing
- * has registered — `ha` until M3 supplies its adapter — reads as unconfigured
- * with nothing bound, which is what §5.1 says such a provider is.
+ * beside it is the distinct resources the store holds in total.
  */
-static slate_state_provider_info_t provider_info(const char *id)
+static bool append_provider(cJSON *providers, const char *id,
+                            const slate_state_provider_info_t *info)
 {
-    slate_state_provider_info_t info = {0};
-    strlcpy(info.id, id, sizeof(info.id));
-
-    for (size_t i = 0; i < slate_state_provider_count(); i++) {
-        slate_state_provider_info_t entry;
-        if (slate_state_provider_at(i, &entry) == ESP_OK && strcmp(entry.id, id) == 0) {
-            return entry;
-        }
+    cJSON *entry = cJSON_CreateObject();
+    if (entry == NULL) {
+        return false;
     }
-    return info;
+    if (cJSON_AddStringToObject(entry, "id", id) == NULL ||
+        cJSON_AddStringToObject(entry, "status",
+                                slate_provider_status_str(info->status)) == NULL ||
+        cJSON_AddNumberToObject(entry, "resource_count", info->resource_count) == NULL ||
+        !cJSON_AddItemToArray(providers, entry)) {
+        cJSON_Delete(entry);
+        return false;
+    }
+    return true;
 }
 
 static cJSON *providers_json(void)
 {
     /*
-     * §5.1 names two provider ids for version 1 and makes both of them always
-     * present in this list — `direct` because it is, and `ha` because it is
-     * "present but `unconfigured` until it has credentials". So the shape is
-     * stated here and the values are read from the provider registry: `direct`'s status is
-     * §5.4's real one, `degraded` with no attached action consumer and `online`
-     * with one, rather than the constant that stood in before it had a provider
-     * to report. The HA adapter likewise owns its real connection lifecycle;
-     * an absent registration still falls back to `unconfigured`, preserving the
-     * stable response shape if that component could not initialise.
+     * Read from the provider registry rather than named here, so an adapter
+     * that registers is an adapter this endpoint reports. The two ids §5.1
+     * names for version 1 were once written out as literals, which was true of
+     * a firmware that had exactly them and quietly wrong afterwards: `shelly`
+     * registered, served bindings and answered actions while every client asking
+     * what this panel integrates was told it did not exist.
+     *
+     * The guarantee that survives is the one §5.1 actually makes — `direct` and
+     * `ha` are always present, `ha` "present but `unconfigured` until it has
+     * credentials" — so each is added as an `unconfigured` stand-in if its
+     * component could not initialise. That keeps the response shape stable
+     * without making it a fixed list.
      */
-    const slate_state_provider_info_t direct_info = provider_info("direct");
-    const slate_state_provider_info_t ha_info = provider_info("ha");
-
     cJSON *providers = cJSON_CreateArray();
-    cJSON *direct = cJSON_CreateObject();
-    cJSON *ha = cJSON_CreateObject();
-    bool ok = providers && direct && ha &&
-              cJSON_AddStringToObject(direct, "id", "direct") != NULL &&
-              cJSON_AddStringToObject(
-                  direct, "status", slate_provider_status_str(direct_info.status)) != NULL &&
-              cJSON_AddNumberToObject(direct, "resource_count",
-                                      direct_info.resource_count) != NULL &&
-              cJSON_AddStringToObject(ha, "id", "ha") != NULL &&
-              cJSON_AddStringToObject(
-                  ha, "status", slate_provider_status_str(ha_info.status)) != NULL &&
-              cJSON_AddNumberToObject(ha, "resource_count", ha_info.resource_count) != NULL;
-
-    if (ok) {
-        ok = cJSON_AddItemToArray(providers, direct);
-        if (ok) {
-            direct = NULL;
-            ok = cJSON_AddItemToArray(providers, ha);
-            if (ok) {
-                ha = NULL;
-            }
-        }
+    if (providers == NULL) {
+        return NULL;
     }
+
+    bool ok = true;
+    bool present_direct = false;
+    bool present_ha = false;
+    for (size_t i = 0; ok && i < slate_state_provider_count(); i++) {
+        slate_state_provider_info_t info;
+        if (slate_state_provider_at(i, &info) != ESP_OK) {
+            continue;
+        }
+        present_direct = present_direct || strcmp(info.id, "direct") == 0;
+        present_ha = present_ha || strcmp(info.id, "ha") == 0;
+        ok = append_provider(providers, info.id, &info);
+    }
+
+    const slate_state_provider_info_t absent = {.status = SLATE_PROVIDER_UNCONFIGURED};
+    if (ok && !present_direct) {
+        ok = append_provider(providers, "direct", &absent);
+    }
+    if (ok && !present_ha) {
+        ok = append_provider(providers, "ha", &absent);
+    }
+
     if (!ok) {
         cJSON_Delete(providers);
-        cJSON_Delete(direct);
-        cJSON_Delete(ha);
         return NULL;
     }
     return providers;
