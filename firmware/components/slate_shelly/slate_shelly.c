@@ -1099,16 +1099,22 @@ esp_err_t slate_shelly_selftest(void)
      * `ever_read` was reset publishes nothing when its device goes quiet and the
      * tile keeps a live reading for an unplugged relay.
      */
-    CHECK(subscribe(NULL, THREE, 3) == ESP_OK && adopt_pending() && s_device_count == 2,
+    CHECK(subscribe(NULL, THREE, 3) == ESP_OK && adopt_pending() && s_devices != NULL &&
+              s_entries != NULL && s_device_count == 2,
           "a set to learn something about");
-    s_devices[0].generation = 2;
-    s_devices[0].reachable = true;
-    s_devices[0].ever_reachable = true;
-    s_entries[0].ever_read = true;
-    s_entries[0].last.light.on = true;
-    s_swept = true;
-    CHECK(subscribe(NULL, THREE, 3) == ESP_OK && adopt_pending() &&
-              s_devices[0].generation == 2 && s_devices[0].reachable &&
+    /* Guarded like the assertions around it: an allocation that failed above
+     * leaves these NULL, and a self-test that segfaults on its way to reporting
+     * a failure reports nothing at all. */
+    if (s_devices != NULL && s_entries != NULL) {
+        s_devices[0].generation = 2;
+        s_devices[0].reachable = true;
+        s_devices[0].ever_reachable = true;
+        s_entries[0].ever_read = true;
+        s_entries[0].last.light.on = true;
+        s_swept = true;
+    }
+    CHECK(subscribe(NULL, THREE, 3) == ESP_OK && adopt_pending() && s_devices != NULL &&
+              s_entries != NULL && s_devices[0].generation == 2 && s_devices[0].reachable &&
               s_devices[0].ever_reachable && s_entries[0].ever_read &&
               s_entries[0].last.light.on,
           "republishing the same set keeps what was learned about its hosts");
