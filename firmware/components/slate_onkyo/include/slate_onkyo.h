@@ -88,7 +88,9 @@ esp_err_t slate_onkyo_start(void);
  * Built only with `-DSLATE_ONKYO_SELFTEST=1`. It needs no receiver and no
  * network — it drives the frame reader with byte buffers, including a frame
  * split across two reads, which is the case a stream protocol gets wrong — but
- * it is not free of side effects: it moves the adapter's cached receiver state.
+ * it is not free of side effects: it moves the adapter's cached receiver state,
+ * installs and releases binding sets, and opens one real socket so that the
+ * handover's `close()` is something a check can observe.
  * Call after slate_state_init() and slate_onkyo_init(), and before
  * slate_onkyo_start(). ESP_FAIL if any case failed.
  */

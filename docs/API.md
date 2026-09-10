@@ -203,9 +203,11 @@ reaching, which is the question a dashboard of addresses raises:
 | `error` | nothing has ever answered. Usually an address that reaches no device |
 
 `onkyo` uses the same five for the same reasons, reading them off its sockets:
-`connecting` while no receiver has answered yet, `online` when every bound one
-is connected and has, `degraded` when some are, `offline` when none are now
-though some have been.
+`connecting` while a receiver has not been tried yet, `online` when every bound
+one is connected and has answered, `degraded` when some are, `offline` when none
+are now though some have been, and `error` when every one has been tried and
+none has ever answered — the same operator mistake, reported by the same word,
+whichever provider it lands on.
 
 > `DESIGN.md` §4.1 also specifies a standalone `GET /providers` carrying the
 > same entries without the device health around them. This firmware does not
@@ -737,6 +739,13 @@ own in step with the vendor's.
 its own `NRI` claims `volmax="82"`, so neither number is reliably the scale. The
 panel sends the percentage as the receiver's own volume value and lets the
 receiver clamp what it cannot do.
+
+The slider is therefore an **absolute** volume with no ceiling of its own:
+dragging the 2×2 tile to the top asks for the loudest thing the receiver can do,
+the way turning the knob all the way would. That is a deliberate choice rather
+than an oversight — a wall panel that quietly refused the top of its own slider
+would be harder to explain than one that does what it looks like it does — but
+it is worth knowing before the first tap.
 
 Nothing is published for a receiver that has not answered yet, so its tiles keep
 the placeholder naming `provider:resource` until the first frame arrives — the

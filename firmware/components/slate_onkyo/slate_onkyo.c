@@ -18,6 +18,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,9 +54,19 @@ static const char *TAG = "slate_onkyo";
  */
 #define SELECT_TIMEOUT_MS 200
 
-/* A connect() is the one blocking call here. It is only ever attempted when no
- * command is waiting, so a receiver that has been unplugged cannot delay a tap
- * meant for one that has not. */
+/*
+ * The budget for a connection attempt, and it has to be enforced by hand.
+ * `SO_SNDTIMEO` does not apply to `connect()` — lwIP reads it only on the send
+ * path, and `lwip_connect()` waits on its completion semaphore with no timeout
+ * at all. What actually bounds a blocking connect is SYN retransmission, and
+ * this project builds with `CONFIG_LWIP_TCP_SYNMAXRTX 12`, which is minutes.
+ *
+ * A connect that long would be worse than slow. The task is not in `select()`
+ * or reading its queue while it runs, so an unplugged receiver would deafen the
+ * adapter to a tap meant for a working one, and to everything the working one
+ * pushed meanwhile. Hence the non-blocking connect below: the attempt joins the
+ * `select()` the loop already performs, and this number becomes true.
+ */
 #define CONNECT_TIMEOUT_MS 2000
 #define BACKOFF_MIN_MS     2000
 #define BACKOFF_MAX_MS     30000
@@ -97,6 +108,11 @@ typedef struct {
      * "we have not been told", and §5.2 has no third value for a light — so
      * nothing is published until the receiver has answered once. */
     bool known;
+    /* Whether a connection has ever been *tried*, which is what separates "not
+     * yet" from "never going to". Without it every unreachable receiver reads
+     * as `connecting` forever, and a mistyped address looks like one still in
+     * progress rather than one that will never resolve. */
+    bool attempted;
     bool power;
     uint8_t volume;
     bool muted;
@@ -175,6 +191,14 @@ static const char *input_name(const char *code)
     return NULL;
 }
 
+static void disconnect(device_t *device, const char *why);
+
+/*
+ * A frame is under fifty bytes, so a partial write means the socket is in
+ * trouble rather than merely busy — and half a frame left in the receiver's
+ * stream would desynchronise it until something noticed. Dropping the
+ * connection is the resynchronisation.
+ */
 static bool send_command(device_t *device, const char *command)
 {
     if (device->fd < 0) {
@@ -195,7 +219,11 @@ static bool send_command(device_t *device, const char *command)
 
     size_t total = 16 + (size_t)body;
     ssize_t written = send(device->fd, frame, total, 0);
-    return written == (ssize_t)total;
+    if (written != (ssize_t)total) {
+        disconnect(device, written < 0 ? strerror(errno) : "accepted only part of a frame");
+        return false;
+    }
+    return true;
 }
 
 /**
@@ -204,7 +232,11 @@ static bool send_command(device_t *device, const char *command)
  */
 static bool apply_message(device_t *device, const char *message)
 {
-    if (strncmp(message, "!1", 2) != 0 || strlen(message) < 5) {
+    /* `!1` + three letters + at least one byte of value. Five would admit
+     * `!1MVL`, whose `value[1]` then reads past the terminator into whatever
+     * `consume()` left on its stack — in bounds, uninitialised, and only
+     * harmless by accident. */
+    if (strncmp(message, "!1", 2) != 0 || strlen(message) < 6) {
         return false;
     }
     const char *command = message + 2;
@@ -413,8 +445,11 @@ static void publish_device(size_t device_index)
 
 static void disconnect(device_t *device, const char *why)
 {
+    /* Logged whether or not there was a socket to close. The reason on the
+     * failure paths is the *only* diagnostic a mistyped address ever produces,
+     * and guarding the log on `fd >= 0` threw it away exactly there. */
+    ESP_LOGW(TAG, "%s: %s", device->host, why);
     if (device->fd >= 0) {
-        ESP_LOGW(TAG, "%s: %s", device->host, why);
         close(device->fd);
         device->fd = -1;
     }
@@ -431,6 +466,7 @@ static void connect_device(device_t *device)
     struct addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
     struct addrinfo *found = NULL;
     if (getaddrinfo(device->host, EISCP_PORT, &hints, &found) != 0 || found == NULL) {
+        device->attempted = true;
         disconnect(device, "cannot be resolved");
         return;
     }
@@ -438,6 +474,7 @@ static void connect_device(device_t *device)
     int fd = socket(found->ai_family, found->ai_socktype, found->ai_protocol);
     if (fd < 0) {
         freeaddrinfo(found);
+        device->attempted = true;
         disconnect(device, "no socket");
         return;
     }
@@ -446,13 +483,40 @@ static void connect_device(device_t *device)
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
+    /* Non-blocking for the attempt only: a connect this task cannot bound is a
+     * task that stops answering taps. Restored to blocking afterwards, where
+     * `SO_SNDTIMEO` does apply and a read only happens once select() said so. */
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    device->attempted = true;
     int result = connect(fd, found->ai_addr, found->ai_addrlen);
     freeaddrinfo(found);
+    if (result != 0 && errno == EINPROGRESS) {
+        fd_set writable;
+        FD_ZERO(&writable);
+        FD_SET(fd, &writable);
+        int ready = select(fd + 1, NULL, &writable, NULL, &timeout);
+        if (ready <= 0) {
+            close(fd);
+            disconnect(device, ready == 0 ? "did not answer in time" : strerror(errno));
+            return;
+        }
+        int pending = 0;
+        socklen_t length = sizeof(pending);
+        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &pending, &length) != 0 || pending != 0) {
+            close(fd);
+            disconnect(device, pending != 0 ? strerror(pending) : "refused the connection");
+            return;
+        }
+        result = 0;
+    }
     if (result != 0) {
         close(fd);
-        disconnect(device, "did not accept a connection");
+        disconnect(device, strerror(errno));
         return;
     }
+    fcntl(fd, F_SETFL, flags);
 
     device->fd = fd;
     device->rx_len = 0;
@@ -481,11 +545,9 @@ static void run_command(const command_t *command)
         return;
     }
     device_t *device = NULL;
-    size_t index = 0;
     for (size_t i = 0; i < s_device_count; i++) {
         if (strcmp(s_devices[i].host, host) == 0) {
             device = &s_devices[i];
-            index = i;
             break;
         }
     }
@@ -499,14 +561,18 @@ static void run_command(const command_t *command)
     }
 
     char message[16];
-    bool sent = false;
+    bool supported = false; /* the role has this action at all */
+    bool sent = false;      /* and the socket took it */
     switch (role) {
     case ROLE_MAIN:
         if (command->action == SLATE_ACTION_TOGGLE) {
+            supported = true;
             sent = send_command(device, device->power ? "PWR00" : "PWR01");
         } else if (command->action == SLATE_ACTION_SET_POWER) {
+            supported = true;
             sent = send_command(device, command->boolean ? "PWR01" : "PWR00");
         } else if (command->action == SLATE_ACTION_SET_BRIGHTNESS) {
+            supported = true;
             int32_t level = command->number < 0 ? 0 : (command->number > 100 ? 100
                                                                             : command->number);
             /* Setting a volume on a receiver in standby is a request nobody
@@ -520,6 +586,7 @@ static void run_command(const command_t *command)
         break;
     case ROLE_INPUT_SELECT:
         if (command->action == SLATE_ACTION_ACTIVATE) {
+            supported = true;
             snprintf(message, sizeof(message), "SLI%s", code);
             sent = (device->power || send_command(device, "PWR01")) &&
                    send_command(device, message);
@@ -527,6 +594,7 @@ static void run_command(const command_t *command)
         break;
     case ROLE_MUTE:
         if (command->action == SLATE_ACTION_ACTIVATE) {
+            supported = true;
             sent = send_command(device, "AMTTG");
         }
         break;
@@ -535,15 +603,17 @@ static void run_command(const command_t *command)
     }
 
     if (!sent) {
+        /* Two different failures wore one name before: a role that has no such
+         * action, and a socket that died under the write. `shelly` tells them
+         * apart and so should this. */
         slate_action_result(SLATE_ONKYO_PROVIDER_ID, command->action_id, false,
-                            "unsupported_action");
+                            supported ? "unreachable" : "unsupported_action");
         return;
     }
     /* §5.3: this acknowledges delivery. The receiver answers with its own
      * `PWR`/`MVL`/`SLI` frame within a few tens of milliseconds and that is
      * what confirms the tile — there is nothing to poll for. */
     slate_action_result(SLATE_ONKYO_PROVIDER_ID, command->action_id, true, NULL);
-    (void)index;
 }
 
 /* --- The one task --------------------------------------------------------- */
@@ -562,12 +632,23 @@ static void update_status(void)
             connected += s_devices[i].fd >= 0 ? 1 : 0;
             answered += s_devices[i].known ? 1 : 0;
         }
+        size_t attempted = 0;
+        for (size_t i = 0; i < s_device_count; i++) {
+            attempted += s_devices[i].attempted ? 1 : 0;
+        }
         if (connected == s_device_count && answered == s_device_count) {
             status = SLATE_PROVIDER_ONLINE;
         } else if (connected > 0) {
             status = SLATE_PROVIDER_DEGRADED;
         } else if (answered > 0) {
             status = SLATE_PROVIDER_OFFLINE;
+        } else if (attempted == s_device_count) {
+            /* Tried them all, none has ever answered. §5.2's `error` — "needs
+             * user intervention" — and usually an address that reaches nothing.
+             * Reporting `connecting` here reads as "in progress" for something
+             * that will never progress, and is the same operator mistake
+             * `shelly` already calls `error`. */
+            status = SLATE_PROVIDER_ERROR;
         } else {
             status = SLATE_PROVIDER_CONNECTING;
         }
@@ -1020,6 +1101,53 @@ esp_err_t slate_onkyo_selftest(void)
           "SLI carries the selector, normalised");
     CHECK(!apply_message(&device, "!1NLSC-P"), "a frame with no tile behind it is ignored");
     CHECK(!apply_message(&device, "!1"), "a truncated message is not a message");
+    CHECK(!apply_message(&device, "!1MVL"), "a command with no value is not a message");
+
+    /*
+     * The handover, which is the most dangerous code here: it moves a live file
+     * descriptor between tables and relies on blanking the old slot so the
+     * sweep after it does not close what the new table now owns. Getting that
+     * wrong is a double close or a leaked socket, and neither shows up until it
+     * hurts. A real descriptor is used rather than a made-up number precisely
+     * so `close()` is observable.
+     *
+     * Liveness is probed with `getsockopt(SO_TYPE)` rather than `fcntl(F_GETFD)`
+     * — lwIP implements only `F_GETFL`/`F_SETFL`, so `F_GETFD` answers -1 for an
+     * open socket as readily as for a closed one, and a check built on it would
+     * fail against correct code. `SO_TYPE` succeeds while the descriptor lives
+     * and gives `EBADF` once it does not.
+     */
+    static const char *const PAIR[] = {"192.0.2.60/main", "192.0.2.61/main"};
+    CHECK(subscribe(NULL, PAIR, 2) == ESP_OK && adopt_pending() && s_devices != NULL &&
+              s_device_count == 2,
+          "two receivers, one entry each");
+
+    int live = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(live >= 0, "a real descriptor to stand in for a connection");
+    if (live >= 0 && s_devices != NULL && s_device_count == 2) {
+        s_devices[0].fd = live;
+        s_devices[0].known = true;
+        s_devices[0].volume = 0x2A;
+        s_devices[0].attempted = true;
+    }
+    CHECK(subscribe(NULL, PAIR, 2) == ESP_OK && adopt_pending() && s_devices != NULL &&
+              s_devices[0].fd == live && s_devices[0].known && s_devices[0].volume == 0x2A,
+          "republishing the same set carries the socket and what it learned");
+    int kind = 0;
+    socklen_t kind_len = sizeof(kind);
+    CHECK(live < 0 || getsockopt(live, SOL_SOCKET, SO_TYPE, &kind, &kind_len) == 0,
+          "and the sweep did not close the descriptor it had just handed over");
+
+    static const char *const ONE[] = {"192.0.2.61/main"};
+    CHECK(subscribe(NULL, ONE, 1) == ESP_OK && adopt_pending() && s_device_count == 1,
+          "dropping a receiver from the dashboard drops its device");
+    kind_len = sizeof(kind);
+    CHECK(live < 0 || getsockopt(live, SOL_SOCKET, SO_TYPE, &kind, &kind_len) != 0,
+          "and closes the socket nobody is bound to any more");
+
+    CHECK(subscribe(NULL, NULL, 0) == ESP_OK && adopt_pending() && s_device_count == 0 &&
+              s_devices == NULL && s_entries == NULL,
+          "count zero releases the tables, per §5.1's unsubscribe");
 
 #undef CHECK
     ESP_LOGI(TAG, "selftest: %d failure(s)", failures);
