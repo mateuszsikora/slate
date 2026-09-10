@@ -1112,7 +1112,10 @@ static size_t format_status_json(char *out, size_t out_size)
      * an unregistered one is emitted as `unconfigured` rather than dropped.
      */
     char providers[SLATE_STATE_MAX_PROVIDERS * (SLATE_PROVIDER_ID_MAX + 24) + 2];
+    char provider_reasons[SLATE_STATE_MAX_PROVIDERS *
+                          (SLATE_PROVIDER_ID_MAX + SLATE_PROVIDER_REASON_MAX + 8) + 2];
     size_t used = 0;
+    size_t reasons_used = 0;
     bool present_ha = false;
     for (size_t i = 0; i < slate_state_provider_count(); i++) {
         slate_state_provider_info_t info;
@@ -1127,6 +1130,17 @@ static size_t format_status_json(char *out, size_t out_size)
             return 0;
         }
         used += (size_t) written;
+        if (info.reason[0] != '\0') {
+            written = snprintf(provider_reasons + reasons_used,
+                               sizeof(provider_reasons) - reasons_used,
+                               "%s\"%s\":\"%s\"", reasons_used == 0 ? "" : ",",
+                               info.id, info.reason);
+            if (written <= 0 ||
+                (size_t) written >= sizeof(provider_reasons) - reasons_used) {
+                return 0;
+            }
+            reasons_used += (size_t) written;
+        }
     }
     if (!present_ha) {
         int written = snprintf(providers + used, sizeof(providers) - used, "%s\"ha\":\"%s\"",
@@ -1139,9 +1153,14 @@ static size_t format_status_json(char *out, size_t out_size)
     }
 
     int len = snprintf(out, out_size,
-                       "{\"type\":\"status\",\"providers\":{%s},\"wifi\":%s,"
+                       "{\"type\":\"status\",\"providers\":{%s},%s%s%s"
+                       "\"wifi\":%s,"
                        "\"heap_free\":%u,\"lvgl_heap_free\":%s,\"lvgl_frag_pct\":%s}",
-                       providers, wifi_value, (unsigned) esp_get_free_heap_size(), lvgl_free,
+                       providers,
+                       reasons_used > 0 ? "\"provider_reasons\":{" : "",
+                       reasons_used > 0 ? provider_reasons : "",
+                       reasons_used > 0 ? "}," : "",
+                       wifi_value, (unsigned) esp_get_free_heap_size(), lvgl_free,
                        lvgl_frag);
     return len > 0 && (size_t) len < out_size ? (size_t) len : 0;
 }

@@ -474,6 +474,8 @@ static bool append_provider(cJSON *providers, const char *id,
         cJSON_AddStringToObject(entry, "status",
                                 slate_provider_status_str(info->status)) == NULL ||
         cJSON_AddNumberToObject(entry, "resource_count", info->resource_count) == NULL ||
+        (info->reason[0] != '\0' &&
+         cJSON_AddStringToObject(entry, "reason", info->reason) == NULL) ||
         !cJSON_AddItemToArray(providers, entry)) {
         cJSON_Delete(entry);
         return false;

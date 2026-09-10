@@ -46,6 +46,7 @@ typedef struct {
     slate_state_subscribe_fn subscribe;
     void *ctx;
     slate_provider_status_t status;
+    char reason[SLATE_PROVIDER_REASON_MAX + 1];
 } provider_t;
 
 /*
@@ -472,19 +473,43 @@ esp_err_t slate_state_provider_register(const slate_state_provider_t *provider)
 
 esp_err_t slate_state_provider_set_status(const char *id, slate_provider_status_t status)
 {
+    return slate_state_provider_set_status_reason(id, status, NULL);
+}
+
+esp_err_t slate_state_provider_set_status_reason(const char *id,
+                                                 slate_provider_status_t status,
+                                                 const char *reason)
+{
     if (s_lock == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (id == NULL || status > SLATE_PROVIDER_ERROR) {
+    size_t reason_len = reason != NULL ? strnlen(reason, SLATE_PROVIDER_REASON_MAX + 1) : 0;
+    if (id == NULL || status > SLATE_PROVIDER_ERROR ||
+        reason_len > SLATE_PROVIDER_REASON_MAX) {
         return ESP_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0; i < reason_len; i++) {
+        if (!((reason[i] >= 'a' && reason[i] <= 'z') ||
+              (reason[i] >= '0' && reason[i] <= '9') || reason[i] == '_')) {
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+    if (status != SLATE_PROVIDER_ERROR) {
+        reason = NULL;
+        reason_len = 0;
     }
 
     LOCK();
     provider_t *provider = find_provider(id);
     bool changed = false;
-    if (provider != NULL && provider->status != status) {
+    if (provider != NULL &&
+        (provider->status != status || strcmp(provider->reason, reason != NULL ? reason : "") != 0)) {
         bool was_serving = status_is_serving(provider->status);
         provider->status = status;
+        if (reason_len > 0) {
+            memcpy(provider->reason, reason, reason_len);
+        }
+        provider->reason[reason_len] = '\0';
 
         /* Only a crossing of the serving boundary changes what is on screen, and
          * only for this provider's resources — §5.2: "an unavailable HA instance
@@ -545,6 +570,7 @@ esp_err_t slate_state_provider_at(size_t index, slate_state_provider_info_t *out
     if (index < s_provider_count) {
         memcpy(out->id, s_providers[index].id, sizeof(out->id));
         out->status = s_providers[index].status;
+        memcpy(out->reason, s_providers[index].reason, sizeof(out->reason));
         out->resource_count = 0;
         for (size_t i = 0; i < s_count; i++) {
             if (strcmp(s_entries[i].provider, out->id) == 0) {
@@ -1360,9 +1386,21 @@ esp_err_t slate_state_selftest(void)
           "offline stales its own resources without losing them");
     CHECK(slate_state_get("st-beta", "temp", &r) == ESP_OK && r.presentation == SLATE_PRESENT_OK,
           "one provider offline does not stale another's tiles");
+    slate_state_provider_info_t reason_info;
+    CHECK(slate_state_provider_set_status_reason("st-alpha", SLATE_PROVIDER_ERROR,
+                                                 "quota") == ESP_OK &&
+              slate_state_provider_at(0, &reason_info) == ESP_OK &&
+              strcmp(reason_info.reason, "quota") == 0,
+          "an error exposes its stable reason atomically");
+    CHECK(slate_state_provider_set_status_reason("st-alpha", SLATE_PROVIDER_ERROR,
+                                                 "bad-reason") == ESP_ERR_INVALID_ARG,
+          "a non-wire-safe provider reason is refused");
     CHECK(slate_state_provider_set_status("st-alpha", SLATE_PROVIDER_ONLINE) == ESP_OK &&
-              slate_state_get("st-alpha", "lamp", &r) == ESP_OK && r.presentation == SLATE_PRESENT_OK,
-          "reconnecting restores freshness with no new snapshot");
+              slate_state_provider_at(0, &reason_info) == ESP_OK &&
+              reason_info.reason[0] == '\0' &&
+              slate_state_get("st-alpha", "lamp", &r) == ESP_OK &&
+              r.presentation == SLATE_PRESENT_OK,
+          "reconnecting clears the reason and restores freshness");
 
     slate_state_drain(NULL, NULL);
     visit = (visit_t){0};

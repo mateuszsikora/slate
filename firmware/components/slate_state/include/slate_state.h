@@ -81,6 +81,7 @@ extern "C" {
  * screen anyway.
  */
 #define SLATE_PROVIDER_ID_MAX 15
+#define SLATE_PROVIDER_REASON_MAX 31
 #define SLATE_RESOURCE_ID_MAX 63
 #define SLATE_RESOURCE_NAME_MAX 63
 #define SLATE_RESOURCE_AREA_MAX 31
@@ -513,6 +514,11 @@ esp_err_t slate_state_provider_register(const slate_state_provider_t *provider);
  */
 esp_err_t slate_state_provider_set_status(const char *id, slate_provider_status_t status);
 
+/** Atomically report status and an optional stable diagnostic reason. */
+esp_err_t slate_state_provider_set_status_reason(const char *id,
+                                                 slate_provider_status_t status,
+                                                 const char *reason);
+
 /** @brief Current status, or SLATE_PROVIDER_UNCONFIGURED for an unregistered id. */
 slate_provider_status_t slate_state_provider_status(const char *id);
 
@@ -520,6 +526,7 @@ slate_provider_status_t slate_state_provider_status(const char *id);
 typedef struct {
     char id[SLATE_PROVIDER_ID_MAX + 1];
     slate_provider_status_t status;
+    char reason[SLATE_PROVIDER_REASON_MAX + 1];
     size_t resource_count;
 } slate_state_provider_info_t;
 
