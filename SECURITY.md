@@ -1,9 +1,11 @@
 # Security
 
 Slate is firmware for a touch panel on a home network. It talks to a browser and
-to a home automation system on the same LAN, and to exactly one thing outside it:
-an HTTPS manifest, once a day, to learn whether a newer release exists. There is
-no cloud account, no broker and no inbound path from the internet in the design.
+to a home automation system on the same LAN, and to two things outside it: an
+HTTPS manifest, once a day, to learn whether a newer release exists, and — only
+while the Tuya provider is configured — signed requests to the Tuya cloud that
+provider's devices are driven through. There is no broker and no inbound path
+from the internet in the design.
 
 [§Security in the README](README.md#security) is the threat model, and it is
 written as a list of trades rather than as a list of features. Read it before
@@ -45,6 +47,16 @@ triage, so this list exists to save both.
 - **A Home Assistant token carries the authority of its account.** Slate stores
   it and never returns it, but it cannot narrow it. The README asks for a
   dedicated `system-users` account for exactly this reason.
+- **The Tuya provider is a cloud dependency, and it is optional.** While it is
+  configured the panel sends signed HTTPS requests to the Tuya OpenAPI every
+  five seconds. The region, Access ID, Access Secret and account UID live in
+  NVS and are validated before they replace working ones. Authenticated reads
+  return only configuration state, region, and UID; the Access ID and Access
+  Secret are never returned. Browser-to-panel setup still uses Slate's plain
+  LAN HTTP API, while panel-to-Tuya traffic uses verified HTTPS. A Tuya outage or an expired cloud plan
+  stalls only that provider's tiles and reports its status as an error; it
+  opens no inbound path, exposes nothing the Tuya cloud does not already hold,
+  and a panel that never configures Tuya never sends it a byte.
 
 The short form: an attacker with a foothold on the LAN, or with a radio in range
 of a panel in setup mode, is *outside* this threat model. Slate does not claim to
@@ -60,9 +72,9 @@ Anything that gets more than the trades above hand out. Concretely:
 - An External API key doing something [its authority does not
   cover](README.md#security): reading a dashboard, configuring Home Assistant,
   fetching logs, uploading firmware.
-- A stored credential coming back out — the Home Assistant token or the WiFi
-  passphrase appearing in an API response, an exported configuration, the logs or
-  a core dump.
+- A stored credential coming back out — the Home Assistant token, the Tuya
+  cloud credentials or the WiFi passphrase appearing in an API response, an
+  exported configuration, the logs or a core dump.
 - Memory corruption reachable from a request, authenticated or not: the panel is
   a C firmware and a heap overflow on it is a real finding even when the request
   that causes it needs a token.

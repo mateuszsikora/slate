@@ -273,6 +273,7 @@ A binding is always a provider and a resource:
 {"provider": "ha", "resource": "light.living_room"}
 {"provider": "shelly", "resource": "192.168.1.51/switch:0"}
 {"provider": "onkyo", "resource": "192.168.1.60/main"}
+{"provider": "tuya", "resource": "bf2c1e00ab0f12face4d21"}
 ```
 
 Both are opaque strings and are compared as strings. `light.living_room` means
@@ -325,6 +326,34 @@ A tile whose resource arrives as the wrong kind renders an
 incompatible-binding placeholder. A binding that has never produced a snapshot
 renders a placeholder naming `provider:resource`, so it can be found in the
 editor rather than guessed at.
+
+### Which Tuya devices can be bound
+
+Unlike Shelly, the `tuya` provider has credentials to configure first — the
+Integrations page in the editor is where the cloud project's Access ID, Access
+Secret, region and app account UID go, and a resource id is a device id the
+cloud minted rather than an address somebody chose. The editor's resource
+picker lists them by the names the app already knows them by; written by hand,
+a binding names the device id directly:
+
+```json
+{"id": "t1", "type": "light", "pos": [0, 0], "size": [1, 1],
+ "binding": {"provider": "tuya", "resource": "bf2c1e00ab0f12face4d21"},
+ "label": "Desk"}
+```
+
+What maps onto the panel's tiles: lights (`toggle`, `set_power`, and — where
+the device declares the data points — brightness and colour temperature),
+covers (`open`, `stop`, `close`, and position where declared), and sensors for
+temperature, humidity and metered power. A dual temperature/humidity sensor is
+two resources, because one resource carries one reading — the bare device id
+for temperature, `<device id>/humidity` for the other, and the picker offers
+both.
+
+A device in a category the panel has no vocabulary for does not appear in the
+picker and cannot be bound; the mappings above are the whole of what the
+provider promises, and a category outside them renders no tile rather than a
+wrong one.
 
 ### Which Home Assistant entities can be bound
 

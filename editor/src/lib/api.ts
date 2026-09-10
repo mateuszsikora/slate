@@ -6,7 +6,7 @@
  * hide a fetch behind, so this file is the whole client.
  */
 
-import { assembleHaResources, type HaCatalogPayloads } from './ha'
+import { assembleHaResources, type HaCatalogPayloads } from './ha.ts'
 
 export const API_BASE = '/api/v1'
 
@@ -44,6 +44,7 @@ export interface ProviderStatus {
   id: string
   status: string
   resource_count: number
+  reason?: string
 }
 
 export interface HaConfiguration {
@@ -55,6 +56,12 @@ export interface HaDiscoveredInstance {
   name: string
   uuid: string
   url: string
+}
+
+export interface TuyaConfiguration {
+  configured: boolean
+  region: string | null
+  uid: string | null
 }
 
 export interface IntegrationKey {
@@ -98,6 +105,14 @@ export interface Resource {
   available: boolean
   state: Record<string, unknown>
   capabilities?: Record<string, unknown>
+}
+
+export type CatalogState = 'empty' | 'loading' | 'ready' | 'error'
+
+export interface ResourceCatalog {
+  resources: Resource[]
+  /** Absent on older firmware; normalized to `ready` by the client. */
+  catalog_state: CatalogState
 }
 
 export interface DeviceStatus {
@@ -221,6 +236,9 @@ const FACTORY_RESET_TIMEOUT_MS = 30000
 /* Credential testing includes a WebSocket connection to Home Assistant. */
 const HA_CONFIGURATION_TIMEOUT_MS = 20000
 
+/* Tuya credential testing is a signed round trip to the Tuya cloud. */
+const TUYA_CONFIGURATION_TIMEOUT_MS = 20000
+
 /* Registry data changes rarely, while one real catalog is hundreds of KB. A
  * picker gets the session cache immediately and at most starts one refresh in
  * the background after this age; switching tiles never waits on duplicate HA
@@ -342,12 +360,16 @@ export class DeviceClient {
     })
   }
 
-  resources(provider: string): Promise<Resource[]> {
-    if (provider === 'ha') return this.homeAssistantResources()
-    return this.request<{ resources: Resource[] }>(
-      'GET',
-      `/resources?provider=${encodeURIComponent(provider)}`,
-    ).then((response) => response.resources)
+  resources(provider: string): Promise<ResourceCatalog> {
+    if (provider === 'ha') {
+      return this.homeAssistantResources().then((resources) => ({
+        resources,
+        catalog_state: 'ready',
+      }))
+    }
+    return this.request<unknown>('GET', `/resources?provider=${encodeURIComponent(provider)}`).then(
+      normalizeResourceCatalog,
+    )
   }
 
   haConfiguration(): Promise<HaConfiguration> {
@@ -369,6 +391,21 @@ export class DeviceClient {
 
   disconnectHomeAssistant(): Promise<void> {
     return this.request<void>('DELETE', '/ha').then(() => this.invalidateHomeAssistantCatalog())
+  }
+
+  tuyaConfiguration(): Promise<TuyaConfiguration> {
+    return this.request<TuyaConfiguration>('GET', '/tuya')
+  }
+
+  configureTuya(region: string, accessId: string, secret: string, uid: string): Promise<void> {
+    return this.request<void>('POST', '/tuya', {
+      body: JSON.stringify({ region, access_id: accessId, secret, uid }),
+      timeoutMs: TUYA_CONFIGURATION_TIMEOUT_MS,
+    })
+  }
+
+  disconnectTuya(): Promise<void> {
+    return this.request<void>('DELETE', '/tuya')
   }
 
   private homeAssistantResources(): Promise<Resource[]> {
@@ -533,4 +570,22 @@ async function errorBody(response: Response): Promise<unknown> {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Accept the pre-catalog-state response while rejecting a broken new response. */
+export function normalizeResourceCatalog(value: unknown): ResourceCatalog {
+  if (!isObject(value) || !Array.isArray(value['resources'])) {
+    throw new ApiError(502, 'malformed_catalog')
+  }
+  const rawState = value['catalog_state']
+  const catalogState = rawState === undefined ? 'ready' : rawState
+  if (
+    catalogState !== 'empty' &&
+    catalogState !== 'loading' &&
+    catalogState !== 'ready' &&
+    catalogState !== 'error'
+  ) {
+    throw new ApiError(502, 'malformed_catalog')
+  }
+  return { resources: value['resources'] as Resource[], catalog_state: catalogState }
 }

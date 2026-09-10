@@ -113,7 +113,7 @@ export function DevicePanel({ info, status, heartbeat, onIdentify, onFactoryRese
           disabled={identifying || resetting}
           onClick={() => {
             const confirmed = window.confirm(
-              'Factory reset this panel? This permanently erases the dashboard, Wi-Fi settings, administrator security settings, External API keys, and Home Assistant credentials.',
+              'Factory reset this panel? This permanently erases the dashboard, Wi-Fi settings, administrator security settings, External API keys, Home Assistant credentials, and Tuya credentials.',
             )
             if (!confirmed) return
             setResetting(true)

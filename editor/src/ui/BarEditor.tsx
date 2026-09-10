@@ -1,4 +1,4 @@
-import type { BarItem, ProviderStatus, Resource } from '../lib/api'
+import type { BarItem, ProviderStatus, ResourceCatalog } from '../lib/api'
 import {
   BAR_BOUND_MIN_SPAN,
   BAR_RESOURCE_OPTION,
@@ -31,8 +31,8 @@ const BOUND_TYPES = [
 
 interface Props {
   bar: BarItem[] | undefined
-  providers: Pick<ProviderStatus, 'id' | 'status'>[]
-  onLoadResources: (provider: string) => Promise<Resource[]>
+  providers: Pick<ProviderStatus, 'id' | 'status' | 'reason'>[]
+  onLoadResources: (provider: string) => Promise<ResourceCatalog>
   onChange: (bar: BarItem[] | undefined) => void
 }
 

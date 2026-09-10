@@ -43,7 +43,7 @@ Second consequence: anything not anticipated cannot be built. This is intentiona
 
 ### ADR-3: Integrations are providers behind a neutral core
 
-The UI runtime does not know Home Assistant, MQTT or any other automation protocol. It consumes normalized resource state and emits semantic actions through a narrow provider interface. The bundled `direct` provider, the Home Assistant provider and the Shelly provider implement that interface.
+The UI runtime does not know Home Assistant, MQTT or any other automation protocol. It consumes normalized resource state and emits semantic actions through a narrow provider interface. The bundled `direct` provider, the Home Assistant provider, the Shelly provider and the Tuya cloud provider implement that interface.
 
 Consequence: a component asks to `toggle` a light; it never constructs a Home Assistant `call_service` frame. Adding another system means writing an adapter, not forking the component library or the configuration parser. Home Assistant is the first production integration, not a runtime dependency.
 
@@ -290,6 +290,9 @@ Base: `http://<ip>/api/v1`. `/info` and `/session` are the public browser bootst
 | GET    | `/ha/discover`     | discover local HA instances over mDNS; manual URL entry remains available |
 | POST   | `/ha/catalog`      | start one editor-only HA catalog relay stage (`entities`, `devices`, `areas` or `states`); returns a request id |
 | GET    | `/ha/catalog?request=<id>` | poll and consume the raw HA result for one catalog relay stage |
+| GET    | `/tuya`            | whether the Tuya cloud provider is configured; the region and account uid, never the Access ID or Secret |
+| POST   | `/tuya`            | configure the Tuya cloud provider; credentials are validated against the Tuya cloud before saving |
+| DELETE | `/tuya`            | disconnect the Tuya provider and erase its credentials |
 | GET    | `/integration-keys` | list non-secret External API key metadata |
 | POST   | `/integration-keys` | create a named External API key; the plaintext is returned once |
 | DELETE | `/integration-keys?id=<id>` | revoke one External API key and close active integration WebSockets |
@@ -558,7 +561,7 @@ While the setup access point is up, the setup page and the endpoints it needs �
 
 ### 5.1 Provider boundary
 
-A provider is the adapter between one upstream system and the runtime. Version 1 has four provider ids: `direct`, which is always present; `ha`, which is present but `unconfigured` until it has credentials; and `shelly` (§5.9) and `onkyo` (§5.10), each present and `unconfigured` until a dashboard binds a device to it. The common core knows only five operations:
+A provider is the adapter between one upstream system and the runtime. Version 1 has five provider ids: `direct`, which is always present; `ha`, which is present but `unconfigured` until it has credentials; `shelly` (§5.9) and `onkyo` (§5.10), each present and `unconfigured` until a dashboard binds a device to it; and `tuya`, which is present but `unconfigured` until its Tuya cloud credentials are entered. The common core knows only five operations:
 
 1. report lifecycle status;
 2. accept the set of resource ids referenced by the active configuration;
@@ -1184,7 +1187,7 @@ Signing is deliberately absent. TLS with the certificate bundle authenticates th
 
 Minimal by design — the device sits on a LAN, not on the internet.
 
-- Provider credentials live only in NVS and are never returned by the API. The Home Assistant token is the first such credential and carries the account's authority.
+- Provider secrets live only in NVS and are never returned by the API. Tuya's non-secret region and account UID may be returned so the editor can show the current connection. The Home Assistant token is the first such secret and carries the account's authority.
 - The device token guards administrative endpoints and the full editor WebSocket. It is an internal transport credential obtained by the current editor page through `/session`, never a user-facing recovery secret.
 - Named External API keys are stored only as SHA-256 digests, shown once, individually revocable and accepted only for direct-provider state publication and its action-consumer WebSocket role. They cannot read or replace a dashboard, configure HA, receive logs, upload firmware or factory-reset the panel.
 - The optional administrator PIN is stored only as a salted PBKDF2-SHA256 hash. Open mode is explicit: anyone who can reach the panel on the LAN can control it. PIN mode rate-limits failed attempts, asks again for every new page session, and uses physical factory reset as recovery.
@@ -1192,7 +1195,7 @@ Minimal by design — the device sits on a LAN, not on the internet.
 - The WiFi passphrase written by `POST /wifi` lives in NVS and is never returned by the API, and it never enters the configuration JSON — §10 makes that file something people export, import and share, and a credential does not belong in a document with those properties.
 - **The setup access point is open by default**, and its setup page can change WiFi and administrator-PIN settings. The threat model is a room: a WPA2 passphrase can be set when radio range extends into a shared building, and is then displayed on the setup screen beside the SSID.
 - No HTTPS on the device. A deliberate trade-off: a self-signed certificate on an ESP32 is a worse experience than its absence on a local network.
-- **The release channel (§11.4) is the one thing the panel talks to outside the LAN**, and it is outbound, daily, and a few hundred bytes of JSON: no identifier, no configuration and no credential leaves the device, and the request carries only what an HTTP GET carries. It is verified in the direction that matters — TLS against the compiled-in certificate bundle, then the manifest's SHA-256 over the downloaded image — because that traffic is the one path on which a wrong answer becomes running firmware. A build with `SLATE_UPDATE_MANIFEST_URL` empty has no channel and makes no such request, which is the honest way to have a panel that never leaves the LAN — and because that is a build knob, and most panels are installed from a browser by somebody who will never compile anything, `POST /update/settings` stops the daily check on a panel that is already on a wall. `GET /update` reports the two separately, so a panel with no channel and a panel told not to use one are not the same answer.
+- **The release channel (§11.4) is one of the two things the panel talks to outside the LAN — the other is the `tuya` provider's signed requests to the Tuya cloud, sent only while that provider is configured.** Release checks are outbound, daily, and a few hundred bytes of JSON: no identifier, configuration, or credential is sent with a manifest GET. Tuya requests necessarily carry the cloud Access ID and short-lived token to Tuya over verified HTTPS; the Access Secret remains the local HMAC key and is never sent. A build with `SLATE_UPDATE_MANIFEST_URL` empty has no release channel, and `POST /update/settings` can stop its daily check without disabling an intentionally configured Tuya provider.
 - **`GET /coredump` (§11.3) returns memory, so it is the one endpoint whose body is not a curated document.** An ELF core dump carries task stacks, which is where a secret is on its way to or from NVS. Three things keep the two rules above true rather than approximately true. The dump is token-gated like every write, with no setup-access-point exception. `CONFIG_ESP_COREDUMP_CAPTURE_DRAM` stays off, so `.bss`, `.data` and the heap are not in the dump — and the device token, which lives in `.bss`, is therefore not in it either. And the code paths that hold a passphrase or any provider credential on a stack zero it as soon as they are done, for this reason and with this section named at the call site; that is a habit the firmware has to keep, not a property of the endpoint. Enabling `CAPTURE_DRAM` would break the arrangement, which is a second reason it is off.
 
 Origin allow-lists will be added if a concrete scenario requires them.
