@@ -122,9 +122,15 @@ typedef struct {
     int64_t deadline_us;
 } command_t;
 
-/* A parked POST /tuya, from the HTTP task to the configure task. */
+typedef enum {
+    CONFIGURE_SET = 0,
+    CONFIGURE_CLEAR,
+} configure_kind_t;
+
+/* A parked credential mutation, from the HTTP task to the configure task. */
 typedef struct {
     httpd_req_t *request;
+    configure_kind_t kind;
     uint32_t credentials_epoch;
     char region[SLATE_TUYA_REGION_MAX_LEN + 1];
     char access_id[SLATE_TUYA_ACCESS_ID_MAX_LEN + 1];
@@ -148,8 +154,9 @@ static char s_uid[SLATE_TUYA_UID_MAX_LEN + 1]; /* the client's, copied at build 
 static bool s_client_up_to_date;
 static size_t s_cursor;
 static bool s_swept;
-static bool s_offline_hint; /* a network-classified failure this pass */
+static atomic_bool s_offline_hint; /* a network-classified failure this pass */
 static _Atomic int s_error_hint_kind; /* auth/quota failure this pass */
+static _Atomic int s_catalog_error_kind;
 static int64_t s_list_fetch_us;
 
 /* The handover. Held for pointer moves and nothing else. */
@@ -204,6 +211,20 @@ static struct {
 
 static void request_catalog_refresh(void);
 static void classify_failure(slate_tuya_error_kind_t kind);
+
+static void reset_catalog(uint32_t credentials_epoch)
+{
+    xSemaphoreTake(s_catalog.lock, portMAX_DELAY);
+    free(s_catalog.items);
+    s_catalog.items = NULL;
+    s_catalog.count = 0;
+    s_catalog.fetched_us = 0;
+    s_catalog.credentials_epoch = credentials_epoch;
+    s_catalog.state = SLATE_API_CATALOG_EMPTY;
+    s_catalog.refresh_pending = false;
+    atomic_store(&s_catalog_error_kind, SLATE_TUYA_ERR_NONE);
+    xSemaphoreGive(s_catalog.lock);
+}
 
 static bool epoch_work_begin(size_t slot, uint32_t epoch)
 {
@@ -357,6 +378,7 @@ static void reconcile_client(void)
             } else {
                 ESP_LOGE(TAG, "cloud client build failed — continuing");
             }
+            explicit_bzero(access_id, sizeof(access_id));
             explicit_bzero(secret, sizeof(secret));
         }
     }
@@ -514,7 +536,7 @@ static void publish_entry(entry_t *entry, slate_kind_t kind, bool available,
 static void classify_failure(slate_tuya_error_kind_t kind)
 {
     if (kind == SLATE_TUYA_ERR_NETWORK) {
-        s_offline_hint = true;
+        atomic_store(&s_offline_hint, true);
         slate_state_provider_set_status(SLATE_TUYA_PROVIDER_ID, SLATE_PROVIDER_OFFLINE);
     } else if (kind == SLATE_TUYA_ERR_AUTH || kind == SLATE_TUYA_ERR_QUOTA) {
         /* These need a person: a rejected credential or an expired cloud
@@ -555,6 +577,9 @@ static void poll_device(size_t device_index)
         device->dps.cls == SLATE_TUYA_CLASS_UNSUPPORTED) {
         device->reachable = false;
         return; /* nothing publishable, and nothing true to say yet */
+    }
+    if (!epoch_is_current(epoch)) {
+        return;
     }
 
     char path[SLATE_RESOURCE_ID_MAX + 32];
@@ -639,20 +664,9 @@ static void run_action(const command_t *command)
     }
     device_t *device = &s_devices[device_index];
 
-    /* A command needs the device's DP layout, which the sweep normally has
-     * already fetched; a tap on a tile that never swept (the panel booted into
-     * a cloud outage, say) pays for it here rather than failing. */
-    int64_t now = esp_timer_get_time();
-    if (!device->info_known && now >= device->info_retry_us &&
-        now - s_list_fetch_us >= (int64_t)RETRY_BACKOFF_MS * 1000) {
-        refresh_device_list();
-        device->info_retry_us = now + (int64_t)RETRY_BACKOFF_MS * 1000;
-    }
-    if (device->info_known &&
-        (!device->dps_known || device->dps.cls == SLATE_TUYA_CLASS_UNSUPPORTED) &&
-        now >= device->dps_retry_us) {
-        refresh_specification(device);
-    }
+    /* The sweep proactively learns the DP layout and refreshes the token.
+     * An action never spends its three-second budget discovering either one:
+     * doing so could deliver a cloud side effect after the UI timed out. */
     if (!device->dps_known || device->dps.cls == SLATE_TUYA_CLASS_UNSUPPORTED) {
         slate_action_result(SLATE_TUYA_PROVIDER_ID, command->action_id, false,
                             "unsupported_action");
@@ -711,8 +725,15 @@ static void run_action(const command_t *command)
     char path[SLATE_RESOURCE_ID_MAX + 32];
     snprintf(path, sizeof(path), "/v1.0/devices/%s/commands", device->id);
     slate_tuya_error_kind_t kind = SLATE_TUYA_ERR_NONE;
-    esp_err_t err = slate_tuya_client_request(s_client, HTTP_METHOD_POST, path,
-                                              body_text, NULL, &kind);
+    if (!epoch_is_current(command->credentials_epoch) ||
+        esp_timer_get_time() >= command->deadline_us) {
+        cJSON_free(body_text);
+        slate_action_result(SLATE_TUYA_PROVIDER_ID, command->action_id, false,
+                            "stale_configuration");
+        return;
+    }
+    esp_err_t err = slate_tuya_client_request_until(
+        s_client, HTTP_METHOD_POST, path, body_text, command->deadline_us, NULL, &kind);
     cJSON_free(body_text);
     if (err != ESP_OK) {
         classify_failure(kind);
@@ -739,21 +760,26 @@ static void run_action(const command_t *command)
 static void update_status(void)
 {
     slate_provider_status_t status;
+    slate_tuya_error_kind_t poll_reason = atomic_load(&s_error_hint_kind);
+    slate_tuya_error_kind_t catalog_reason = atomic_load(&s_catalog_error_kind);
+    slate_tuya_error_kind_t reason = poll_reason != SLATE_TUYA_ERR_NONE
+                                         ? poll_reason
+                                         : catalog_reason;
     if (s_client == NULL && !slate_store_tuya_is_set()) {
         status = SLATE_PROVIDER_UNCONFIGURED;
     } else if (!s_network_up) {
         status = SLATE_PROVIDER_OFFLINE;
-    } else if (atomic_load(&s_error_hint_kind) != SLATE_TUYA_ERR_NONE) {
+    } else if (poll_reason != SLATE_TUYA_ERR_NONE) {
         status = SLATE_PROVIDER_ERROR;
     } else if (s_device_count == 0) {
-        /* Configured and nothing bound: there is nothing to poll and nothing
-         * to be wrong. The cloud was reachable when the credentials were
-         * tested, and saying `connecting` here would be describing a sweep
-         * that is never going to happen. */
-        status = SLATE_PROVIDER_ONLINE;
+        status = catalog_reason == SLATE_TUYA_ERR_NONE
+                     ? SLATE_PROVIDER_ONLINE
+                     : catalog_reason == SLATE_TUYA_ERR_NETWORK
+                           ? SLATE_PROVIDER_OFFLINE
+                           : SLATE_PROVIDER_ERROR;
     } else if (!s_swept) {
         status = SLATE_PROVIDER_CONNECTING;
-    } else if (s_offline_hint) {
+    } else if (atomic_load(&s_offline_hint)) {
         status = SLATE_PROVIDER_OFFLINE;
     } else {
         size_t reachable = 0;
@@ -763,7 +789,9 @@ static void update_status(void)
             ever += s_devices[i].ever_reachable ? 1 : 0;
         }
         if (reachable == s_device_count) {
-            status = SLATE_PROVIDER_ONLINE;
+            status = catalog_reason == SLATE_TUYA_ERR_NONE
+                         ? SLATE_PROVIDER_ONLINE
+                         : SLATE_PROVIDER_DEGRADED;
         } else if (reachable > 0) {
             status = SLATE_PROVIDER_DEGRADED;
         } else if (ever > 0) {
@@ -772,7 +800,6 @@ static void update_status(void)
             status = SLATE_PROVIDER_ERROR;
         }
     }
-    slate_tuya_error_kind_t reason = atomic_load(&s_error_hint_kind);
     slate_state_provider_set_status_reason(
         SLATE_TUYA_PROVIDER_ID, status,
         reason == SLATE_TUYA_ERR_AUTH ? "auth" :
@@ -849,7 +876,7 @@ static bool adopt_pending(void)
 
 static void sweep(void)
 {
-    s_offline_hint = false;
+    atomic_store(&s_offline_hint, false);
     atomic_store(&s_error_hint_kind, SLATE_TUYA_ERR_NONE);
     if (s_device_count == 0) {
         return;
@@ -905,6 +932,8 @@ static void poller_task(void *arg)
                                             false, "offline");
                     }
                 }
+            } else {
+                next_sweep_us = 0;
             }
             continue; /* drain the queue before spending time on a sweep */
         }
@@ -1029,6 +1058,7 @@ static esp_err_t fetch_catalog(uint32_t epoch, slate_resource_t **out_items,
     if (err == ESP_OK) {
         err = slate_tuya_client_create(region, access_id, secret, uid, &client);
     }
+    explicit_bzero(access_id, sizeof(access_id));
     explicit_bzero(secret, sizeof(secret));
     if (err == ESP_OK) {
         char path[SLATE_TUYA_UID_MAX_LEN + 32];
@@ -1161,11 +1191,11 @@ static void catalog_task(void *arg)
             s_catalog.count = count;
             s_catalog.fetched_us = esp_timer_get_time();
             s_catalog.state = SLATE_API_CATALOG_READY;
-            slate_state_provider_set_status(SLATE_TUYA_PROVIDER_ID,
-                                            SLATE_PROVIDER_ONLINE);
+            atomic_store(&s_catalog_error_kind, SLATE_TUYA_ERR_NONE);
         } else if (current) {
             s_catalog.state = SLATE_API_CATALOG_ERROR;
-            classify_failure(kind == SLATE_TUYA_ERR_NONE ? SLATE_TUYA_ERR_API : kind);
+            atomic_store(&s_catalog_error_kind,
+                         kind == SLATE_TUYA_ERR_NONE ? SLATE_TUYA_ERR_API : kind);
             if (kind != SLATE_TUYA_ERR_NONE) {
                 ESP_LOGW(TAG, "catalog refresh failed (kind %d)", (int)kind);
             }
@@ -1181,6 +1211,10 @@ static void catalog_task(void *arg)
         free(items);
         if (retry_current) {
             request_catalog_refresh();
+        }
+        if (current && s_commands != NULL) {
+            const command_t wake = {.kind = CMD_WAKE};
+            xQueueSend(s_commands, &wake, 0);
         }
         epoch_work_end(ACTIVE_CATALOG);
     }
@@ -1425,6 +1459,35 @@ static void configure_task(void *arg)
             free(job);
             continue;
         }
+        if (job->kind == CONFIGURE_CLEAR) {
+            mutation_barrier(job->credentials_epoch);
+            xSemaphoreTake(s_mutation_lock, portMAX_DELAY);
+            esp_err_t cleared = job->credentials_epoch == atomic_load(&s_credentials_epoch)
+                                    ? slate_store_tuya_clear()
+                                    : ESP_ERR_INVALID_STATE;
+            xSemaphoreGive(s_mutation_lock);
+            if (cleared == ESP_ERR_INVALID_STATE) {
+                slate_api_refuse(job->request, "409 Conflict", "stale_configuration");
+            } else if (cleared != ESP_OK) {
+                slate_state_provider_set_status(SLATE_TUYA_PROVIDER_ID,
+                                                SLATE_PROVIDER_ERROR);
+                slate_api_refuse(job->request, "500 Internal Server Error",
+                                 "store_failed");
+            } else {
+                if (s_commands != NULL) {
+                    const command_t wake = {.kind = CMD_WAKE};
+                    xQueueSend(s_commands, &wake, 0);
+                }
+                reset_catalog(atomic_load(&s_credentials_epoch));
+                httpd_resp_set_status(job->request, "204 No Content");
+                httpd_resp_send(job->request, NULL, 0);
+            }
+            httpd_req_async_handler_complete(job->request);
+            epoch_work_end(ACTIVE_CONFIG);
+            wipe_job(job);
+            free(job);
+            continue;
+        }
         slate_tuya_error_kind_t kind = SLATE_TUYA_ERR_NONE;
         esp_err_t tested =
             slate_tuya_client_test(job->region, job->access_id, job->secret,
@@ -1459,15 +1522,7 @@ static void configure_task(void *arg)
             /* Drop any cached catalog from the previous project: those names
              * and categories belong to credentials that just stopped being
              * the ones in the store. */
-            xSemaphoreTake(s_catalog.lock, portMAX_DELAY);
-            free(s_catalog.items);
-            s_catalog.items = NULL;
-            s_catalog.count = 0;
-            s_catalog.fetched_us = 0;
-            s_catalog.credentials_epoch = atomic_load(&s_credentials_epoch);
-            s_catalog.state = SLATE_API_CATALOG_EMPTY;
-            s_catalog.refresh_pending = false;
-            xSemaphoreGive(s_catalog.lock);
+            reset_catalog(atomic_load(&s_credentials_epoch));
             httpd_resp_set_status(job->request, "204 No Content");
             httpd_resp_send(job->request, NULL, 0);
         }
@@ -1482,6 +1537,10 @@ static void configure_task(void *arg)
 static esp_err_t disconnect_handler(httpd_req_t *req)
 {
     uint32_t intent_epoch = mutation_begin();
+    slate_provider_status_t previous_status =
+        slate_state_provider_status(SLATE_TUYA_PROVIDER_ID);
+    slate_state_provider_set_status(SLATE_TUYA_PROVIDER_ID,
+                                    SLATE_PROVIDER_UNCONFIGURED);
     slate_action_provider_unavailable(SLATE_TUYA_PROVIDER_ID, "unconfigured");
     if (s_commands != NULL) {
         xQueueReset(s_commands);
@@ -1489,36 +1548,28 @@ static esp_err_t disconnect_handler(httpd_req_t *req)
     if (s_catalog_jobs != NULL) {
         xQueueReset(s_catalog_jobs);
     }
-    mutation_barrier(intent_epoch);
-    xSemaphoreTake(s_mutation_lock, portMAX_DELAY);
-    esp_err_t err = intent_epoch == atomic_load(&s_credentials_epoch)
-                        ? slate_store_tuya_clear()
-                        : ESP_ERR_INVALID_STATE;
-    xSemaphoreGive(s_mutation_lock);
-    if (err == ESP_ERR_INVALID_STATE) {
-        return slate_api_refuse(req, "409 Conflict", "stale_configuration");
+    configure_job_t *job = calloc(1, sizeof(*job));
+    if (job == NULL) {
+        slate_state_provider_set_status(SLATE_TUYA_PROVIDER_ID, previous_status);
+        return slate_api_send_json(req, NULL);
     }
+    job->kind = CONFIGURE_CLEAR;
+    job->credentials_epoch = intent_epoch;
+    esp_err_t err = httpd_req_async_handler_begin(req, &job->request);
     if (err != ESP_OK) {
-        return slate_api_refuse(req, "500 Internal Server Error", "store_failed");
+        slate_state_provider_set_status(SLATE_TUYA_PROVIDER_ID, previous_status);
+        wipe_job(job);
+        free(job);
+        return slate_api_send_json(req, NULL);
     }
-    slate_state_provider_set_status(SLATE_TUYA_PROVIDER_ID,
-                                    SLATE_PROVIDER_UNCONFIGURED);
-    slate_action_provider_unavailable(SLATE_TUYA_PROVIDER_ID, "unconfigured");
-    if (s_commands != NULL) {
-        const command_t wake = {.kind = CMD_WAKE};
-        xQueueSend(s_commands, &wake, 0);
+    if (xQueueSend(s_config_jobs, &job, 0) != pdTRUE) {
+        slate_state_provider_set_status(SLATE_TUYA_PROVIDER_ID, previous_status);
+        slate_api_refuse(job->request, "503 Service Unavailable", "tuya_busy");
+        httpd_req_async_handler_complete(job->request);
+        wipe_job(job);
+        free(job);
     }
-    xSemaphoreTake(s_catalog.lock, portMAX_DELAY);
-    free(s_catalog.items);
-    s_catalog.items = NULL;
-    s_catalog.count = 0;
-    s_catalog.fetched_us = 0;
-    s_catalog.credentials_epoch = atomic_load(&s_credentials_epoch);
-    s_catalog.state = SLATE_API_CATALOG_EMPTY;
-    s_catalog.refresh_pending = false;
-    xSemaphoreGive(s_catalog.lock);
-    httpd_resp_set_status(req, "204 No Content");
-    return httpd_resp_send(req, NULL, 0);
+    return ESP_OK;
 }
 
 /* --- Provider callbacks ------------------------------------------------------ */
@@ -1814,7 +1865,8 @@ esp_err_t slate_tuya_start(void)
     if (xTaskCreate(poller_task, "slate_tuya", TASK_STACK, NULL, TASK_PRIORITY,
                     &s_task) != pdPASS) {
         /* Unwind everything, and `s_commands` above all: a queue left behind
-         * none of them, which §5.3 makes worse than refusing them outright. */
+         * would accept actions with nobody to answer them, which §5.3 makes
+         * worse than refusing them outright. */
         esp_event_handler_unregister(SLATE_WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event);
         vQueueDelete(s_commands);
         s_commands = NULL;

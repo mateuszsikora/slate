@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <stdint.h>
+
 #include "cJSON.h"
 #include "esp_err.h"
 #include "esp_http_client.h" /* HTTP_METHOD_GET/POST/DELETE */
@@ -49,6 +51,17 @@ esp_err_t slate_tuya_client_request(slate_tuya_client_handle_t h,
                                     int method /*HTTP_METHOD_GET/POST/DELETE*/,
                                     const char *path, const char *body,
                                     cJSON **out_body, slate_tuya_error_kind_t *err_kind);
+
+/* Action-only request path. Requires an already-fresh token, performs no
+ * token refresh/retry, and bounds the HTTP call to the remaining monotonic
+ * deadline. This prevents a cloud command from landing after the action bus
+ * has already reported a timeout. */
+esp_err_t slate_tuya_client_request_until(slate_tuya_client_handle_t h,
+                                          int method,
+                                          const char *path, const char *body,
+                                          int64_t deadline_us,
+                                          cJSON **out_body,
+                                          slate_tuya_error_kind_t *err_kind);
 
 /* Validates credentials without a full client: fetch token + one device-list page.
  * Used by the POST /tuya route before storing. */

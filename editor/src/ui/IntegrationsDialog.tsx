@@ -52,9 +52,11 @@ export function IntegrationsDialog({ client, providers, onChanged, onClose }: Pr
   const [keyMessage, setKeyMessage] = useState<string | null>(null)
   const [created, setCreated] = useState<CreatedIntegrationKey | null>(null)
   const tokenInput = useRef<HTMLInputElement>(null)
+  const tuyaRequest = useRef(0)
 
   useEffect(() => {
     let cancelled = false
+    const tuyaLoad = ++tuyaRequest.current
 
     void client
       .haConfiguration()
@@ -84,7 +86,7 @@ export function IntegrationsDialog({ client, providers, onChanged, onClose }: Pr
     void client
       .tuyaConfiguration()
       .then((configuration) => {
-        if (cancelled) return
+        if (cancelled || tuyaLoad !== tuyaRequest.current) return
         setTuya(configuration)
         if (configuration.region !== null) setTuyaRegion(configuration.region)
         setTuyaUid(configuration.uid ?? '')
@@ -157,6 +159,7 @@ export function IntegrationsDialog({ client, providers, onChanged, onClose }: Pr
 
   const configureTuya = async (event: FormEvent) => {
     event.preventDefault()
+    ++tuyaRequest.current
     setTuyaBusy(true)
     setTuyaMessage(null)
     try {
@@ -176,6 +179,7 @@ export function IntegrationsDialog({ client, providers, onChanged, onClose }: Pr
 
   const disconnectTuya = async () => {
     if (!window.confirm('Disconnect Tuya and remove its stored credentials?')) return
+    ++tuyaRequest.current
     setTuyaBusy(true)
     setTuyaMessage(null)
     try {

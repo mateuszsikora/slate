@@ -170,11 +170,16 @@ WebSocket:
 ```json
 {"providers": [
   {"id": "direct", "status": "degraded", "resource_count": 2},
-  {"id": "ha", "status": "unconfigured", "resource_count": 0},
+  {"id": "ha", "status": "error", "reason": "auth", "resource_count": 0},
   {"id": "shelly", "status": "online", "resource_count": 8},
   {"id": "onkyo", "status": "online", "resource_count": 4}
 ]}
 ```
+
+Provider entries may include `reason` while a provider is in an actionable
+error state. Tuya uses the stable values `auth` for rejected credentials and
+`quota` for a missing or expired cloud plan. The field is omitted on recovery
+and for providers that have no more specific diagnosis.
 
 The list is every provider this firmware registered, in registration order,
 rather than a fixed set — an adapter a later firmware adds appears here without
@@ -604,7 +609,8 @@ Device → client:
 ```json
 {"type": "status",   "providers": {"direct": "online", "ha": "unconfigured",
                                    "shelly": "online", "onkyo": "online",
-                                   "tuya": "online"},
+                                   "tuya": "error"},
+                     "provider_reasons": {"tuya": "quota"},
                      "wifi": -54, "heap_free": 142000,
                      "lvgl_heap_free": 2088632, "lvgl_frag_pct": 1}
 {"type": "log",      "level": "warn", "msg": "resource direct:living-room unavailable"}
@@ -846,7 +852,7 @@ rather than at the next sweep.
 The picker catalog is `GET /resources?provider=tuya`:
 
 ```json
-{"resources": [
+{"catalog_state": "ready", "resources": [
   {"provider": "tuya", "resource": "vdevo16847893501234ab", "kind": "light",
    "name": "Hall", "available": true, "state": {"power": "off"}},
   {"provider": "tuya", "resource": "vdevo16847893505678cd/humidity",
@@ -854,6 +860,13 @@ The picker catalog is `GET /resources?provider=tuya`:
    "state": {"value": 0}}
 ]}
 ```
+
+`catalog_state` is `empty`, `loading`, `ready`, or `error`. A cold `empty` or
+`loading` response has no resources and tells the picker to poll with bounded
+backoff. A stale refresh remains `loading` while retaining the last complete
+resource list. `ready` may legitimately contain an empty list. `error` keeps a
+previous complete list when one exists, never a partial replacement, and lets
+the picker offer an explicit retry.
 
 A catalog entry carries what the device list knows — id, kind, the app's name
 — and a placeholder state, not a live reading: the device list carries no data

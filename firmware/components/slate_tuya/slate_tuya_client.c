@@ -72,6 +72,27 @@ static const char *TAG = "slate_tuya_client";
  * selftest reproduce Tuya's official worked examples byte-for-byte. */
 #define STR_MAX 1024
 
+static const char *log_path(const char *path)
+{
+    static const char TOKEN_PREFIX[] = "/v1.0/token/";
+    return strncmp(path, TOKEN_PREFIX, sizeof(TOKEN_PREFIX) - 1) == 0
+               ? "/v1.0/token/<redacted>"
+               : path;
+}
+
+static int timeout_before(int64_t deadline_us)
+{
+    if (deadline_us <= 0) {
+        return HTTP_TIMEOUT_MS;
+    }
+    int64_t remaining_us = deadline_us - esp_timer_get_time();
+    if (remaining_us <= 0) {
+        return 0;
+    }
+    int64_t remaining_ms = (remaining_us + 999) / 1000;
+    return (int) (remaining_ms < HTTP_TIMEOUT_MS ? remaining_ms : HTTP_TIMEOUT_MS);
+}
+
 struct slate_tuya_client {
     char host[48];
     char access_id[SLATE_TUYA_ACCESS_ID_MAX_LEN + 1];
@@ -290,7 +311,7 @@ static esp_err_t build_sign_parts(const char *access_id, const char *access_toke
     char url[PATH_MAX + 1];
     esp_err_t err = canonical_url(path, url, sizeof(url));
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "%s: query string cannot be canonicalised", path);
+        ESP_LOGE(TAG, "%s: query string cannot be canonicalised", log_path(path));
         return err;
     }
 
@@ -303,7 +324,8 @@ static esp_err_t build_sign_parts(const char *access_id, const char *access_toke
                      nonce != NULL ? nonce : "", method_name, body_hex,
                      signature_headers != NULL ? signature_headers : "", url);
     if (n <= 0 || (size_t) n >= sizeof(str)) {
-        ESP_LOGE(TAG, "%s: string-to-sign does not fit %u B", path, (unsigned) sizeof(str));
+        ESP_LOGE(TAG, "%s: string-to-sign does not fit %u B", log_path(path),
+                 (unsigned) sizeof(str));
         explicit_bzero(str, sizeof(str));
         return ESP_ERR_INVALID_SIZE;
     }
@@ -455,7 +477,8 @@ static esp_err_t parse_envelope(const char *resp, size_t length, int status, con
  */
 static esp_err_t perform(struct slate_tuya_client *h, int method, const char *method_name,
                          const char *path, const char *body, bool use_token, char *resp,
-                         cJSON **out_body, slate_tuya_error_kind_t *kind, bool *token_invalid)
+                         int timeout_ms, cJSON **out_body,
+                         slate_tuya_error_kind_t *kind, bool *token_invalid)
 {
     *token_invalid = false;
 
@@ -473,7 +496,8 @@ static esp_err_t perform(struct slate_tuya_client *h, int method, const char *me
     char url[sizeof("https://") - 1 + 48 + PATH_MAX + 1];
     int n = snprintf(url, sizeof(url), "https://%s%s", h->host, path);
     if (n <= 0 || (size_t) n >= sizeof(url)) {
-        ESP_LOGE(TAG, "%s: URL does not fit %u B", path, (unsigned) sizeof(url));
+        ESP_LOGE(TAG, "%s: URL does not fit %u B", log_path(path),
+                 (unsigned) sizeof(url));
         *kind = SLATE_TUYA_ERR_API;
         return ESP_ERR_INVALID_SIZE;
     }
@@ -481,7 +505,7 @@ static esp_err_t perform(struct slate_tuya_client *h, int method, const char *me
     const esp_http_client_config_t config = {
         .url = url,
         .method = (esp_http_client_method_t) method,
-        .timeout_ms = HTTP_TIMEOUT_MS,
+        .timeout_ms = timeout_ms,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .disable_auto_redirect = true,
         /* One request per connection. Calls are seconds-to-minutes apart, and
@@ -542,18 +566,20 @@ static esp_err_t perform(struct slate_tuya_client *h, int method, const char *me
     if (err == ESP_ERR_INVALID_SIZE) {
         /* The reply outgrew the cap. Refused outright rather than parsed
          * truncated — a partial device list is a wrong picture of the house. */
-        ESP_LOGE(TAG, "%s %s: response over the %u B cap", method_name, path,
+        ESP_LOGE(TAG, "%s %s: response over the %u B cap", method_name, log_path(path),
                  (unsigned) (BODY_MAX - 1));
         *kind = SLATE_TUYA_ERR_API;
         return err;
     }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "%s %s: transport failed: %s", method_name, path, esp_err_to_name(err));
+        ESP_LOGW(TAG, "%s %s: transport failed: %s", method_name, log_path(path),
+                 esp_err_to_name(err));
         *kind = SLATE_TUYA_ERR_NETWORK;
         return ESP_FAIL;
     }
     resp[length] = '\0';
-    return parse_envelope(resp, (size_t) length, status, path, out_body, kind, token_invalid);
+    return parse_envelope(resp, (size_t) length, status, log_path(path), out_body, kind,
+                          token_invalid);
 }
 
 /* --- Token lifecycle -------------------------------------------------------- */
@@ -581,8 +607,8 @@ static esp_err_t token_call(struct slate_tuya_client *h, const char *path, char 
 {
     cJSON *result = NULL;
     bool ignored = false;
-    esp_err_t err = perform(h, HTTP_METHOD_GET, "GET", path, NULL, false, resp, &result, kind,
-                            &ignored);
+    esp_err_t err = perform(h, HTTP_METHOD_GET, "GET", path, NULL, false, resp,
+                            HTTP_TIMEOUT_MS, &result, kind, &ignored);
     if (err != ESP_OK) {
         return err;
     }
@@ -601,7 +627,8 @@ static esp_err_t token_call(struct slate_tuya_client *h, const char *path, char 
         ok = false;
     }
     if (!ok) {
-        ESP_LOGE(TAG, "%s: token response is missing fields or they are oversized", path);
+        ESP_LOGE(TAG, "%s: token response is missing fields or they are oversized",
+                 log_path(path));
         if (cJSON_IsString(access) && access->valuestring != NULL) {
             explicit_bzero(access->valuestring, strlen(access->valuestring));
         }
@@ -701,6 +728,7 @@ void slate_tuya_client_destroy(slate_tuya_client_handle_t h)
         return;
     }
     /* Credentials should not linger in a freed heap block. */
+    explicit_bzero(h->access_id, sizeof(h->access_id));
     explicit_bzero(h->secret, sizeof(h->secret));
     explicit_bzero(h->access_token, sizeof(h->access_token));
     explicit_bzero(h->refresh_token, sizeof(h->refresh_token));
@@ -708,9 +736,9 @@ void slate_tuya_client_destroy(slate_tuya_client_handle_t h)
     free(h);
 }
 
-esp_err_t slate_tuya_client_request(slate_tuya_client_handle_t h, int method, const char *path,
-                                    const char *body, cJSON **out_body,
-                                    slate_tuya_error_kind_t *err_kind)
+static esp_err_t request(slate_tuya_client_handle_t h, int method, const char *path,
+                         const char *body, int64_t deadline_us, cJSON **out_body,
+                         slate_tuya_error_kind_t *err_kind)
 {
     if (out_body != NULL) {
         *out_body = NULL;
@@ -742,17 +770,38 @@ esp_err_t slate_tuya_client_request(slate_tuya_client_handle_t h, int method, co
         return ESP_ERR_NO_MEM;
     }
 
-    xSemaphoreTake(h->lock, portMAX_DELAY);
+    int lock_timeout_ms = timeout_before(deadline_us);
+    if (lock_timeout_ms == 0 ||
+        xSemaphoreTake(h->lock, deadline_us > 0 ? pdMS_TO_TICKS(lock_timeout_ms)
+                                                : portMAX_DELAY) != pdTRUE) {
+        explicit_bzero(resp, BODY_MAX);
+        free(resp);
+        *kind = SLATE_TUYA_ERR_NETWORK;
+        return ESP_ERR_TIMEOUT;
+    }
     esp_err_t err = ESP_FAIL;
     for (int attempt = 0; attempt < 2; attempt++) {
-        err = ensure_token(h, resp, kind);
+        /* A bounded action is allowed to use a proactive token, never to spend
+         * its delivery budget acquiring one or retrying a rejected token. */
+        if (deadline_us > 0 && !token_fresh(h)) {
+            *kind = SLATE_TUYA_ERR_NETWORK;
+            err = ESP_ERR_INVALID_STATE;
+            break;
+        }
+        err = deadline_us > 0 ? ESP_OK : ensure_token(h, resp, kind);
         if (err != ESP_OK) {
             break;
         }
+        int request_timeout_ms = timeout_before(deadline_us);
+        if (request_timeout_ms == 0) {
+            *kind = SLATE_TUYA_ERR_NETWORK;
+            err = ESP_ERR_TIMEOUT;
+            break;
+        }
         bool token_invalid = false;
-        err = perform(h, method, method_name, path, body, true, resp, out_body, kind,
-                      &token_invalid);
-        if (err == ESP_OK || !token_invalid || attempt == 1) {
+        err = perform(h, method, method_name, path, body, true, resp,
+                      request_timeout_ms, out_body, kind, &token_invalid);
+        if (err == ESP_OK || !token_invalid || attempt == 1 || deadline_us > 0) {
             break;
         }
         /* 1010/1011/1012/1400: the token stopped being believed between the
@@ -765,6 +814,25 @@ esp_err_t slate_tuya_client_request(slate_tuya_client_handle_t h, int method, co
     explicit_bzero(resp, BODY_MAX);
     free(resp);
     return err;
+}
+
+esp_err_t slate_tuya_client_request(slate_tuya_client_handle_t h, int method,
+                                    const char *path, const char *body,
+                                    cJSON **out_body,
+                                    slate_tuya_error_kind_t *err_kind)
+{
+    return request(h, method, path, body, 0, out_body, err_kind);
+}
+
+esp_err_t slate_tuya_client_request_until(slate_tuya_client_handle_t h, int method,
+                                          const char *path, const char *body,
+                                          int64_t deadline_us, cJSON **out_body,
+                                          slate_tuya_error_kind_t *err_kind)
+{
+    if (deadline_us <= 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return request(h, method, path, body, deadline_us, out_body, err_kind);
 }
 
 esp_err_t slate_tuya_client_test(const char *region, const char *access_id, const char *secret,
@@ -843,7 +911,11 @@ esp_err_t slate_tuya_client_selftest(void)
          request_path_valid("/v1.0/users/safe_UID-1/devices") &&
          !request_path_valid("//attacker.invalid/v1.0/devices") &&
          !request_path_valid("/v1.0/users/../devices") &&
-         !request_path_valid("/v1.0/users/id%2Fescape/devices");
+         !request_path_valid("/v1.0/users/id%2Fescape/devices") &&
+         strcmp(log_path("/v1.0/token/refresh-secret"),
+                "/v1.0/token/<redacted>") == 0 &&
+         strcmp(log_path("/v1.0/devices/device-id/status"),
+                "/v1.0/devices/device-id/status") == 0;
     return ok ? ESP_OK : ESP_FAIL;
 }
 

@@ -237,7 +237,8 @@ const FACTORY_RESET_TIMEOUT_MS = 30000
 const HA_CONFIGURATION_TIMEOUT_MS = 20000
 
 /* Tuya credential testing is a signed round trip to the Tuya cloud. */
-const TUYA_CONFIGURATION_TIMEOUT_MS = 20000
+const TUYA_CONFIGURATION_TIMEOUT_MS = 25000
+const TUYA_DISCONNECT_TIMEOUT_MS = 15000
 
 /* Registry data changes rarely, while one real catalog is hundreds of KB. A
  * picker gets the session cache immediately and at most starts one refresh in
@@ -405,7 +406,7 @@ export class DeviceClient {
   }
 
   disconnectTuya(): Promise<void> {
-    return this.request<void>('DELETE', '/tuya')
+    return this.request<void>('DELETE', '/tuya', { timeoutMs: TUYA_DISCONNECT_TIMEOUT_MS })
   }
 
   private homeAssistantResources(): Promise<Resource[]> {
