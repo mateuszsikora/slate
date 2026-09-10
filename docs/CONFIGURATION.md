@@ -454,13 +454,22 @@ binding is how the panel learns a receiver exists. The grammar is `<host>/<role>
 |--------|----------------|----|
 | `main` | `light` | the receiver: on/off, and volume as brightness |
 | `input` | `sensor` | the selected input, by name |
+| `volume` | `sensor` | the number the receiver shows, or `Muted` |
 | `input:<code>` | `scene` | selects that input |
 | `mute` | `scene` | toggles mute |
 
 A receiver on a `light` tile is deliberate: the panel has four component types
 and none of them is an amplifier, and `light` is the one that renders a power
-state and one continuous level. Give it 2×2 and the slider is the volume
-control; give it `icon: volume-high` so the tile does not look like a lamp.
+state and one continuous level. Give it `icon: volume-high` so the tile does not
+look like a lamp.
+
+**Size it 2×1, not 2×2.** Both draw the slider, but the 2×2 variant captions it
+`BRIGHTNESS` and adds a colour-temperature row — the caption is a component
+talking about lights, and on a receiver it is simply the wrong word. The 2×1
+variant is the same control with no caption at all.
+
+`mute` is a scene: it flashes when tapped and shows nothing afterwards. Bind
+`volume` next to it, which reads `Muted` while mute is on.
 
 `<code>` is the receiver's own two-hex-digit eISCP selector rather than a name —
 `2b` NET, `24` FM, `23` CD, `2e` Bluetooth, `20` TV/Tape — which is the same

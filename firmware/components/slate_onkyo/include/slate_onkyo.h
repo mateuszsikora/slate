@@ -27,6 +27,7 @@
  * |------|--------|----|
  * | `main` | `light` | the receiver: power, and volume as brightness |
  * | `input` | `sensor` | the selected input, by name |
+ * | `volume` | `sensor` | the number the receiver shows, or `Muted` |
  * | `input:<code>` | `scene` | select that input; `<code>` is eISCP's own, `2b` for NET |
  * | `mute` | `scene` | toggle mute |
  *

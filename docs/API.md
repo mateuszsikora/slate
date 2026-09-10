@@ -727,6 +727,7 @@ Configured the same way as `shelly`: the binding carries the address.
 |--------|--------|----|
 | `main` | `light` | the receiver. `power` is its power; `brightness` is the volume. `toggle`, `set_power`, `set_brightness` |
 | `input` | `sensor` | the selected input, by name — `Net`, `FM`, `CD` |
+| `volume` | `sensor` | the number the receiver's own display shows, or `Muted` |
 | `input:<code>` | `scene` | `activate` selects that input, powering the receiver on if needed |
 | `mute` | `scene` | `activate` toggles mute |
 
@@ -751,6 +752,14 @@ Nothing is published for a receiver that has not answered yet, so its tiles keep
 the placeholder naming `provider:resource` until the first frame arrives — the
 same rule `shelly` follows, for the same reason. A receiver that goes away is
 published unavailable with its last values and renders stale.
+
+Every resource carries a `name`, which matters most for `input:<code>`: a 4×1
+scene bar has one `label` for the whole bar, so without it each button falls back
+to its resource id and a row of addresses appears on the wall.
+
+**`mute` is a scene, so it flashes and shows nothing.** Bind `volume` beside it —
+it reads `Muted` while mute is on, and is the only place the state is visible;
+the `light` tile's slider has nowhere to put it.
 
 There is no authentication in eISCP, and none here. A receiver on the LAN
 answers whoever connects to it, which is equally true of its remote control.

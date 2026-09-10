@@ -91,6 +91,7 @@ static const char *TAG = "slate_onkyo";
 typedef enum {
     ROLE_MAIN = 0,     /**< the receiver, published as a `light` */
     ROLE_INPUT,        /**< the selected input, by name, as a `sensor` */
+    ROLE_VOLUME,       /**< the volume the receiver shows, as a `sensor` */
     ROLE_INPUT_SELECT, /**< a `scene` that selects one input */
     ROLE_MUTE,         /**< a `scene` that toggles mute */
 } role_t;
@@ -361,6 +362,10 @@ static bool parse_resource(const char *id, char *host, role_t *role, char *code)
         *role = ROLE_INPUT;
         return true;
     }
+    if (strcmp(tail, "volume") == 0) {
+        *role = ROLE_VOLUME;
+        return true;
+    }
     if (strcmp(tail, "mute") == 0) {
         *role = ROLE_MUTE;
         return true;
@@ -403,6 +408,7 @@ static void publish_device(size_t device_index)
         slate_snapshot_t snapshot = {.resource = entry->id, .available = available};
         switch (entry->role) {
         case ROLE_MAIN:
+            snapshot.name = "Receiver";
             snapshot.kind = SLATE_KIND_LIGHT;
             snapshot.state.light.on = device->power;
             snapshot.state.light.brightness =
@@ -414,6 +420,7 @@ static void publish_device(size_t device_index)
             break;
         case ROLE_INPUT: {
             const char *name = input_name(device->input);
+            snapshot.name = "Source";
             snapshot.kind = SLATE_KIND_SENSOR;
             snapshot.state.sensor.numeric = false;
             if (name != NULL) {
@@ -427,8 +434,37 @@ static void publish_device(size_t device_index)
             }
             break;
         }
-        case ROLE_INPUT_SELECT:
+        case ROLE_VOLUME: {
+            /* The number the receiver's own display shows, and the one place a
+             * mute is visible: the slider on the `light` tile has nowhere to
+             * put it, so tapping Mute would otherwise change nothing anybody
+             * can see. */
+            snapshot.name = "Volume";
+            snapshot.kind = SLATE_KIND_SENSOR;
+            snapshot.state.sensor.numeric = false;
+            snapshot.state.sensor.category = SLATE_CATEGORY_SOUND;
+            if (device->muted) {
+                snprintf(snapshot.state.sensor.text, sizeof(snapshot.state.sensor.text),
+                         "Muted");
+            } else {
+                snprintf(snapshot.state.sensor.text, sizeof(snapshot.state.sensor.text),
+                         "%u", (unsigned)device->volume);
+            }
+            break;
+        }
+        case ROLE_INPUT_SELECT: {
+            /* The name a scene bar shows. It carries one `label` for the whole
+             * bar, so without this each button falls back to its resource id —
+             * which is an address, and reads on a wall exactly as badly as it
+             * sounds. */
+            const char *name = input_name(entry->code);
+            snapshot.name = name != NULL ? name : entry->code;
+            snapshot.kind = SLATE_KIND_SCENE;
+            snapshot.capabilities.actions = 1u << SLATE_ACTION_ACTIVATE;
+            break;
+        }
         case ROLE_MUTE:
+            snapshot.name = "Mute";
             snapshot.kind = SLATE_KIND_SCENE;
             snapshot.capabilities.actions = 1u << SLATE_ACTION_ACTIVATE;
             break;
@@ -599,7 +635,8 @@ static void run_command(const command_t *command)
         }
         break;
     case ROLE_INPUT:
-        break; /* a reading, and §5.2 gives it no actions */
+    case ROLE_VOLUME:
+        break; /* readings, and §5.2 gives them no actions */
     }
 
     if (!sent) {
@@ -1032,6 +1069,8 @@ esp_err_t slate_onkyo_selftest(void)
           "the selected input, as a reading");
     CHECK(parse_resource("192.0.2.60/mute", host, &role, code) && role == ROLE_MUTE,
           "mute");
+    CHECK(parse_resource("192.0.2.60/volume", host, &role, code) && role == ROLE_VOLUME,
+          "the volume, as a reading");
     CHECK(parse_resource("192.0.2.60/input:2b", host, &role, code) &&
               role == ROLE_INPUT_SELECT && strcmp(code, "2b") == 0,
           "an input selector, by its eISCP code");
@@ -1040,7 +1079,7 @@ esp_err_t slate_onkyo_selftest(void)
           "an mDNS name, and a code normalised to lowercase");
     CHECK(!parse_resource("192.0.2.60/input:2", host, &role, code), "a one-digit code");
     CHECK(!parse_resource("192.0.2.60/input:2g", host, &role, code), "a non-hex code");
-    CHECK(!parse_resource("192.0.2.60/volume", host, &role, code), "a role this adapter lacks");
+    CHECK(!parse_resource("192.0.2.60/bass", host, &role, code), "a role this adapter lacks");
     CHECK(!parse_resource("/main", host, &role, code), "an empty host");
     CHECK(!parse_resource("192.0.2.60", host, &role, code), "no role at all");
 
