@@ -1014,6 +1014,17 @@ static resource_catalog_t *resource_catalog(const char *provider)
     return NULL;
 }
 
+static const char *catalog_state_name(slate_api_catalog_state_t state)
+{
+    switch (state) {
+    case SLATE_API_CATALOG_EMPTY:   return "empty";
+    case SLATE_API_CATALOG_LOADING: return "loading";
+    case SLATE_API_CATALOG_READY:   return "ready";
+    case SLATE_API_CATALOG_ERROR:   return "error";
+    default:                        return NULL;
+    }
+}
+
 static esp_err_t append_bound_resources(const char *provider, cJSON *array)
 {
     size_t count = slate_state_count();
@@ -1079,11 +1090,21 @@ static esp_err_t resources_handler(httpd_req_t *req)
     }
 
     resource_catalog_t *catalog = resource_catalog(provider);
-    esp_err_t err = catalog != NULL ? catalog->append(catalog->ctx, array)
-                                    : append_bound_resources(provider, array);
+    slate_api_catalog_state_t catalog_state = SLATE_API_CATALOG_EMPTY;
+    esp_err_t err = catalog != NULL
+                        ? catalog->append(catalog->ctx, array, &catalog_state)
+                        : append_bound_resources(provider, array);
     if (err != ESP_OK) {
         cJSON_Delete(root);
         return slate_api_send_json(req, NULL);
+    }
+    if (catalog != NULL) {
+        const char *state_name = catalog_state_name(catalog_state);
+        if (state_name == NULL ||
+            cJSON_AddStringToObject(root, "catalog_state", state_name) == NULL) {
+            cJSON_Delete(root);
+            return slate_api_send_json(req, NULL);
+        }
     }
     return slate_api_send_json(req, root);
 }
