@@ -718,10 +718,14 @@ is current without polling for it.
 Configured the same way as `shelly`: the binding carries the address.
 
 ```json
-{"id": "t1", "type": "light", "pos": [0, 0], "size": [2, 2],
+{"id": "t1", "type": "light", "pos": [0, 0], "size": [2, 1],
  "binding": {"provider": "onkyo", "resource": "192.168.1.60/main"},
  "label": "Onkyo", "icon": "volume-high"}
 ```
+
+Size it **2×1**. The 2×2 variant draws the same slider but captions it
+`BRIGHTNESS` and adds a colour-temperature row — correct for a light, wrong for
+a receiver.
 
 | `role` | `kind` | Is |
 |--------|--------|----|
@@ -742,7 +746,7 @@ panel sends the percentage as the receiver's own volume value and lets the
 receiver clamp what it cannot do.
 
 The slider is therefore an **absolute** volume with no ceiling of its own:
-dragging the 2×2 tile to the top asks for the loudest thing the receiver can do,
+dragging the tile's slider to the top asks for the loudest thing the receiver can do,
 the way turning the knob all the way would. That is a deliberate choice rather
 than an oversight — a wall panel that quietly refused the top of its own slider
 would be harder to explain than one that does what it looks like it does — but
