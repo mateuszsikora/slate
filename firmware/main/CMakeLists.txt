@@ -5,6 +5,7 @@ idf_component_register(
              slate_coredump slate_direct slate_display slate_editor slate_ha slate_integrations
              slate_mdns slate_onkyo slate_ota slate_setup slate_shelly slate_state slate_store slate_ui
              slate_update slate_wifi slate_time
+             slate_tuya
              slate_ws app_update json
              esp_system esp_event
 )
@@ -40,6 +41,13 @@ idf_component_register(
 #                              no device and no network: these are where a
 #                              Shelly's vocabulary becomes §5.2's, and a mistake
 #                              there is a wrong number rather than a crash.
+#   -DSLATE_TUYA_SELFTEST=1    check the `/humidity` resource split, the
+#                              category table the picker's catalog depends on,
+#                              and the binding handover against fixtures. The
+#                              DP mapping itself is exercised on the host by
+#                              the module's own test; this covers the seam
+#                              around it. Needs no device, no network and no
+#                              credentials.
 #   -DSLATE_CONFIG_API_SELFTEST=1
 #                              check that only the exact transient query can
 #                              select RAM-only replacement semantics. It does
@@ -86,6 +94,7 @@ idf_component_register(
 foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_WS_SELFTEST SLATE_STATE_SELFTEST
              SLATE_DIRECT_SELFTEST SLATE_ACTION_SELFTEST SLATE_CONFIG_API_SELFTEST SLATE_HA_SELFTEST
              SLATE_SHELLY_SELFTEST SLATE_ONKYO_SELFTEST
+             SLATE_TUYA_SELFTEST
              SLATE_OTA_ROLLBACK_SELFTEST
              SLATE_DISPLAY_SELFTEST
              SLATE_UI_SELFTEST SLATE_UI_LEAK_BYTES SLATE_BRIGHTNESS_SELFTEST SLATE_TIME_SELFTEST

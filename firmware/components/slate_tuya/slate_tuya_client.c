@@ -304,6 +304,7 @@ static esp_err_t build_sign_parts(const char *access_id, const char *access_toke
                      signature_headers != NULL ? signature_headers : "", url);
     if (n <= 0 || (size_t) n >= sizeof(str)) {
         ESP_LOGE(TAG, "%s: string-to-sign does not fit %u B", path, (unsigned) sizeof(str));
+        explicit_bzero(str, sizeof(str));
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -313,10 +314,14 @@ static esp_err_t build_sign_parts(const char *access_id, const char *access_toke
                              (const unsigned char *) str, (size_t) n, digest);
     if (rc != 0) {
         ESP_LOGE(TAG, "mbedtls_md_hmac: -0x%04x", -rc);
+        explicit_bzero(str, sizeof(str));
+        explicit_bzero(digest, sizeof(digest));
         return ESP_FAIL;
     }
     /* The sign header is uppercase hex; the docs' examples capitalise it. */
     hex_encode(digest, sizeof(digest), sign_hex, true);
+    explicit_bzero(str, sizeof(str));
+    explicit_bzero(digest, sizeof(digest));
     return ESP_OK;
 }
 
@@ -597,6 +602,12 @@ static esp_err_t token_call(struct slate_tuya_client *h, const char *path, char 
     }
     if (!ok) {
         ESP_LOGE(TAG, "%s: token response is missing fields or they are oversized", path);
+        if (cJSON_IsString(access) && access->valuestring != NULL) {
+            explicit_bzero(access->valuestring, strlen(access->valuestring));
+        }
+        if (cJSON_IsString(refresh) && refresh->valuestring != NULL) {
+            explicit_bzero(refresh->valuestring, strlen(refresh->valuestring));
+        }
         cJSON_Delete(result);
         *kind = SLATE_TUYA_ERR_API;
         return ESP_ERR_INVALID_RESPONSE;
@@ -608,6 +619,10 @@ static esp_err_t token_call(struct slate_tuya_client *h, const char *path, char 
     }
     h->token_obtained_us = esp_timer_get_time();
     h->token_lifetime_ms = (int64_t) (expires->valuedouble * 1000.0);
+    explicit_bzero(access->valuestring, strlen(access->valuestring));
+    if (has_refresh) {
+        explicit_bzero(refresh->valuestring, strlen(refresh->valuestring));
+    }
     cJSON_Delete(result);
     ESP_LOGI(TAG, "token acquired, lifetime %" PRId64 " s", h->token_lifetime_ms / 1000);
     return ESP_OK;
@@ -686,9 +701,9 @@ void slate_tuya_client_destroy(slate_tuya_client_handle_t h)
         return;
     }
     /* Credentials should not linger in a freed heap block. */
-    memset(h->secret, 0, sizeof(h->secret));
-    memset(h->access_token, 0, sizeof(h->access_token));
-    memset(h->refresh_token, 0, sizeof(h->refresh_token));
+    explicit_bzero(h->secret, sizeof(h->secret));
+    explicit_bzero(h->access_token, sizeof(h->access_token));
+    explicit_bzero(h->refresh_token, sizeof(h->refresh_token));
     vSemaphoreDelete(h->lock);
     free(h);
 }
@@ -747,6 +762,7 @@ esp_err_t slate_tuya_client_request(slate_tuya_client_handle_t h, int method, co
         h->access_token[0] = '\0';
     }
     xSemaphoreGive(h->lock);
+    explicit_bzero(resp, BODY_MAX);
     free(resp);
     return err;
 }

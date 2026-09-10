@@ -45,6 +45,7 @@
 #include "slate_state.h"
 #include "slate_store.h"
 #include "slate_time.h"
+#include "slate_tuya.h"
 #include "slate_ui.h"
 #include "slate_update.h"
 #include "slate_wifi.h"
@@ -515,6 +516,15 @@ static void start_network(void)
                  esp_err_to_name(err));
     }
 
+    /* The Tuya poller's transport is the internet rather than the LAN, so a
+     * station outage is still the whole of it going away — but a router
+     * outage is not, and §5.2's per-provider staleness is what keeps that
+     * difference off the Shelly tiles. */
+    err = slate_tuya_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Tuya poller unavailable: %s — continuing", esp_err_to_name(err));
+    }
+
     /*
      * §4.3's `slate-<mac6>.local`, before the adapter below queries the
      * responder it starts. Here rather than in start_api() because mDNS needs
@@ -616,6 +626,17 @@ static void start_api(void)
                  esp_err_to_name(shelly_err));
     }
 
+    /* The one adapter that leaves the LAN, and it registers on the same terms
+     * as the others: a `tuya` binding resolves to a provider with an honest
+     * `unconfigured` status rather than to §3.3's placeholder, and its poller
+     * starts below with the other things that need the station. The routes it
+     * mounts are why this call belongs to start_api(), after slate_api_init. */
+    esp_err_t tuya_err = slate_tuya_init();
+    if (tuya_err != ESP_OK) {
+        ESP_LOGE(TAG, "Tuya provider degraded: %s — continuing",
+                 esp_err_to_name(tuya_err));
+    }
+
 #ifdef SLATE_HA_SELFTEST
     slate_ha_selftest();
 #endif
@@ -643,6 +664,15 @@ static void start_api(void)
      * to have happened — the same reason its neighbours are guarded. */
     if (shelly_err == ESP_OK) {
         slate_shelly_selftest();
+    }
+#endif
+
+#ifdef SLATE_TUYA_SELFTEST
+    /* The same terms: it drives subscribe() and the bind handover against the
+     * registration above, before start_network() creates the poller that
+     * would otherwise be competing for the tables. */
+    if (tuya_err == ESP_OK) {
+        slate_tuya_selftest();
     }
 #endif
 

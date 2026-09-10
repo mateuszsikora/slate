@@ -125,6 +125,7 @@ typedef struct {
 /* A parked POST /tuya, from the HTTP task to the configure task. */
 typedef struct {
     httpd_req_t *request;
+    uint32_t credentials_epoch;
     char region[SLATE_TUYA_REGION_MAX_LEN + 1];
     char access_id[SLATE_TUYA_ACCESS_ID_MAX_LEN + 1];
     char secret[SLATE_TUYA_SECRET_MAX_LEN + 1];
@@ -163,6 +164,8 @@ static bool s_pending_valid;
 static QueueHandle_t s_commands;
 static QueueHandle_t s_config_jobs;
 static QueueHandle_t s_catalog_jobs;
+static SemaphoreHandle_t s_mutation_lock;
+static StaticSemaphore_t s_mutation_lock_storage;
 static TaskHandle_t s_task;
 static TaskHandle_t s_catalog_task;
 static volatile bool s_network_up;
@@ -174,6 +177,9 @@ static volatile bool s_network_up;
  * stdatomic costs nothing here.
  */
 static _Atomic uint32_t s_credentials_epoch;
+enum { ACTIVE_POLLER, ACTIVE_CATALOG, ACTIVE_CONFIG, ACTIVE_COUNT };
+static _Atomic uint32_t s_active_epoch[ACTIVE_COUNT];
+#define EPOCH_INACTIVE UINT32_MAX
 static uint32_t s_client_epoch; /* the epoch s_client was built from */
 static bool s_initialized;
 
@@ -198,6 +204,45 @@ static struct {
 
 static void request_catalog_refresh(void);
 static void classify_failure(slate_tuya_error_kind_t kind);
+
+static bool epoch_work_begin(size_t slot, uint32_t epoch)
+{
+    xSemaphoreTake(s_mutation_lock, portMAX_DELAY);
+    bool current = epoch == atomic_load(&s_credentials_epoch);
+    if (current) {
+        atomic_store(&s_active_epoch[slot], epoch);
+    }
+    xSemaphoreGive(s_mutation_lock);
+    return current;
+}
+
+static void epoch_work_end(size_t slot)
+{
+    atomic_store(&s_active_epoch[slot], EPOCH_INACTIVE);
+}
+
+static uint32_t mutation_begin(void)
+{
+    xSemaphoreTake(s_mutation_lock, portMAX_DELAY);
+    uint32_t epoch = atomic_fetch_add(&s_credentials_epoch, 1) + 1;
+    xSemaphoreGive(s_mutation_lock);
+    return epoch;
+}
+
+static void mutation_barrier(uint32_t epoch)
+{
+    for (;;) {
+        bool prior = false;
+        for (size_t i = 0; i < ACTIVE_COUNT; i++) {
+            uint32_t active = atomic_load(&s_active_epoch[i]);
+            prior = prior || (active != EPOCH_INACTIVE && active < epoch);
+        }
+        if (!prior) {
+            return;
+        }
+        vTaskDelay(1);
+    }
+}
 
 static bool epoch_is_current(uint32_t epoch)
 {
@@ -831,7 +876,11 @@ static void poller_task(void *arg)
         /* Credentials may have changed while this task was elsewhere; the
          * epoch check is cheap and the poke that wakes the queue early is
          * only an accelerator. */
-        reconcile_client();
+        uint32_t loop_epoch = atomic_load(&s_credentials_epoch);
+        if (epoch_work_begin(ACTIVE_POLLER, loop_epoch)) {
+            reconcile_client();
+            epoch_work_end(ACTIVE_POLLER);
+        }
 
         if (adopt_pending()) {
             next_sweep_us = 0;
@@ -846,21 +895,30 @@ static void poller_task(void *arg)
                 if (s_network_up && s_client != NULL && s_entry_count > 0 &&
                     epoch_is_current(command.credentials_epoch) &&
                     esp_timer_get_time() < command.deadline_us) {
-                    run_action(&command);
+                    if (epoch_work_begin(ACTIVE_POLLER, command.credentials_epoch)) {
+                        run_action(&command);
+                        epoch_work_end(ACTIVE_POLLER);
+                    }
                 } else {
-                    slate_action_result(SLATE_TUYA_PROVIDER_ID, command.action_id,
-                                        false, "offline");
+                    if (command.credentials_epoch == atomic_load(&s_credentials_epoch)) {
+                        slate_action_result(SLATE_TUYA_PROVIDER_ID, command.action_id,
+                                            false, "offline");
+                    }
                 }
             }
             continue; /* drain the queue before spending time on a sweep */
         }
 
         if (s_entry_count > 0 && s_network_up && s_client != NULL) {
-            sweep();
+            uint32_t epoch = s_client_epoch;
+            if (epoch_work_begin(ACTIVE_POLLER, epoch)) {
+                sweep();
+                update_status();
+                epoch_work_end(ACTIVE_POLLER);
+            }
+        } else {
+            update_status();
         }
-        /* After the sweep, not before it: the status is a statement about
-         * what the cloud just said. */
-        update_status();
         next_sweep_us = esp_timer_get_time() + (int64_t)POLL_INTERVAL_MS * 1000;
     }
 }
@@ -1086,6 +1144,9 @@ static void catalog_task(void *arg)
         if (xQueueReceive(s_catalog_jobs, &job, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+        if (!epoch_work_begin(ACTIVE_CATALOG, job.credentials_epoch)) {
+            continue;
+        }
         slate_resource_t *items = NULL;
         size_t count = 0;
         slate_tuya_error_kind_t kind = SLATE_TUYA_ERR_NONE;
@@ -1121,6 +1182,7 @@ static void catalog_task(void *arg)
         if (retry_current) {
             request_catalog_refresh();
         }
+        epoch_work_end(ACTIVE_CATALOG);
     }
 }
 
@@ -1202,7 +1264,7 @@ static const char *read_body(httpd_req_t *req, char *buffer, size_t size)
 
 static void wipe_job(configure_job_t *job)
 {
-    explicit_bzero(job->secret, sizeof(job->secret));
+    explicit_bzero(job, sizeof(*job));
 }
 
 /*
@@ -1244,6 +1306,7 @@ static esp_err_t configuration_handler(httpd_req_t *req)
               cJSON_AddItemToObject(
                   root, "uid",
                   configured ? cJSON_CreateString(uid) : cJSON_CreateNull());
+    explicit_bzero(access_id, sizeof(access_id));
     explicit_bzero(secret, sizeof(secret));
     if (!ok) {
         cJSON_Delete(root);
@@ -1254,6 +1317,7 @@ static esp_err_t configuration_handler(httpd_req_t *req)
 
 static esp_err_t configure_handler(httpd_req_t *req)
 {
+    uint32_t intent_epoch = mutation_begin();
     char body[ROUTE_BODY_MAX];
     const char *problem = read_body(req, body, sizeof(body));
     if (problem != NULL) {
@@ -1283,15 +1347,15 @@ static esp_err_t configure_handler(httpd_req_t *req)
         error = "region_unknown";
     } else if (!cJSON_IsString(access_id) || access_id->valuestring[0] == '\0') {
         error = "access_id_required";
-    } else if (strlen(access_id->valuestring) >= SLATE_TUYA_ACCESS_ID_MAX_LEN) {
+    } else if (strlen(access_id->valuestring) > SLATE_TUYA_ACCESS_ID_MAX_LEN) {
         error = "access_id_too_long";
     } else if (!cJSON_IsString(secret) || secret->valuestring[0] == '\0') {
         error = "secret_required";
-    } else if (strlen(secret->valuestring) >= SLATE_TUYA_SECRET_MAX_LEN) {
+    } else if (strlen(secret->valuestring) > SLATE_TUYA_SECRET_MAX_LEN) {
         error = "secret_too_long";
     } else if (!cJSON_IsString(uid) || uid->valuestring[0] == '\0') {
         error = "uid_required";
-    } else if (strlen(uid->valuestring) >= SLATE_TUYA_UID_MAX_LEN) {
+    } else if (strlen(uid->valuestring) > SLATE_TUYA_UID_MAX_LEN) {
         error = "uid_too_long";
     }
 
@@ -1299,6 +1363,7 @@ static esp_err_t configure_handler(httpd_req_t *req)
     if (error == NULL) {
         job = calloc(1, sizeof(*job));
         if (job != NULL) {
+            job->credentials_epoch = intent_epoch;
             snprintf(job->region, sizeof(job->region), "%s", region->valuestring);
             snprintf(job->access_id, sizeof(job->access_id), "%s", access_id->valuestring);
             snprintf(job->secret, sizeof(job->secret), "%s", secret->valuestring);
@@ -1306,6 +1371,12 @@ static esp_err_t configure_handler(httpd_req_t *req)
         }
     }
 
+    if (cJSON_IsString(access_id) && access_id->valuestring != NULL) {
+        explicit_bzero(access_id->valuestring, strlen(access_id->valuestring));
+    }
+    if (cJSON_IsString(secret) && secret->valuestring != NULL) {
+        explicit_bzero(secret->valuestring, strlen(secret->valuestring));
+    }
     cJSON_Delete(root);
     if (error != NULL) {
         free(job);
@@ -1347,17 +1418,29 @@ static void configure_task(void *arg)
             continue;
         }
 
+        if (!epoch_work_begin(ACTIVE_CONFIG, job->credentials_epoch)) {
+            slate_api_refuse(job->request, "409 Conflict", "stale_configuration");
+            httpd_req_async_handler_complete(job->request);
+            wipe_job(job);
+            free(job);
+            continue;
+        }
         slate_tuya_error_kind_t kind = SLATE_TUYA_ERR_NONE;
         esp_err_t tested =
             slate_tuya_client_test(job->region, job->access_id, job->secret,
                                    job->uid, &kind);
         esp_err_t stored = ESP_OK;
-        if (tested == ESP_OK) {
+        xSemaphoreTake(s_mutation_lock, portMAX_DELAY);
+        bool current = job->credentials_epoch == atomic_load(&s_credentials_epoch);
+        if (tested == ESP_OK && current) {
             stored = slate_store_tuya_set(job->region, job->access_id, job->secret,
                                           job->uid);
         }
+        xSemaphoreGive(s_mutation_lock);
 
-        if (tested != ESP_OK && kind == SLATE_TUYA_ERR_AUTH) {
+        if (!current) {
+            slate_api_refuse(job->request, "409 Conflict", "stale_configuration");
+        } else if (tested != ESP_OK && kind == SLATE_TUYA_ERR_AUTH) {
             slate_api_refuse(job->request, "422 Unprocessable Content",
                              "tuya_auth_failed");
         } else if (tested != ESP_OK && kind == SLATE_TUYA_ERR_QUOTA) {
@@ -1367,7 +1450,6 @@ static void configure_task(void *arg)
         } else if (stored != ESP_OK) {
             slate_api_refuse(job->request, "500 Internal Server Error", "store_failed");
         } else {
-            s_credentials_epoch++;
             slate_state_provider_set_status(SLATE_TUYA_PROVIDER_ID,
                                             SLATE_PROVIDER_CONNECTING);
             if (s_commands != NULL) {
@@ -1391,6 +1473,7 @@ static void configure_task(void *arg)
         }
 
         httpd_req_async_handler_complete(job->request);
+        epoch_work_end(ACTIVE_CONFIG);
         wipe_job(job);
         free(job);
     }
@@ -1398,11 +1481,26 @@ static void configure_task(void *arg)
 
 static esp_err_t disconnect_handler(httpd_req_t *req)
 {
-    esp_err_t err = slate_store_tuya_clear();
+    uint32_t intent_epoch = mutation_begin();
+    slate_action_provider_unavailable(SLATE_TUYA_PROVIDER_ID, "unconfigured");
+    if (s_commands != NULL) {
+        xQueueReset(s_commands);
+    }
+    if (s_catalog_jobs != NULL) {
+        xQueueReset(s_catalog_jobs);
+    }
+    mutation_barrier(intent_epoch);
+    xSemaphoreTake(s_mutation_lock, portMAX_DELAY);
+    esp_err_t err = intent_epoch == atomic_load(&s_credentials_epoch)
+                        ? slate_store_tuya_clear()
+                        : ESP_ERR_INVALID_STATE;
+    xSemaphoreGive(s_mutation_lock);
+    if (err == ESP_ERR_INVALID_STATE) {
+        return slate_api_refuse(req, "409 Conflict", "stale_configuration");
+    }
     if (err != ESP_OK) {
         return slate_api_refuse(req, "500 Internal Server Error", "store_failed");
     }
-    s_credentials_epoch++;
     slate_state_provider_set_status(SLATE_TUYA_PROVIDER_ID,
                                     SLATE_PROVIDER_UNCONFIGURED);
     slate_action_provider_unavailable(SLATE_TUYA_PROVIDER_ID, "unconfigured");
@@ -1595,6 +1693,13 @@ esp_err_t slate_tuya_init(void)
     if (s_bind_lock == NULL) {
         return ESP_ERR_NO_MEM;
     }
+    s_mutation_lock = xSemaphoreCreateMutexStatic(&s_mutation_lock_storage);
+    if (s_mutation_lock == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    for (size_t i = 0; i < ACTIVE_COUNT; i++) {
+        atomic_store(&s_active_epoch[i], EPOCH_INACTIVE);
+    }
     s_catalog.lock = xSemaphoreCreateMutex();
     if (s_catalog.lock == NULL) {
         return ESP_ERR_NO_MEM;
@@ -1613,6 +1718,18 @@ esp_err_t slate_tuya_init(void)
         return ESP_ERR_NO_MEM;
     }
 
+    s_config_jobs = xQueueCreate(2, sizeof(configure_job_t *));
+    TaskHandle_t configure_handle = NULL;
+    if (s_config_jobs == NULL ||
+        xTaskCreate(configure_task, "slate_tuya_cfg", TASK_STACK, NULL,
+                    TASK_PRIORITY, &configure_handle) != pdPASS) {
+        if (s_config_jobs != NULL) {
+            vQueueDelete(s_config_jobs);
+            s_config_jobs = NULL;
+        }
+        return ESP_ERR_NO_MEM;
+    }
+
     const slate_state_provider_t provider = {
         .id = SLATE_TUYA_PROVIDER_ID,
         .subscribe = subscribe,
@@ -1621,7 +1738,6 @@ esp_err_t slate_tuya_init(void)
     if (err != ESP_OK) {
         return err;
     }
-    s_initialized = true;
     slate_state_provider_set_status(SLATE_TUYA_PROVIDER_ID, SLATE_PROVIDER_UNCONFIGURED);
 
     const slate_action_provider_t action_provider = {
@@ -1630,8 +1746,7 @@ esp_err_t slate_tuya_init(void)
     };
     esp_err_t action_err = slate_action_provider_register(&action_provider);
     if (action_err != ESP_OK) {
-        ESP_LOGE(TAG, "semantic action dispatch unavailable: %s",
-                 esp_err_to_name(action_err));
+        return action_err;
     }
 
     /* The catalog goes in front of /resources rather than into a route of its
@@ -1639,8 +1754,7 @@ esp_err_t slate_tuya_init(void)
      * devices, and a second catalog protocol is a second thing to drift. */
     err = slate_api_resources_register(SLATE_TUYA_PROVIDER_ID, catalog_append, NULL);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "resource catalog unavailable: %s — continuing",
-                 esp_err_to_name(err));
+        return err;
     }
 
     const httpd_uri_t configure = {
@@ -1666,26 +1780,12 @@ esp_err_t slate_tuya_init(void)
         route_err = slate_api_register_uri(&disconnect, SLATE_API_AUTH_DEVICE_TOKEN);
     }
     if (route_err != ESP_OK) {
-        ESP_LOGE(TAG, "routes unavailable: %s — continuing", esp_err_to_name(route_err));
+        return route_err;
     }
 
-    /* The queue and its task exist before the network does, so a credential
-     * saved during setup is tested the moment it arrives, not after a boot. */
-    s_config_jobs = xQueueCreate(2, sizeof(configure_job_t *));
-    TaskHandle_t configure_handle = NULL;
-    if (s_config_jobs != NULL) {
-        if (xTaskCreate(configure_task, "slate_tuya_cfg", TASK_STACK, NULL,
-                        TASK_PRIORITY, &configure_handle) != pdPASS) {
-            vQueueDelete(s_config_jobs);
-            s_config_jobs = NULL;
-        }
-    }
-    if (s_config_jobs == NULL) {
-        ESP_LOGE(TAG, "credential testing unavailable — continuing");
-    }
-
+    s_initialized = true;
     ESP_LOGI(TAG, "provider ready: POST " SLATE_API_BASE_PATH "/tuya");
-    return action_err;
+    return ESP_OK;
 }
 
 esp_err_t slate_tuya_start(void)
@@ -1714,7 +1814,6 @@ esp_err_t slate_tuya_start(void)
     if (xTaskCreate(poller_task, "slate_tuya", TASK_STACK, NULL, TASK_PRIORITY,
                     &s_task) != pdPASS) {
         /* Unwind everything, and `s_commands` above all: a queue left behind
-         * with no task to drain it would let dispatch() accept taps and answer
          * none of them, which §5.3 makes worse than refusing them outright. */
         esp_event_handler_unregister(SLATE_WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event);
         vQueueDelete(s_commands);
@@ -1743,6 +1842,11 @@ esp_err_t slate_tuya_selftest(void)
         failures += !passed_;                                                 \
         ESP_LOGI(TAG, "selftest: %-48s %s", name, passed_ ? "PASS" : "FAIL"); \
     } while (0)
+
+    CHECK(slate_tuya_client_selftest() == ESP_OK,
+          "the Tuya signing and envelope fixtures pass");
+    CHECK(slate_tuya_map_selftest() == ESP_OK,
+          "the Tuya status/function mapping fixtures pass");
 
     char base[SLATE_RESOURCE_ID_MAX + 1];
     bool humidity = true;
