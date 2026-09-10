@@ -35,9 +35,11 @@
  *
  * §5.2 has four kinds and none of them is an amplifier. `light` is the one
  * whose shape fits — a thing that is on or off and has one continuous level —
- * and mapping volume onto `brightness` is what gets the 2×2 tile's real slider
- * instead of a row of blind step buttons. The tile carries `icon: volume-high`
- * so the screen does not claim it is a lamp. A media-player component is
+ * and mapping volume onto `brightness` is what gets a real slider instead of a
+ * row of blind step buttons. Size the tile 2×1: the 2×2 variant draws the same
+ * slider but captions it `BRIGHTNESS`, which is a component talking about
+ * lights. The tile carries `icon: volume-high` so the screen does not claim it
+ * is a lamp. A media-player component is
  * §15's, and when it exists this adapter changes its `kind` and nothing else.
  *
  * ## No authentication, and no discovery either
