@@ -33,6 +33,7 @@
 #include "slate_config_api.h"
 #include "slate_control_api.h"
 #include "slate_direct.h"
+#include "slate_onkyo.h"
 #include "slate_shelly.h"
 #include "slate_display.h"
 #include "slate_editor.h"
@@ -506,6 +507,14 @@ static void start_network(void)
         ESP_LOGE(TAG, "Shelly poller unavailable: %s — continuing", esp_err_to_name(err));
     }
 
+    /* Same station. A receiver behind a router outage is a socket that will
+     * need reconnecting, which is this task's own business. */
+    err = slate_onkyo_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Onkyo connection task unavailable: %s — continuing",
+                 esp_err_to_name(err));
+    }
+
     /*
      * §4.3's `slate-<mac6>.local`, before the adapter below queries the
      * responder it starts. Here rather than in start_api() because mDNS needs
@@ -613,6 +622,20 @@ static void start_api(void)
 
 #ifdef SLATE_DIRECT_SELFTEST
     slate_direct_selftest();
+#endif
+
+    /* The second adapter that reaches a device by itself, and the first that is
+     * pushed to rather than polling. Registered here for the same reason as its
+     * neighbours; its socket task starts below, with the station. */
+    esp_err_t onkyo_err = slate_onkyo_init();
+    if (onkyo_err != ESP_OK) {
+        ESP_LOGE(TAG, "Onkyo provider degraded: %s — continuing", esp_err_to_name(onkyo_err));
+    }
+
+#ifdef SLATE_ONKYO_SELFTEST
+    if (onkyo_err == ESP_OK) {
+        slate_onkyo_selftest();
+    }
 #endif
 
 #ifdef SLATE_SHELLY_SELFTEST

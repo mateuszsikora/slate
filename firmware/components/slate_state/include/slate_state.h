@@ -102,15 +102,17 @@ extern "C" {
  * boot and never leaves; the spare slots are for the adapter after next and for
  * the self-test's fixtures, which must not have to displace a real one.
  *
- * Raised from six when `shelly` became the third real provider. Six was exactly
- * the number a self-test build already used — `direct`, `ha`, and the four
- * fixtures registered by the state, action and UI self-tests — so a third
- * adapter did not overflow the table on a wall panel, where it would have been
- * noticed, but on the one build that is supposed to be checking it. Each slot
- * is a pointer and a status byte; the cap is a guard against a runaway
- * registration, not a budget anybody is spending.
+ * Raised from six when `shelly` became the third real provider, and from eight
+ * when `onkyo` became the fourth. Six was exactly the number a self-test build
+ * already used — `direct`, `ha`, and the four fixtures registered by the state,
+ * action and UI self-tests — so a third adapter did not overflow the table on a
+ * wall panel, where it would have been noticed, but on the one build that is
+ * supposed to be checking it. Eight was then exactly the new number, which is
+ * the same trap one adapter further on, so this leaves room rather than
+ * matching. Each slot is a pointer and a status byte; the cap is a guard
+ * against a runaway registration, not a budget anybody is spending.
  */
-#define SLATE_STATE_MAX_PROVIDERS 8
+#define SLATE_STATE_MAX_PROVIDERS 12
 
 /** An optional numeric field the resource did not report (§5.2). */
 #define SLATE_STATE_ABSENT INT16_MIN

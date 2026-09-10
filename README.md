@@ -26,9 +26,9 @@ the panel over HTTP — from a drag-and-drop editor the panel itself serves, or
 from a file — so rearranging it costs a request rather than a build. State and
 actions come from providers: **Home Assistant**, over its WebSocket API;
 **direct**, which is any script that can POST JSON and read a WebSocket; and
-**Shelly**, which the panel polls on the LAN by itself. None is required by the
-others, and nothing outside the local network is involved. With Shelly the panel
-needs nothing else running at all.
+**Shelly** and **Onkyo**, which the panel reaches on the LAN by itself. None is
+required by the others, and nothing outside the local network is involved. With
+those last two the panel needs nothing else running at all.
 
 - [What you need](#what-you-need) · [Install](#install) · [First run](#first-run)
 - [Building a dashboard](#building-a-dashboard) · [Providers](#providers) ·
@@ -293,6 +293,30 @@ lease cannot empty a tile. Devices with authentication enabled are not supported
 these are relays on your own LAN, and the panel sends no credentials.
 
 Full reference: [`docs/API.md`](docs/API.md#the-shelly-provider).
+
+### Onkyo — the one that tells the panel
+
+An Onkyo or Integra receiver speaks eISCP over a plain TCP socket, and it does
+not wait to be asked: turn the volume knob on the front panel and the tile on
+the wall follows it. The panel holds the connection open and listens.
+
+```json
+{"id": "t1", "type": "light", "pos": [0, 0], "size": [2, 2],
+ "binding": {"provider": "onkyo", "resource": "192.168.1.60/main"},
+ "label": "Onkyo", "icon": "volume-high"}
+```
+
+`main` is the receiver — power, and volume on the 2×2 tile's slider. `input`
+shows the selected source, `input:<code>` is a scene that selects one, and
+`mute` toggles. The codes are the receiver's own: `2b` NET, `24` FM, `23` CD,
+`2e` Bluetooth, `20` TV/Tape. Put five of them on a 4×1 scene bar and that is
+the input selector.
+
+A receiver is a `light` because the panel has four component types and none of
+them is an amplifier — the one that renders a power state and a level is the one
+that fits. The icon is what stops it looking like a lamp.
+
+Full reference: [`docs/API.md`](docs/API.md#the-onkyo-provider).
 
 ## Updating
 

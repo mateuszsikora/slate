@@ -84,7 +84,7 @@ Consequence: no asset versioning, cache invalidation or flash management. New ic
 │ State Store     normalized resources     │
 │ Action Bus      semantic actions/results │
 │ Providers       direct / Home Assistant  │
-│                 / Shelly                 │
+│                 / Shelly / Onkyo         │
 │ Config Store    NVS + LittleFS           │
 │ HAL             LCD, touch, backlight    │
 └──────┬─────────────────┬─────────────┬───┘
@@ -99,7 +99,9 @@ Consequence: no asset versioning, cache invalidation or flash management. New ic
 
 The direct provider is the smallest useful interoperability path: a script or Node-RED flow publishes normalized state over HTTP and receives semantic actions over the device WebSocket. It needs no broker, cloud service or companion process. Home Assistant uses an in-firmware adapter because its compressed subscriptions and service calls are valuable enough to support directly.
 
-The two arrows above point in opposite directions and the third points outward: `direct` is pushed to, `ha` is a connection the panel opens to one system that owns the house, and `shelly` (§5.9) is the panel reaching individual devices itself. Only the third makes a panel standalone — with nothing else on the network running, the tiles still carry values and still answer a tap.
+The two arrows above point in opposite directions and the third points outward: `direct` is pushed to, `ha` is a connection the panel opens to one system that owns the house, and `shelly` (§5.9) and `onkyo` (§5.10) are the panel reaching individual devices itself. Only the last pair makes a panel standalone — with nothing else on the network running, the tiles still carry values and still answer a tap.
+
+Those two are also not the same shape as each other, which is the point of having both. `shelly` asks and waits; `onkyo` holds a socket open and is told. A provider boundary that carried only pollers would be a polling engine with an interface on it.
 
 ## 3. Configuration format
 
@@ -556,7 +558,7 @@ While the setup access point is up, the setup page and the endpoints it needs �
 
 ### 5.1 Provider boundary
 
-A provider is the adapter between one upstream system and the runtime. Version 1 has three provider ids: `direct`, which is always present; `ha`, which is present but `unconfigured` until it has credentials; and `shelly` (§5.9), which is present and `unconfigured` until a dashboard binds a device to it. The common core knows only five operations:
+A provider is the adapter between one upstream system and the runtime. Version 1 has four provider ids: `direct`, which is always present; `ha`, which is present but `unconfigured` until it has credentials; and `shelly` (§5.9) and `onkyo` (§5.10), each present and `unconfigured` until a dashboard binds a device to it. The common core knows only five operations:
 
 1. report lifecycle status;
 2. accept the set of resource ids referenced by the active configuration;
@@ -780,6 +782,31 @@ The subscription path is where that discipline is easiest to lose and matters mo
 **Its status is about the relays, not about the radio.** A station and a binding set are not evidence that anything is being served, and saying `online` on the strength of those two made a dashboard of four wrong addresses indistinguishable from a working one — with `GET /resources` unable to correct the impression, since a resource with no reading is not published at all. The five states §5.2 already has are enough: `connecting` before any device has had its first turn, `online` when every one answered, `degraded` when some did, `offline` when none do now but some have, and `error` when none ever has, which is the one that needs a person.
 
 The cost is the argument for the provider boundary. `libslate_shelly.a` measures **under 4 KB**, a couple of hundred bytes of it internal SRAM, against roughly 20 KB for the Home Assistant adapter — because `esp_http_client` is already linked for the release channel and cJSON for the configuration parser. `idf.py size-components` on a release build is where those come from, and they are given to one significant figure on purpose: the claim is that an integration is cheap once its transport is in the image, and that claim does not need four digits that go stale every time somebody touches the component.
+
+### 5.10 Onkyo provider
+
+The second adapter that reaches a device by itself, and the first that does not poll. eISCP is a small binary frame over TCP 60128 with no credential in it, and a receiver **announces itself**: turn the volume knob on the front panel and an `MVL` frame arrives unasked. So this adapter holds the socket open and publishes what comes, asking outright once per connection and then once a minute as a safety net.
+
+That is why it was built second rather than instead. §5.9 proved the provider boundary carries a poller, and §5.1's five operations say nothing about who speaks first — but a boundary that had only ever carried pollers would not have been evidence of much. This one exercises the other direction and needed no change to the core to do it.
+
+**The same configuration story as §5.9.** The binding carries the address, so there is nothing else to set up:
+
+```json
+{"provider": "onkyo", "resource": "192.168.1.60/main"}
+{"provider": "onkyo", "resource": "192.168.1.60/input:2b"}
+```
+
+`main` is the receiver as a `light`, `input` is the selected input as a `sensor`, `input:<code>` is a `scene` that selects one, and `mute` is a `scene` that toggles. `<code>` is eISCP's own selector byte — `2b` for NET, `24` for FM — rather than a name this firmware would have to keep in step with a vocabulary it does not own.
+
+**A receiver is published as a `light`.** §5.2 has four kinds and none of them is an amplifier. `light` is the one whose shape fits — a thing that is on or off with one continuous level — and mapping volume onto `brightness` is what gets §7.1's 2×2 slider instead of a row of blind step buttons. The tile carries `icon: volume-high` so the screen does not claim it is a lamp. A media-player component is §15's, and when it exists this adapter changes its `kind` and nothing else; that it can is the argument for ADR-3 rather than a workaround for it.
+
+Volume is sent as the percentage itself, one for one. A TX-8270 answers `MVL56` — 86 — while its own `NRI` reports `volmax="82"`, so the two are not the same number and neither is reliably the scale; a receiver clamps what it cannot do, and a predictable mapping is worth more than a guessed one. The consequence is worth stating rather than leaving to be discovered: the slider is an absolute volume with no ceiling of its own, and dragging it to the top asks for the loudest thing the receiver can do.
+
+**A connection attempt is bounded by hand.** `SO_SNDTIMEO` does not apply to `connect()` — lwIP consults it only on the send path — so a blocking connect is bounded by SYN retransmission, which at this project's `CONFIG_LWIP_TCP_SYNMAXRTX` of 12 is minutes rather than seconds. That is not merely slow: the task is not in `select()` or reading its queue while it runs, so one unplugged receiver would deafen the adapter to a tap meant for a working one. The attempt is therefore non-blocking and joins the `select()` the loop already performs.
+
+**Nothing is published before the receiver has answered once.** §5.2 has no spelling for "not told yet", and a light defaulting to off would be a claim rather than an absence — the same question §5.9 settled the same way, and the tile keeps §3.3's placeholder until the first frame arrives.
+
+**Frames are a stream, not messages.** The reader consumes only what has fully arrived, resynchronises on `ISCP` rather than trusting the buffer to begin on a boundary, and skips a frame too large to hold — an `NRI` answer is kilobytes of XML this adapter never asks for. On a quiet LAN these frames arrive whole every time, which is exactly why the split-read case is in the self-test rather than left to a day when it does not.
 
 ## 6. Firmware
 

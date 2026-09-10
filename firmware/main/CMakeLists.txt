@@ -3,7 +3,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES slate_action slate_api slate_brightness slate_config_api slate_control_api
              slate_coredump slate_direct slate_display slate_editor slate_ha slate_integrations
-             slate_mdns slate_ota slate_setup slate_shelly slate_state slate_store slate_ui
+             slate_mdns slate_onkyo slate_ota slate_setup slate_shelly slate_state slate_store slate_ui
              slate_update slate_wifi slate_time
              slate_ws app_update json
              esp_system esp_event
@@ -31,6 +31,10 @@ idf_component_register(
 #   -DSLATE_ACTION_SELFTEST=1  exercise capability validation, optimistic
 #                              overlays and every completion path against the
 #                              real state store and a fixture provider.
+#   -DSLATE_ONKYO_SELFTEST=1   check the eISCP frame reader against byte buffers,
+#                              including a frame split across two reads and
+#                              rubbish ahead of a good one — the cases a stream
+#                              protocol gets wrong and a quiet LAN never shows.
 #   -DSLATE_SHELLY_SELFTEST=1  check the `<host>/<role>:<index>` parser and both
 #                              generation mappings against fixture JSON. Needs
 #                              no device and no network: these are where a
@@ -81,7 +85,7 @@ idf_component_register(
 #
 foreach(knob SLATE_STORE_SELFTEST SLATE_API_SELFTEST SLATE_WS_SELFTEST SLATE_STATE_SELFTEST
              SLATE_DIRECT_SELFTEST SLATE_ACTION_SELFTEST SLATE_CONFIG_API_SELFTEST SLATE_HA_SELFTEST
-             SLATE_SHELLY_SELFTEST
+             SLATE_SHELLY_SELFTEST SLATE_ONKYO_SELFTEST
              SLATE_OTA_ROLLBACK_SELFTEST
              SLATE_DISPLAY_SELFTEST
              SLATE_UI_SELFTEST SLATE_UI_LEAK_BYTES SLATE_BRIGHTNESS_SELFTEST SLATE_TIME_SELFTEST

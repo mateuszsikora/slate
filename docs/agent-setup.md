@@ -10,12 +10,12 @@ dashboard. It exists so that a request like this one is enough:
 Or one with no automation system in it at all, which takes the same route as far
 as phase 5 and then a shorter one:
 
-> The panel is plugged in. I have a couple of Shelly relays on the network. Put
-> the lights on it.
+> The panel is plugged in. I have a couple of Shelly relays and an Onkyo
+> receiver on the network. Put the lights and the volume on it.
 
 Both end in a panel that needs nothing else running. The difference is only
 where the state comes from: Home Assistant is a connection the panel opens
-outward, and `shelly` is the panel reaching the relays itself.
+outward, while `shelly` and `onkyo` are the panel reaching the devices itself.
 
 This is not [`agent-workflow.md`](agent-workflow.md), which is about working the
 issue backlog, and it is not [`CONTRIBUTING.md`](../CONTRIBUTING.md), which is
@@ -36,8 +36,8 @@ repeating them.
   name](#3-learn-the-panels-name) · [4. Put it on the
   network](#4-put-it-on-the-network) · [5. Open a session](#5-open-a-session)
 - [6. Connect Home Assistant](#6-connect-home-assistant) · [7. Choose the
-  entities](#7-choose-the-entities) · [6b. Or: Shelly, with no Home
-  Assistant](#6b-or-shelly-with-no-home-assistant) · [8. Publish the
+  entities](#7-choose-the-entities) · [6b. Or: devices on the LAN, with no Home
+  Assistant](#6b-or-devices-on-the-lan-with-no-home-assistant) · [8. Publish the
   dashboard](#8-publish-the-dashboard) · [9. Verify](#9-verify) ·
   [10. Report](#10-report)
 - [What not to do](#what-not-to-do)
@@ -59,7 +59,7 @@ want to ask.
 | Panel session credential | `SLATE_TOKEN` | `POST /session`, phase 5 |
 | Home Assistant URL | `HA_URL` | `GET /ha/discover` (needs phase 5), or ask. No trailing slash |
 | Home Assistant token | `HA_TOKEN` | given, and see [Rules](#rules) about where it may live |
-| Shelly addresses | — | phase 6b, if there is no Home Assistant. Ask, or find them on the LAN |
+| Shelly / Onkyo addresses | — | phase 6b, if there is no Home Assistant. Ask, or find them on the LAN |
 | Which light, which sensor | — | phase 7 — **ask when more than one matches** |
 | Timezone | — | the host's, e.g. `readlink /etc/localtime`; confirm it |
 
@@ -451,10 +451,11 @@ If either returns none, say which one and stop: a dashboard bound to an entity
 that does not exist renders a placeholder naming `provider:resource`, which is a
 worse outcome than a question.
 
-## 6b. Or: Shelly, with no Home Assistant
+## 6b. Or: devices on the LAN, with no Home Assistant
 
 **This section replaces phases 6 and 7.** Take it when the operator has Shelly
-relays and no automation system, and skip it entirely otherwise. Everything
+relays or an Onkyo receiver and no automation system, and skip it entirely
+otherwise. Everything
 before phase 6 and everything from phase 8 is the same either way.
 
 There is nothing to configure. The `shelly` provider's device list *is* the set
@@ -498,9 +499,37 @@ breaks the tile; `shelly1-abcdef123456.local/switch:0` survives that and is the
 better default on a network you do not control. Mention the reservation in
 phase 10 either way — it is the one piece of after-care this path has.
 
-**Done when** you have one `<host>/<role>:<index>` string per requested tile,
-and every host answered `GET /shelly` without authentication. A host that did
-not answer is not a tile to publish and hope about: say which one.
+### An Onkyo or Integra receiver, on the same path
+
+The `onkyo` provider is configured the same way and belongs in the same phase:
+no endpoint, no credential, the address in the binding. It differs in one thing
+worth knowing before you test it — the receiver **pushes** its state, so a tile
+is current without the panel asking, and a change made from the front panel or
+the remote shows up on the wall within a second.
+
+Confirm it answers before binding anything. eISCP is TCP 60128, and a receiver
+in network standby answers while its display is dark:
+
+```bash
+nc -z -G 2 192.168.1.60 60128 && echo "eISCP is open"
+```
+
+Bind `<host>/main` for the receiver itself — a `light` tile, 2×2, with
+`icon: volume-high`, whose slider is the volume — plus `<host>/input` to show
+the source and a 4×1 `scene` bar of `<host>/input:<code>` to change it. The
+codes are the receiver's own and are in
+[`CONFIGURATION.md`](CONFIGURATION.md#which-onkyo-roles-can-be-bound).
+
+**Ask before testing the volume slider, and ask before powering the receiver
+on.** This is the one device in this runbook that makes a noise, and a volume
+that was set for headphones at midnight is not one to discover through a
+speaker. Verifying it in standby is enough for phase 9: power, input and volume
+all read correctly with the display dark.
+
+**Done when** you have one `<host>/<role>` or `<host>/<role>:<index>` string per
+requested tile, and every host answered — `GET /shelly` without authentication
+for a relay, an open 60128 for a receiver. A host that did not answer is not a
+tile to publish and hope about: say which one.
 
 ## 8. Publish the dashboard
 
