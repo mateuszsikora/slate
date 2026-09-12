@@ -102,6 +102,13 @@ typedef struct {
 #define SLATE_HA_TOKEN_MAX_LEN 512
 #define SLATE_HA_URL_MAX_LEN   128
 
+/* Tuya issues an access id and secret per cloud project and a uid per app
+ * account; the region is one of its data-centre codes. */
+#define SLATE_TUYA_REGION_MAX_LEN     8    /* "eu", "us", "cn", "in", ... */
+#define SLATE_TUYA_ACCESS_ID_MAX_LEN  32
+#define SLATE_TUYA_SECRET_MAX_LEN     64
+#define SLATE_TUYA_UID_MAX_LEN        64
+
 /* 802.11: an SSID is at most 32 bytes and a WPA2 passphrase at most 63. Both
  * buffers include the terminator, so they are what `esp_wifi`'s own
  * wifi_sta_config_t fields hold. */
@@ -116,11 +123,12 @@ typedef struct {
  *
  * NVS keys are limited to 15 characters; every name below is inside that.
  *
- * Two keys are deliberately absent: the Home Assistant token and the WiFi
- * passphrase. §12 makes both values that must not reach an API response, and a
- * key constant a serialiser can name is a key constant a serialiser can read —
- * so they are private to this component and reachable only through
- * slate_store_ha_token_get() and slate_store_wifi_password_get().
+ * Some keys are deliberately absent: the Home Assistant token, the WiFi
+ * passphrase and the four Tuya credential fields. §12 makes these values that
+ * must not reach an API response, and a key constant a serialiser can name is
+ * a key constant a serialiser can read — so they are private to this
+ * component and reachable only through slate_store_ha_token_get(),
+ * slate_store_wifi_password_get() and slate_store_tuya_get().
  * slate_store_str_get() refuses them by name.
  */
 #define SLATE_NVS_NAMESPACE "slate"
@@ -133,7 +141,7 @@ typedef struct {
 #define SLATE_KEY_BACKLIGHT    "bl_level"   /* #183, the level a boot lights at */
 
 /*
- * §9.2's optional WPA2 passphrase for the setup access point. Not one of the two
+ * §9.2's optional WPA2 passphrase for the setup access point. Not one of the
  * secret keys above it, and the difference is deliberate: this value is *printed
  * on the setup screen* next to the SSID (§9.2, §12), so a component that can
  * read it is not a leak — the screen is showing it to the room already. It is
@@ -360,6 +368,46 @@ esp_err_t slate_store_ha_token_get(char *out, size_t out_len);
 /** @brief Forget the Home Assistant URL and token. */
 esp_err_t slate_store_ha_clear(void);
 
+/* --- Tuya cloud credentials (§12) --------------------------------------- */
+
+/**
+ * @brief Persist the Tuya region, access id, access secret and uid together.
+ *
+ * All four are written under one NVS commit, for the reason
+ * slate_store_ha_set() gives: a power cut must not leave half a credential
+ * set, which is a configured-looking device that cannot connect. Any NULL or
+ * empty argument is ESP_ERR_INVALID_ARG; the store does not validate what it
+ * is given beyond length.
+ */
+esp_err_t slate_store_tuya_set(const char *region, const char *access_id,
+                               const char *secret, const char *uid);
+
+/**
+ * @brief Read the Tuya credentials.
+ *
+ * For the Tuya cloud client and nothing else; every other caller wants
+ * slate_store_tuya_is_set(). ESP_ERR_NOT_FOUND when unset, and the read fails
+ * unless ALL four fields are present, so a caller never connects with a
+ * partial set. This is the only way to read the values —
+ * slate_store_str_get() refuses the keys — so the restriction is a mechanism
+ * rather than a request.
+ */
+esp_err_t slate_store_tuya_get(char *region, size_t region_len,
+                               char *access_id, size_t access_id_len,
+                               char *secret, size_t secret_len,
+                               char *uid, size_t uid_len);
+
+/**
+ * @brief Whether Tuya credentials are stored.
+ *
+ * Cached like slate_store_ha_token_is_set(), so a polled endpoint does not
+ * touch flash.
+ */
+bool slate_store_tuya_is_set(void);
+
+/** @brief Forget the Tuya credentials. */
+esp_err_t slate_store_tuya_clear(void);
+
 /* --- Station addressing (§9.6, §4.1) ------------------------------------ */
 
 /* lwIP resolves against three servers and ignores the rest, so three is the
@@ -533,7 +581,7 @@ esp_err_t slate_store_wifi_clear(void);
  * #12 can persist what they need without opening their own NVS handle or
  * inventing a second namespace. Use the SLATE_KEY_* constants above.
  *
- * These refuse the two secret keys (ESP_ERR_INVALID_ARG); those have their own
+ * These refuse every secret key (ESP_ERR_INVALID_ARG); those have their own
  * accessors.
  */
 

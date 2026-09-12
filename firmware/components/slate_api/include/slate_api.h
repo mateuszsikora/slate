@@ -136,8 +136,17 @@ esp_err_t slate_api_register_uri(const httpd_uri_t *uri, slate_api_auth_t auth);
  */
 esp_err_t slate_api_resource_append(cJSON *array, const slate_resource_t *resource);
 
-/** Append a provider's discovery catalog to `array`. */
-typedef esp_err_t (*slate_api_resources_append_fn)(void *ctx, cJSON *array);
+/** Provider-neutral lifecycle state for an asynchronously refreshed catalog. */
+typedef enum {
+    SLATE_API_CATALOG_EMPTY = 0,
+    SLATE_API_CATALOG_LOADING,
+    SLATE_API_CATALOG_READY,
+    SLATE_API_CATALOG_ERROR,
+} slate_api_catalog_state_t;
+
+/** Append a provider's discovery catalog to `array` and report its cache state. */
+typedef esp_err_t (*slate_api_resources_append_fn)(void *ctx, cJSON *array,
+                                                   slate_api_catalog_state_t *state);
 
 /**
  * @brief Register the discovery catalog behind `GET /resources` for a provider.

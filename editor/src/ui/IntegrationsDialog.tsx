@@ -8,16 +8,28 @@ import {
   type HaDiscoveredInstance,
   type IntegrationKey,
   type ProviderStatus,
+  type TuyaConfiguration,
 } from '../lib/api'
+import { providerReason } from '../lib/providers'
 
 interface Props {
   client: DeviceClient
-  providers: Pick<ProviderStatus, 'id' | 'status'>[]
+  providers: Pick<ProviderStatus, 'id' | 'status' | 'reason'>[]
   onChanged: () => void
   onClose: () => void
 }
 
 const EMPTY_HA: HaConfiguration = { configured: false, url: null }
+const EMPTY_TUYA: TuyaConfiguration = { configured: false, region: null, uid: null }
+
+const TUYA_REGIONS: { value: string; label: string }[] = [
+  { value: 'eu', label: 'Europe (eu)' },
+  { value: 'us', label: 'Americas (us)' },
+  { value: 'cn', label: 'China (cn)' },
+  { value: 'in', label: 'India (in)' },
+  { value: 'ueaz', label: 'US East Azure (ueaz)' },
+  { value: 'weaz', label: 'EU West Azure (weaz)' },
+]
 
 export function IntegrationsDialog({ client, providers, onChanged, onClose }: Props) {
   const [ha, setHa] = useState<HaConfiguration>(EMPTY_HA)
@@ -27,15 +39,24 @@ export function IntegrationsDialog({ client, providers, onChanged, onClose }: Pr
   const [haDiscoveryDone, setHaDiscoveryDone] = useState(false)
   const [haBusy, setHaBusy] = useState(false)
   const [haMessage, setHaMessage] = useState<string | null>(null)
+  const [tuya, setTuya] = useState<TuyaConfiguration>(EMPTY_TUYA)
+  const [tuyaRegion, setTuyaRegion] = useState('eu')
+  const [tuyaAccessId, setTuyaAccessId] = useState('')
+  const [tuyaSecret, setTuyaSecret] = useState('')
+  const [tuyaUid, setTuyaUid] = useState('')
+  const [tuyaBusy, setTuyaBusy] = useState(false)
+  const [tuyaMessage, setTuyaMessage] = useState<string | null>(null)
   const [keys, setKeys] = useState<IntegrationKey[]>([])
   const [keyName, setKeyName] = useState('')
   const [keyBusy, setKeyBusy] = useState(false)
   const [keyMessage, setKeyMessage] = useState<string | null>(null)
   const [created, setCreated] = useState<CreatedIntegrationKey | null>(null)
   const tokenInput = useRef<HTMLInputElement>(null)
+  const tuyaRequest = useRef(0)
 
   useEffect(() => {
     let cancelled = false
+    const tuyaLoad = ++tuyaRequest.current
 
     void client
       .haConfiguration()
@@ -60,6 +81,18 @@ export function IntegrationsDialog({ client, providers, onChanged, onClose }: Pr
       })
       .catch(() => {
         if (!cancelled) setHaDiscoveryDone(true)
+      })
+
+    void client
+      .tuyaConfiguration()
+      .then((configuration) => {
+        if (cancelled || tuyaLoad !== tuyaRequest.current) return
+        setTuya(configuration)
+        if (configuration.region !== null) setTuyaRegion(configuration.region)
+        setTuyaUid(configuration.uid ?? '')
+      })
+      .catch((error) => {
+        if (!cancelled) setTuyaMessage(apiMessage(error, 'Tuya settings could not be loaded.'))
       })
 
     void client
@@ -124,6 +157,45 @@ export function IntegrationsDialog({ client, providers, onChanged, onClose }: Pr
     }
   }
 
+  const configureTuya = async (event: FormEvent) => {
+    event.preventDefault()
+    ++tuyaRequest.current
+    setTuyaBusy(true)
+    setTuyaMessage(null)
+    try {
+      await client.configureTuya(tuyaRegion, tuyaAccessId.trim(), tuyaSecret, tuyaUid.trim())
+      const configuration = await client.tuyaConfiguration()
+      setTuya(configuration)
+      setTuyaAccessId('')
+      setTuyaSecret('')
+      setTuyaMessage('Connected. Tuya resources are now available in the tile picker.')
+      onChanged()
+    } catch (error) {
+      setTuyaMessage(tuyaError(error))
+    } finally {
+      setTuyaBusy(false)
+    }
+  }
+
+  const disconnectTuya = async () => {
+    if (!window.confirm('Disconnect Tuya and remove its stored credentials?')) return
+    ++tuyaRequest.current
+    setTuyaBusy(true)
+    setTuyaMessage(null)
+    try {
+      await client.disconnectTuya()
+      setTuya(EMPTY_TUYA)
+      setTuyaAccessId('')
+      setTuyaSecret('')
+      setTuyaMessage('Tuya disconnected.')
+      onChanged()
+    } catch (error) {
+      setTuyaMessage(apiMessage(error, 'Tuya could not be disconnected.'))
+    } finally {
+      setTuyaBusy(false)
+    }
+  }
+
   const createKey = async (event: FormEvent) => {
     event.preventDefault()
     setKeyBusy(true)
@@ -174,6 +246,9 @@ export function IntegrationsDialog({ client, providers, onChanged, onClose }: Pr
   }
 
   const haStatus = providers.find((provider) => provider.id === 'ha')?.status ?? 'unknown'
+  const tuyaProvider = providers.find((provider) => provider.id === 'tuya')
+  const tuyaStatus = tuyaProvider?.status ?? 'unknown'
+  const tuyaStatusReason = providerReason(tuyaProvider?.reason)
   const externalStatus =
     providers.find((provider) => provider.id === 'direct')?.status ?? 'unknown'
 
@@ -254,6 +329,86 @@ export function IntegrationsDialog({ client, providers, onChanged, onClose }: Pr
               </div>
             </form>
             {haMessage !== null ? <p className="integration-message" role="status">{haMessage}</p> : null}
+          </article>
+
+          <article className="integration-card">
+            <div className="integration-card__heading">
+              <div>
+                <h3>Tuya</h3>
+                <p>Use devices from your Tuya Smart or Smart Life app through the Tuya cloud.</p>
+              </div>
+              <span className={`chip chip--${tuyaStatus}`}>{tuyaStatus}</span>
+            </div>
+            <p className="integration-note" role="status" aria-live="polite">
+              {tuyaStatusReason ?? `Tuya status: ${tuyaStatus}.`}
+            </p>
+
+            <form className="integration-form" onSubmit={(event) => void configureTuya(event)}>
+              <label className="field">
+                <span>Region</span>
+                <select
+                  value={tuyaRegion}
+                  required
+                  disabled={tuyaBusy}
+                  onChange={(event) => setTuyaRegion(event.currentTarget.value)}
+                >
+                  {TUYA_REGIONS.map((region) => (
+                    <option key={region.value} value={region.value}>
+                      {region.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Access ID</span>
+                <input
+                  value={tuyaAccessId}
+                  placeholder="jt4kpqtkheqmwkcxdrew"
+                  required
+                  disabled={tuyaBusy}
+                  onChange={(event) => setTuyaAccessId(event.currentTarget.value)}
+                />
+              </label>
+              <label className="field">
+                <span>{tuya.configured ? 'New Access Secret' : 'Access Secret'}</span>
+                <input
+                  type="password"
+                  value={tuyaSecret}
+                  autoComplete="new-password"
+                  required
+                  disabled={tuyaBusy}
+                  onChange={(event) => setTuyaSecret(event.currentTarget.value)}
+                />
+              </label>
+              <label className="field">
+                <span>App account UID</span>
+                <input
+                  value={tuyaUid}
+                  placeholder="az1680123456789ABCDE"
+                  required
+                  disabled={tuyaBusy}
+                  onChange={(event) => setTuyaUid(event.currentTarget.value)}
+                />
+              </label>
+              <p className="integration-note">
+                Create a cloud project at iot.tuya.com, link your Smart Life or Tuya Smart app to it, and enter its Access ID, Access Secret, region and app account UID.
+              </p>
+              <div className="integration-actions">
+                <button
+                  className="button"
+                  type="submit"
+                  disabled={tuyaBusy || tuyaAccessId.trim() === '' || tuyaSecret === '' || tuyaUid.trim() === ''}
+                >
+                  {tuyaBusy ? 'Testing…' : tuya.configured ? 'Test and replace' : 'Test and connect'}
+                </button>
+                {tuya.configured ? (
+                  <button className="button button--danger" type="button" disabled={tuyaBusy} onClick={() => void disconnectTuya()}>
+                    Disconnect
+                  </button>
+                ) : null}
+              </div>
+            </form>
+            {tuyaMessage !== null ? <p className="integration-message" role="status">{tuyaMessage}</p> : null}
           </article>
 
           <article className="integration-card">
@@ -343,4 +498,26 @@ function haError(error: unknown): string {
   if (error.code === 'bad_url') return 'Enter an http:// or https:// Home Assistant URL.'
   if (error.code === 'unreachable') return 'The panel stopped answering while testing the connection.'
   return `Home Assistant could not be configured (${error.code}).`
+}
+
+const TUYA_FIELD_CODES = new Set([
+  'region_required',
+  'region_unknown',
+  'access_id_required',
+  'access_id_too_long',
+  'secret_required',
+  'secret_too_long',
+  'uid_required',
+  'uid_too_long',
+])
+
+function tuyaError(error: unknown): string {
+  if (!(error instanceof ApiError)) return 'Tuya could not be configured.'
+  if (error.code === 'tuya_auth_failed') return 'Tuya rejected those credentials.'
+  if (error.code === 'tuya_quota') return 'Tuya cloud subscription or quota problem — check iot.tuya.com.'
+  if (error.code === 'tuya_unreachable') return 'Could not reach the Tuya cloud.'
+  if (error.code === 'tuya_busy') return 'Panel busy — try again.'
+  if (TUYA_FIELD_CODES.has(error.code)) return 'Check the four fields.'
+  if (error.code === 'unreachable') return 'The panel stopped answering while testing the connection.'
+  return `Tuya could not be configured (${error.code}).`
 }

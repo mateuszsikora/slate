@@ -3,7 +3,8 @@
 Everything that configures or drives a panel goes through this API, including
 the editor the panel serves and the direct provider. It is a public contract:
 the browser talks to the device and to nothing else, and no cloud service sits
-anywhere in the picture.
+between them — the one outbound exception is the `tuya` provider below, which
+the panel itself drives through the Tuya cloud.
 
 This page is what each endpoint answers. [`DESIGN.md`](DESIGN.md) §4, §5 and §11
 are the same material with the reasoning attached and are the source of truth
@@ -17,6 +18,7 @@ where the two disagree. The document these endpoints carry is
 - [The direct provider](#the-direct-provider)
 - [The Shelly provider](#the-shelly-provider)
 - [The Onkyo provider](#the-onkyo-provider)
+- [The Tuya provider](#the-tuya-provider)
 - [What is deliberately absent](#what-is-deliberately-absent)
 
 ## Base and authentication
@@ -89,6 +91,9 @@ any endpoint that takes a body are `empty_body`, `invalid_json`, `too_large`
 | DELETE | `/ha` | disconnect Home Assistant and erase its token |
 | GET | `/ha/discover` | find Home Assistant instances over mDNS |
 | POST, GET | `/ha/catalog` | relay one HA catalog stage to the editor |
+| GET | `/tuya` | report whether the Tuya cloud is configured, its region and account uid |
+| POST | `/tuya` | configure the Tuya cloud provider |
+| DELETE | `/tuya` | disconnect Tuya and erase its credentials |
 | GET, POST, DELETE | `/integration-keys` | list, create or revoke External API keys |
 | GET | `/wifi/scan` | nearby networks |
 | POST | `/wifi` | set station credentials and addressing |
@@ -165,11 +170,16 @@ WebSocket:
 ```json
 {"providers": [
   {"id": "direct", "status": "degraded", "resource_count": 2},
-  {"id": "ha", "status": "unconfigured", "resource_count": 0},
+  {"id": "ha", "status": "error", "reason": "auth", "resource_count": 0},
   {"id": "shelly", "status": "online", "resource_count": 8},
   {"id": "onkyo", "status": "online", "resource_count": 4}
 ]}
 ```
+
+Provider entries may include `reason` while a provider is in an actionable
+error state. Tuya uses the stable values `auth` for rejected credentials and
+`quota` for a missing or expired cloud plan. The field is omitted on recovery
+and for providers that have no more specific diagnosis.
 
 The list is every provider this firmware registered, in registration order,
 rather than a fixed set — an adapter a later firmware adds appears here without
@@ -184,6 +194,7 @@ The four ids version 1 carries:
 | `ha` | one connection the panel opens to Home Assistant |
 | `shelly` | the panel polling Shelly relays on the LAN by itself; needs nothing else running |
 | `onkyo` | the panel holding a socket open to an eISCP receiver, which pushes its own changes |
+| `tuya` | the panel driving Tuya and Smart Life devices through the Tuya cloud; needs a cloud project, and its traffic leaves the LAN |
 
 `status` is `unconfigured`, `connecting`, `online`, `degraded`, `offline` or
 `error`. `degraded` means a provider can still serve part of its contract
@@ -209,6 +220,13 @@ are now though some have been, and `error` when every one has been tried and
 none has ever answered — the same operator mistake, reported by the same word,
 whichever provider it lands on.
 
+`tuya` says the same states about the cloud rather than the relays:
+`unconfigured` until credentials exist, `connecting` during the first contact,
+`online` while sweeps succeed, `offline` on network failure, and `error` when
+the cloud rejects the credentials or the cloud project's quota has expired —
+which is what an expired IoT Core trial looks like. `offline` and `error`
+stale only this provider's tiles.
+
 > `DESIGN.md` §4.1 also specifies a standalone `GET /providers` carrying the
 > same entries without the device health around them. This firmware does not
 > serve it: nothing needs it, because `/status` and the WebSocket already carry
@@ -218,11 +236,13 @@ whichever provider it lands on.
 vocabulary below. It is the bounded runtime store: Home Assistant contains only
 entities referenced by the active dashboard, `direct` contains only bound
 resources published since boot, and `shelly` contains what the poller last read
-from the devices the dashboard names. The editor obtains the full HA picker catalog
-through `/ha/catalog`, assembles it in browser memory once, shares the cache
-between tile pickers and refreshes it in the background. Missing, unknown and
-unconfigured providers answer `400 provider_required`, `404 provider_not_found`
-and `409 provider_unconfigured`.
+from the devices the dashboard names. `tuya` is the exception: it returns the
+cloud account's whole mappable device list for the picker, cached for a minute,
+because that list is the only place a device's app name exists. The editor
+obtains the full HA picker catalog through `/ha/catalog`, assembles it in
+browser memory once, shares the cache between tile pickers and refreshes it in
+the background. Missing, unknown and unconfigured providers answer `400
+provider_required`, `404 provider_not_found` and `409 provider_unconfigured`.
 
 ### Normalized resources
 
@@ -287,7 +307,8 @@ must not dim tiles fed by a script.
   "providers": [{"id": "direct", "status": "degraded", "resource_count": 0},
                 {"id": "ha", "status": "unconfigured", "resource_count": 0},
                 {"id": "shelly", "status": "unconfigured", "resource_count": 0},
-                {"id": "onkyo", "status": "unconfigured", "resource_count": 0}],
+                {"id": "onkyo", "status": "unconfigured", "resource_count": 0},
+                {"id": "tuya", "status": "unconfigured", "resource_count": 0}],
   "rssi": -54, "uptime_s": 120, "heap_free": 294631,
   "lvgl_heap_free": null, "lvgl_heap_total": null, "lvgl_frag_pct": null,
   "reset_reason": "power_on", "reboot_count": 3,
@@ -329,6 +350,36 @@ returns a request id. `GET /ha/catalog?request=<id>` returns
 result. Only one small response is resident on the ESP32 at a time; the browser
 joins the stages and caches the normalized catalog. Normal panel operation does
 not use this route and subscribes only to configured entity ids.
+
+### Tuya
+
+The `tuya` provider drives Tuya and Smart Life devices through the official
+Tuya cloud rather than the LAN: the panel signs its requests (HMAC-SHA256 over
+HTTPS) and polls bound devices every five seconds. Configuring it is the one
+thing that makes the panel talk to a third party's servers, and nothing is
+sent to them until it succeeds.
+
+```json
+{"region": "eu", "access_id": "…", "secret": "…", "uid": "…"}
+```
+
+`region` is one of `us`, `eu`, `cn`, `in`, `ueaz` or `weaz`; `uid` is the
+Smart Life / Tuya Smart app account linked to a cloud project at
+iot.tuya.com. `204` only after the credentials have been tested against the
+Tuya cloud — a token fetch and a device listing — and persisted; existing
+working credentials survive every failed request. Refusals are `400`
+(`region_required`, `region_unknown`, `access_id_required`,
+`access_id_too_long`, `secret_required`, `secret_too_long`, `uid_required`,
+`uid_too_long`, plus the usual body errors), `422` (`tuya_auth_failed`,
+`tuya_quota`), `502 tuya_unreachable`, `503 tuya_busy` and `500
+store_failed`. `tuya_quota` is the cloud project's plan — the free IoT Core
+trial expires — and the same condition later turns a working provider's
+status to `error`.
+
+`GET /tuya` returns `{"configured":true,"region":"eu","uid":"…"}` or an
+unconfigured response with null fields. It never returns the Access ID or the
+Access Secret. `DELETE /tuya` answers `204`, erases the credentials and stops
+the polling.
 
 ### External API keys
 
@@ -557,7 +608,9 @@ Device → client:
 
 ```json
 {"type": "status",   "providers": {"direct": "online", "ha": "unconfigured",
-                                   "shelly": "online", "onkyo": "online"},
+                                   "shelly": "online", "onkyo": "online",
+                                   "tuya": "error"},
+                     "provider_reasons": {"tuya": "quota"},
                      "wifi": -54, "heap_free": 142000,
                      "lvgl_heap_free": 2088632, "lvgl_frag_pct": 1}
 {"type": "log",      "level": "warn", "msg": "resource direct:living-room unavailable"}
@@ -768,15 +821,85 @@ the `light` tile's slider has nowhere to put it.
 There is no authentication in eISCP, and none here. A receiver on the LAN
 answers whoever connects to it, which is equally true of its remote control.
 
+## The Tuya provider
+
+`tuya` is the panel driving Tuya and Smart Life devices itself, through the
+official Tuya cloud rather than the LAN. Like `shelly` it needs nothing else
+running; unlike it, the traffic leaves the local network, and the provider has
+credentials — the endpoints are [`GET`, `POST` and `DELETE /tuya`](#tuya)
+above, and nothing is sent to the cloud before they succeed.
+
+The resource id is the device's own Tuya device id, about 22 characters of
+hex:
+
+```json
+{"id": "t1", "type": "light", "pos": [0, 0], "size": [1, 1],
+ "binding": {"provider": "tuya", "resource": "vdevo16847893501234ab"}}
+```
+
+There is no grammar beyond that: no host, no role, no index. The one piece of
+syntax is the humidity suffix — a temperature-and-humidity sensor is two
+resources, the bare device id for temperature and `<id>/humidity` for the
+second reading.
+
+Actions are the normalized vocabulary: lights take `toggle`, `set_power`,
+`set_brightness` and `set_color_temperature` as the device's functions spec
+allows, covers take `open`, `stop`, `close` and `set_position`, and sensors
+are read-only. A command is acknowledged by delivery, and the panel re-reads
+that device at once, so a tap's pending state clears on the next snapshot
+rather than at the next sweep.
+
+The picker catalog is `GET /resources?provider=tuya`:
+
+```json
+{"catalog_state": "ready", "resources": [
+  {"provider": "tuya", "resource": "vdevo16847893501234ab", "kind": "light",
+   "name": "Hall", "available": true, "state": {"power": "off"}},
+  {"provider": "tuya", "resource": "vdevo16847893505678cd/humidity",
+   "kind": "sensor", "name": "Bedroom humidity", "available": true,
+   "state": {"value": 0}}
+]}
+```
+
+`catalog_state` is `empty`, `loading`, `ready`, or `error`. A cold `empty` or
+`loading` response has no resources and tells the picker to poll with bounded
+backoff. A stale refresh remains `loading` while retaining the last complete
+resource list. `ready` may legitimately contain an empty list. `error` keeps a
+previous complete list when one exists, never a partial replacement, and lets
+the picker offer an explicit retry.
+
+A catalog entry carries what the device list knows — id, kind, the app's name
+— and a placeholder state, not a live reading: the device list carries no data
+point values, the picker renders none, and capabilities arrive with the first
+snapshot a bound resource publishes, which is what a tile reads.
+
+It lists the devices the panel can map — lights, covers, temperature and
+humidity sensors, and metered plugs reporting power — under the names the
+Tuya app gave them. A dual sensor appears twice, bare id and `<id>/humidity`.
+Devices in other categories appear nowhere: not in the catalog, not bound.
+Catalog entries carry a placeholder state; the honest values arrive with the
+first published snapshot once a tile binds.
+
+Bound devices are polled every five seconds. A network failure marks the
+provider `offline` and its tiles stale; rejected credentials or an expired
+cloud quota mark it `error` — the states are the same vocabulary
+[`/status`](#providers-and-get-resources) reports for every provider.
+
 ## What is deliberately absent
 
 - **No HTTPS.** A self-signed certificate on an ESP32 is a worse experience than
   its absence on a local network, and the threat model here is a LAN.
 - **No accounts, no cloud, no telemetry.** The browser talks to the device.
+  The `tuya` provider is the one deliberate exception on the device's own
+  side: its signed requests to the Tuya cloud are what that provider is, and
+  they exist only while it is configured.
 - **No general API rate limiting or origin allow-list** until a concrete
   scenario needs one. PIN attempts are rate-limited separately.
-- **Upstream credentials only go in.** The Home Assistant token and WiFi
-  passphrase are never returned — and the passphrase never enters the
-  configuration document either. The two intentional credential responses are
+- **Upstream secrets only go in.** The Home Assistant token, Tuya Access ID and
+  Access Secret, and the WiFi passphrase are never returned. `GET /tuya`
+  deliberately returns the non-secret region and account UID so the editor can
+  show the current connection — and the
+  passphrase never enters the configuration document either. The two
+  intentional credential responses are
   narrow: `/session` returns the internal credential to the current page, and a
   newly created External API key is returned once.

@@ -50,6 +50,17 @@ static const char *TAG = "store";
 #define KEY_ADMIN_AUTH "admin_auth"
 #define KEY_INTEGRATION_KEYS "int_keys"
 
+/*
+ * Tuya's four credential fields. Only the access secret is a §12 secret; the
+ * other three are private for symmetry, so one rule — no SLATE_KEY_*
+ * constant, no generic access — covers the whole tuple and no serialiser can
+ * read any part of it.
+ */
+#define KEY_TUYA_REGION    "tuya_rg"
+#define KEY_TUYA_ACCESS_ID "tuya_aid"
+#define KEY_TUYA_SECRET    "tuya_sec"
+#define KEY_TUYA_UID       "tuya_uid"
+
 #define ADMIN_AUTH_VERSION 1
 #define ADMIN_PIN_SALT_LEN 16
 #define ADMIN_PIN_HASH_LEN 32
@@ -131,6 +142,7 @@ static char s_device_name[SLATE_DEVICE_NAME_LEN + 1];
 
 static uint32_t s_boot_count;
 static bool s_ha_token_set;
+static bool s_tuya_set;
 static bool s_wifi_configured;
 static bool s_storage_was_reset;
 static bool s_fs_mounted;
@@ -192,7 +204,9 @@ static esp_err_t from_nvs(esp_err_t err)
 static bool key_is_secret(const char *key)
 {
     return strcmp(key, KEY_HA_TOKEN) == 0 || strcmp(key, KEY_WIFI_PASS) == 0 ||
-           strcmp(key, KEY_ADMIN_AUTH) == 0 || strcmp(key, KEY_INTEGRATION_KEYS) == 0;
+           strcmp(key, KEY_ADMIN_AUTH) == 0 || strcmp(key, KEY_INTEGRATION_KEYS) == 0 ||
+           strcmp(key, KEY_TUYA_REGION) == 0 || strcmp(key, KEY_TUYA_ACCESS_ID) == 0 ||
+           strcmp(key, KEY_TUYA_SECRET) == 0 || strcmp(key, KEY_TUYA_UID) == 0;
 }
 
 /* -------------------------------------------------------------------------
@@ -1021,6 +1035,126 @@ esp_err_t slate_store_ha_clear(void)
     return url_err != ESP_OK ? url_err : token_err;
 }
 
+esp_err_t slate_store_tuya_set(const char *region, const char *access_id,
+                               const char *secret, const char *uid)
+{
+    if (region == NULL || access_id == NULL || secret == NULL || uid == NULL ||
+        region[0] == '\0' || access_id[0] == '\0' || secret[0] == '\0' || uid[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strlen(region) > SLATE_TUYA_REGION_MAX_LEN ||
+        strlen(access_id) > SLATE_TUYA_ACCESS_ID_MAX_LEN ||
+        strlen(secret) > SLATE_TUYA_SECRET_MAX_LEN ||
+        strlen(uid) > SLATE_TUYA_UID_MAX_LEN) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    /* One handle, one commit, as in slate_store_ha_set(): a power cut must not
+     * leave half a credential set, which is a configured-looking device that
+     * cannot connect. */
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open_ns(NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_str(nvs, KEY_TUYA_REGION, region);
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, KEY_TUYA_ACCESS_ID, access_id);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, KEY_TUYA_SECRET, secret);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, KEY_TUYA_UID, uid);
+    }
+    err = nvs_finish(nvs, err);
+
+    if (err == ESP_OK) {
+        LOCK();
+        s_tuya_set = true;
+        UNLOCK();
+    }
+    return err;
+}
+
+esp_err_t slate_store_tuya_get(char *region, size_t region_len,
+                               char *access_id, size_t access_id_len,
+                               char *secret, size_t secret_len,
+                               char *uid, size_t uid_len)
+{
+    if (region == NULL || region_len == 0 || access_id == NULL || access_id_len == 0 ||
+        secret == NULL || secret_len == 0 || uid == NULL || uid_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    /* All four from one handle. The caller is about to connect with these, and
+     * a read mixed across two writes — an old region with a new secret — is a
+     * credential set that has never existed. Failing on the first missing
+     * field is what "unset" means for a set that is only valid whole. */
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open_ns(NVS_READONLY, &nvs);
+    if (err != ESP_OK) {
+        return from_nvs(err);
+    }
+
+    size_t len = region_len;
+    err = nvs_get_str(nvs, KEY_TUYA_REGION, region, &len);
+    if (err == ESP_OK) {
+        len = access_id_len;
+        err = nvs_get_str(nvs, KEY_TUYA_ACCESS_ID, access_id, &len);
+    }
+    if (err == ESP_OK) {
+        len = secret_len;
+        err = nvs_get_str(nvs, KEY_TUYA_SECRET, secret, &len);
+    }
+    if (err == ESP_OK) {
+        len = uid_len;
+        err = nvs_get_str(nvs, KEY_TUYA_UID, uid, &len);
+    }
+    nvs_close(nvs);
+    if (err != ESP_OK) {
+        explicit_bzero(access_id, access_id_len);
+        explicit_bzero(secret, secret_len);
+    }
+    return from_nvs(err);
+}
+
+bool slate_store_tuya_is_set(void)
+{
+    /* Cached for the reason slate_store_ha_token_is_set() gives. */
+    return s_tuya_set;
+}
+
+esp_err_t slate_store_tuya_clear(void)
+{
+    /* All four attempted before any failure is reported, so an error on one
+     * field cannot leave the rest of the set behind — slate_store_ha_clear()
+     * gives the reason. */
+    esp_err_t region_err = erase_raw(KEY_TUYA_REGION);
+    esp_err_t access_id_err = erase_raw(KEY_TUYA_ACCESS_ID);
+    esp_err_t secret_err = erase_raw(KEY_TUYA_SECRET);
+    esp_err_t uid_err = erase_raw(KEY_TUYA_UID);
+
+    esp_err_t first_err = region_err;
+    if (first_err == ESP_OK) {
+        first_err = access_id_err;
+    }
+    if (first_err == ESP_OK) {
+        first_err = secret_err;
+    }
+    if (first_err == ESP_OK) {
+        first_err = uid_err;
+    }
+
+    if (first_err == ESP_OK) {
+        LOCK();
+        s_tuya_set = false;
+        UNLOCK();
+    }
+    return first_err;
+}
+
 /* -------------------------------------------------------------------------
  * Station addressing (§9.6)
  * ------------------------------------------------------------------------- */
@@ -1605,6 +1739,10 @@ esp_err_t slate_store_init(void)
     UNLOCK();
 
     s_ha_token_set = key_exists(KEY_HA_TOKEN);
+    /* The set only counts whole, the same condition slate_store_tuya_get()
+     * applies: a tuple missing one field is unset, not partially configured. */
+    s_tuya_set = key_exists(KEY_TUYA_REGION) && key_exists(KEY_TUYA_ACCESS_ID) &&
+                 key_exists(KEY_TUYA_SECRET) && key_exists(KEY_TUYA_UID);
     s_wifi_configured = key_exists(SLATE_KEY_WIFI_SSID);
     admin_auth_record_t admin_auth = {0};
     s_admin_pin_set = admin_auth_read(&admin_auth) == ESP_OK;
@@ -1673,6 +1811,7 @@ esp_err_t slate_store_factory_reset(void)
     STEP(init_nvs(), "reinitialising NVS");
 
     s_ha_token_set = false;
+    s_tuya_set = false;
     s_wifi_configured = false;
     s_admin_pin_set = false;
     memset(&s_integration_keys, 0, sizeof(s_integration_keys));

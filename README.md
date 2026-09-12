@@ -25,10 +25,13 @@ That is the whole idea. A dashboard is a document like the one above, pushed to
 the panel over HTTP — from a drag-and-drop editor the panel itself serves, or
 from a file — so rearranging it costs a request rather than a build. State and
 actions come from providers: **Home Assistant**, over its WebSocket API;
-**direct**, which is any script that can POST JSON and read a WebSocket; and
-**Shelly** and **Onkyo**, which the panel reaches on the LAN by itself. None is
-required by the others, and nothing outside the local network is involved. With
-those last two the panel needs nothing else running at all.
+**direct**, which is any script that can POST JSON and read a WebSocket;
+**Shelly** and **Onkyo**, which the panel reaches on the LAN by itself; and
+**Tuya**, which drives Smart Life devices through the Tuya cloud. None is
+required by the others. With Shelly or Onkyo the panel needs nothing else
+running at all, and apart from the daily update check, the only traffic that
+leaves the local network is what a configured Tuya provider sends to the Tuya
+cloud.
 
 - [What you need](#what-you-need) · [Install](#install) · [First run](#first-run)
 - [Building a dashboard](#building-a-dashboard) · [Providers](#providers) ·
@@ -268,9 +271,10 @@ the next published snapshot showing the new value.
 
 ### Shelly — nothing else running
 
-The one provider where the panel is the only thing that has to be switched on.
-It polls Shelly relays over HTTP on your network, so there is no broker, no
-automation system and no script on a laptop that has to stay awake.
+The one provider where the panel is the only thing that has to be switched on
+and everything stays on your network. It polls Shelly relays over HTTP on your
+network, so there is no broker, no automation system and no script on a laptop
+that has to stay awake.
 
 It has no settings. The binding carries the address, so publishing a dashboard
 is the whole of setting it up:
@@ -318,6 +322,42 @@ that fits. The icon is what stops it looking like a lamp.
 
 Full reference: [`docs/API.md`](docs/API.md#the-onkyo-provider).
 
+### Tuya — Smart Life cloud devices
+
+The provider for devices that live in the Tuya or Smart Life app and offer
+nothing useful on the LAN. The panel talks to the official Tuya cloud — signed
+HTTPS requests every five seconds — and the cloud talks to the devices, so
+nothing else has to be running. The cloud hop is the honest cost: it is the one
+provider whose traffic leaves the local network, and it works only while the
+Tuya cloud and the cloud project's quota do. The free IoT Core trial a hobby
+project runs on expires; when it does, the provider reports `error` and only
+its tiles go stale.
+
+Setup on Tuya's side comes first: a cloud project at iot.tuya.com with the
+Smart Life or Tuya Smart app account linked to it. The project's region,
+Access ID and Access Secret, and the account's UID, go into the editor's
+**Integrations** page. The Access ID and Access Secret are write-only; an
+authenticated editor can read back the region and account UID. The complete
+tuple is tested against the cloud before it replaces a working one.
+
+Devices appear in the resource picker under the names the app gave them, so a
+binding carries the device's own Tuya id — about 22 characters of hex — rather
+than an address:
+
+```json
+{"id": "t1", "type": "light", "pos": [0, 0], "size": [1, 1],
+ "binding": {"provider": "tuya", "resource": "vdevo16847893501234ab"},
+ "label": "Hall"}
+```
+
+Lights answer toggle, on/off, brightness and color temperature; covers answer
+open, stop, close and position; temperature, humidity and power sensors are
+read-only. A temperature-and-humidity sensor is two resources, the bare device
+id and `<id>/humidity`. Devices in other categories do not appear in the
+picker at all.
+
+Full reference: [`docs/API.md`](docs/API.md#the-tuya-provider).
+
 ## Updating
 
 **The panel offers releases, and installs one when you say so.** Once a day it
@@ -334,9 +374,11 @@ The dashboard, authentication state, External API keys, Home Assistant
 credentials and WiFi settings live outside the application partitions and are
 kept across an update.
 
-**That daily check is the only thing the panel sends outside your LAN, and you
-can turn it off.** The same **Firmware updates** panel has a checkbox for it; a
-panel with the check off still updates, it just waits to be asked — *Check now*
+**That daily check is one of only two things the panel sends outside your LAN —
+the other is the signed requests a configured Tuya provider makes to the Tuya
+cloud — and you can turn the check off.** The same **Firmware updates** panel
+has a checkbox for it; a panel with the check off still updates, it just waits
+to be asked — *Check now*
 and *Install* both keep working. The setting is kept on the device, survives a
 reboot, and returns to on after a factory reset. Leaving it on is the default
 because a panel that never hears that a fix exists is its own kind of problem,
@@ -400,10 +442,12 @@ they are worth knowing before the panel goes on a wall.
   panel would render a perfect dashboard on which nothing responds to a tap, and
   the refusal comes back as a generic Home Assistant error rather than as
   "unauthorized", which makes it a slow thing to diagnose.
-- **Credentials only go in.** The Home Assistant token and the WiFi passphrase
-  live in NVS and no endpoint returns either. The passphrase in particular never
-  enters the configuration document, because that document is something people
-  export, import and share.
+- **Secrets only go in.** The Home Assistant token, Tuya Access ID and Access
+  Secret, and the WiFi passphrase live in NVS and no endpoint returns them.
+  `GET /tuya` returns only whether it is configured plus its non-secret region
+  and account UID. The passphrase in particular never enters the configuration
+  document, because that document is something people export, import and
+  share.
 - **The device serves plain HTTP, deliberately.** A self-signed certificate on an
   ESP32 is a worse experience than its absence on a local network: browser
   warnings on every visit, and a private key on a device whose flash can be read

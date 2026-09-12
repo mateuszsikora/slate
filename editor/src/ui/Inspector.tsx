@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 
-import { type Binding, type ProviderStatus, type Resource, type Tile } from '../lib/api'
+import { type Binding, type ProviderStatus, type ResourceCatalog, type Tile } from '../lib/api'
 import { COMPONENTS, bindingFor, definitionFor, withSize, type TileSize } from '../lib/editor'
 import { ResourcePicker } from './ResourcePicker'
 
 interface Props {
   tile: Tile | null
-  providers: Pick<ProviderStatus, 'id' | 'status'>[]
-  onLoadResources: (provider: string) => Promise<Resource[]>
+  providers: Pick<ProviderStatus, 'id' | 'status' | 'reason'>[]
+  onLoadResources: (provider: string) => Promise<ResourceCatalog>
   onUpdate: (tile: Tile) => void
   onDelete: () => void
 }

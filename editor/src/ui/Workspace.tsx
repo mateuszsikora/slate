@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-import type { Config, ProviderStatus, Resource, Tile } from '../lib/api'
+import type { Config, ProviderStatus, ResourceCatalog, Tile } from '../lib/api'
 import {
   definitionFor,
   firstFreePosition,
@@ -18,14 +18,14 @@ import { Inspector } from './Inspector'
 interface Props {
   config: Config | null
   activePageId: string | null
-  providers: Pick<ProviderStatus, 'id' | 'status'>[]
+  providers: Pick<ProviderStatus, 'id' | 'status' | 'reason'>[]
   previewState: 'idle' | 'waiting' | 'sending' | 'live' | 'error'
   previewMessage: string | null
   dirty: boolean
   deviceName: string
   onCreate: () => void
   onChange: (config: Config) => void
-  onLoadResources: (provider: string) => Promise<Resource[]>
+  onLoadResources: (provider: string) => Promise<ResourceCatalog>
   onValidateConfig: (document: string) => Promise<void>
   onPublishConfig: (document: string, config: Config) => Promise<void>
 }

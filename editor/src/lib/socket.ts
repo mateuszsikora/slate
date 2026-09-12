@@ -19,6 +19,7 @@ export type ConnectionState =
 
 export interface StatusFrame {
   providers: Record<string, string>
+  provider_reasons?: Record<string, string>
   wifi: number
   heap_free: number
   lvgl_heap_free: number

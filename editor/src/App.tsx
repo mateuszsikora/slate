@@ -12,7 +12,7 @@ import {
   type Config,
   type DeviceInfo,
   type DeviceStatus,
-  type Resource,
+  type ResourceCatalog,
 } from './lib/api'
 import { deviceAnswersAt, mdnsOrigin, servedByDevice } from './lib/discovery'
 import { DeviceSocket, type ConnectionState, type LogFrame, type StatusFrame } from './lib/socket'
@@ -523,7 +523,7 @@ export function App() {
   }, [acceptDeviceConfig, persistedConfig])
 
   const loadResources = useCallback(
-    async (provider: string): Promise<Resource[]> => {
+    async (provider: string): Promise<ResourceCatalog> => {
       if (token === null) {
         throw new ApiError(401, 'unauthorized')
       }
@@ -581,10 +581,12 @@ export function App() {
       ? Object.entries(heartbeat.providers).map(([id, providerStatus]) => ({
           id,
           status: providerStatus,
+          reason: heartbeat.provider_reasons?.[id],
         }))
       : (status?.providers.map((providerStatus) => ({
           id: providerStatus.id,
           status: providerStatus.status,
+          reason: providerStatus.reason,
         })) ?? [])
   const integrationClient = useMemo(
     () => (token === null ? null : client(token)),
